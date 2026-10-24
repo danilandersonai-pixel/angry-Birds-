@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Звук — предпросмотр</title>
+    <style>
+      :root { --bg: #16324f; --panel: #1f4468; --btn: #2f6ea3; --btn-h: #3d86c4; --txt: #f1f6fb; --muted: #a9c2da; --accent: #ffd21f; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; background: var(--bg); color: var(--txt); font: 14px/1.4 system-ui, sans-serif; }
+      header { position: sticky; top: 0; z-index: 2; background: #0e2338; padding: 10px 16px; display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; box-shadow: 0 2px 8px #0006; }
+      header h1 { font-size: 17px; margin: 0 12px 0 0; }
+      header label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
+      #stats { font: 12px/1.3 ui-monospace, monospace; color: var(--accent); min-width: 320px; }
+      main { padding: 12px 16px 40px; display: grid; gap: 14px; }
+      section { background: var(--panel); border-radius: 10px; padding: 10px 12px 12px; }
+      section h2 { font-size: 14px; margin: 0 0 8px; color: var(--accent); font-weight: 600; }
+      .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+      button { background: var(--btn); color: var(--txt); border: 0; border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer; }
+      button:hover { background: var(--btn-h); }
+      button.live { outline: 1px dashed #ffd21f88; }
+      button.on { background: #2f9a4d; }
+      .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+      input[type='range'] { width: 140px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Звук — предпросмотр</h1>
+      <button id="unlock">Включить звук</button>
+      <label><input type="checkbox" id="sfx" checked /> Звуки</label>
+      <label><input type="checkbox" id="music" checked /> Музыка</label>
+      <label>Громкость <input type="range" id="vol" min="0" max="1" step="0.01" value="1" /></label>
+      <span id="stats">—</span>
+    </header>
+    <main id="main"></main>
+    <script type="module" src="/src/dev/preview-audio.ts"></script>
+  </body>
+</html>
