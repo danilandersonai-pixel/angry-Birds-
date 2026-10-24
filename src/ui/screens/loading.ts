@@ -36,6 +36,9 @@ export class LoadingView implements View {
     this.el = h(
       'section',
       { class: 'scr scr-loading', 'aria-label': S.appTitle },
+      h('div', { class: 'ld-cloud', style: 'left:8%;top:14%' }),
+      h('div', { class: 'ld-cloud', style: 'left:62%;top:8%;scale:1.25;animation-delay:-12s' }),
+      h('div', { class: 'ld-cloud', style: 'left:80%;top:34%;scale:.8;animation-delay:-25s' }),
       h('div', { class: 'ld-ground' }),
       bird,
       h('div', { class: 'ld-logo ts', text: S.appTitle, style: '--stroke: 0.2em; --stroke-c: #6a1408; color: #ffd23a' }),

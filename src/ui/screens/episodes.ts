@@ -7,7 +7,7 @@ import { anim, popIn, shake } from '../anim';
 import type { UiCtx, View } from '../ctx';
 import { button, focusEl, h, starsPill } from '../dom';
 import { icon, starSvg } from '../icons';
-import { S, STARS_ACC, plural, t } from '../strings';
+import { S, STARS, STARS_ACC, plural, t } from '../strings';
 
 export interface EpisodeState {
   ep: EpisodeDef;
@@ -15,8 +15,9 @@ export interface EpisodeState {
   unlocked: boolean;
   got: number;
   total: number;
-  /** Текст требования для закрытого эпизода. */
+  /** Текст требования для закрытого эпизода (полный — для тоста и озвучки, короткий — на карточке). */
   req: string;
+  reqShort: string;
 }
 
 export function episodeStates(ctx: UiCtx): EpisodeState[] {
@@ -27,12 +28,14 @@ export function episodeStates(ctx: UiCtx): EpisodeState[] {
     const unlocked = first !== undefined && ctx.deps.progress.isUnlocked(first, ctx.order);
     const got = ctx.deps.progress.starsTotal(ids);
     let req = '';
+    let reqShort = '';
     if (i > 0) {
       const prev = eps[i - 1]!;
       const n = episodeStarsNeeded(prev.levels.length);
       req = t('episodeLockedReq', { prev: prev.name, n, stars: plural(n, STARS_ACC) });
+      reqShort = t('episodeLockedCard', { n, stars: plural(n, STARS), prev: i });
     }
-    return { ep, index: i, unlocked, got, total: ids.length * 3, req };
+    return { ep, index: i, unlocked, got, total: ids.length * 3, req, reqShort };
   });
 }
 
@@ -112,7 +115,7 @@ export class EpisodesView implements View {
       }
     } else {
       art.append(h('span', { class: 'ep-lock', html: `<span class="btn btn--gray">${icon('lock')}</span>` }));
-      info.append(h('span', { class: 'ep-req ts', text: st.req }));
+      info.append(h('span', { class: 'ep-req ts', text: st.reqShort }));
     }
     card.append(art, info);
     card.addEventListener('click', () => {

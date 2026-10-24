@@ -97,7 +97,7 @@ export function starSvg(kind: 'full' | 'empty', cls = ''): string {
   const body =
     kind === 'full'
       ? `<path class="st-full" d="${STAR_100}"/>` +
-        `<ellipse class="st-gloss" cx="40" cy="30" rx="22" ry="11" transform="rotate(-23 40 30)" clip-path="url(#abui-star-clip)"/>`
+        `<ellipse class="st-gloss" cx="37" cy="41" rx="25" ry="10.5" transform="rotate(-24 37 41)" fill="url(#abui-star-gl)" clip-path="url(#abui-star-clip)"/>`
       : `<path class="st-empty" d="${STAR_100}"/>`;
   return `<svg class="star star--${kind} ${cls}" viewBox="0 0 100 100" aria-hidden="true" focusable="false">${body}</svg>`;
 }
@@ -109,6 +109,7 @@ export const DEFS_SVG =
   `<stop offset="0" stop-color="#FFF59A"/><stop offset=".45" stop-color="#FFC21A"/><stop offset="1" stop-color="#F08A06"/>` +
   `</linearGradient>` +
   `<clipPath id="abui-star-clip"><path d="${STAR_100}"/></clipPath>` +
+  `<linearGradient id="abui-star-gl" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".85"/><stop offset="1" stop-color="#fff" stop-opacity=".05"/></linearGradient>` +
   `<linearGradient id="abui-rib-win" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFD45E"/><stop offset=".5" stop-color="#FF9E1B"/><stop offset="1" stop-color="#E8770C"/></linearGradient>` +
   `<linearGradient id="abui-rib-lose" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FF8A7A"/><stop offset=".5" stop-color="#EE3B2E"/><stop offset="1" stop-color="#C21F16"/></linearGradient>` +
   `<linearGradient id="abui-rib-info" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7DD6FF"/><stop offset=".5" stop-color="#2FA4EC"/><stop offset="1" stop-color="#1A7CC8"/></linearGradient>` +

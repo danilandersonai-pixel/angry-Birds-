@@ -118,7 +118,9 @@ const LAUNCH: Record<BirdType, Syl[]> = {
   // «Йа-а-а!» 0.45 с
   red: [{ at: 0, v: { wave: 'sawtooth', f0: [[0, 500], [70, 760], [300, 720], [450, 600]], gain: 0.53, durMs: 380, env: EV, formants: [...fm('i', 'a', 70), { f: 2800, q: 10, g: 0.6 }], vib: { rate: 6, depth: 30, delayMs: 120 }, growl: { rate: 30, depth: 0.15 } } }],
   // «Уи-и!» 0.25 с
-  blues: [{ at: 0, v: { wave: 'triangle', f0: [[0, 900], [120, 1300], [250, 1250]], gain: 0.47, durMs: 200, env: EVS, formants: fm('u', 'i', 100, 3, 3), body: 0.5, vib: { rate: 9, depth: 40, delayMs: 80 } } }],
+  // Форманта, следящая за F0 (q 3), даёт «тело» тонкому голосу: без неё F2 «у» (950 Гц) совпадает
+  // с F0 900 Гц на старте и звенит ~10 мс пиком на −4 dBFS при тихом остальном звуке.
+  blues: [{ at: 0, v: { wave: 'triangle', f0: [[0, 900], [120, 1300], [250, 1250]], gain: 0.3, durMs: 200, env: { a: 14, d: 60, s: 0.75, r: 60 }, formants: [...fm('u', 'i', 100, 1.2, 1.6), { f: [[0, 1000], [120, 1400], [250, 1350]], q: 3, g: 2.2 }], body: 0.5, vib: { rate: 9, depth: 40, delayMs: 80 } } }],
   // «Йи-ха!» 0.35 с
   chuck: [
     { at: 0, v: { wave: 'sawtooth', f0: [[0, 600], [140, 900]], gain: 0.46, durMs: 120, env: EVS, formants: fm('i', 'i', 1) } },
@@ -205,7 +207,7 @@ export function abilityBlues(s: S, t: number): number {
   let end = playNoiseBurst(ctx, out, t, { buf: nb.white, gain: 0.5, a: 0.5, tau: 8, filts: [{ type: 'highpass', f: 2000 }] });
   [1, 1.12, 0.9].forEach((k, i) => {
     const o = panned(ctx, out, (i - 1) * 0.25);
-    end = max(end, playVoice(ctx, o, t + i * 0.04, { wave: 'triangle', f0: [[0, 900 * k], [80, 1150 * k]], gain: 0.5, durMs: 75, env: EVS, formants: fm('i', 'i', 1, 3, 3), body: 0.5 }));
+    end = max(end, playVoice(ctx, o, t + i * 0.04, { wave: 'triangle', f0: [[0, 900 * k], [80, 1150 * k]], gain: 0.3, durMs: 75, env: EVS, formants: [...fm('i', 'i', 1, 1.5, 2), { f: [[0, 1000 * k], [80, 1250 * k]], q: 3, g: 2 }], body: 0.5 }));
   });
   return max(end, playTone(ctx, out, t, { wave: 'sine', f: [[0, 2600], [30, 3400]], gain: 0.15, a: 1, tau: 20 }));
 }

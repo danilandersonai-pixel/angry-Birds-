@@ -532,6 +532,7 @@ class Session implements GameSession {
     const shot = this.sling.shot(BIRD_DEFS[type].launchScale);
     this.loaded = null;
     view.place(shot.pos.x, shot.pos.y, this.aimAngle);
+    view.birdPose = 'fly';
     this.physics.damageEnabled = true;
     const ent = this.physics.addBird(type, view.id, view.seed, shot.pos, shot.vel, this.aimAngle);
     this.flyers = [createFlyer(ent, this.now, true)];

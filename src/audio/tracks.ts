@@ -11,7 +11,7 @@ import { beginCollect, endCollect } from './synth';
 export type TrackId = 'menu' | 'level';
 
 /** Уровень трека на шине music: эмбиент уровня тише польки (не маскирует разрушения). */
-export const TRACK_GAIN: Readonly<Record<TrackId, number>> = { menu: 1, level: 0.6 };
+export const TRACK_GAIN: Readonly<Record<TrackId, number>> = { menu: 0.8, level: 0.35 };
 
 export interface TrackHandle {
   readonly id: TrackId;

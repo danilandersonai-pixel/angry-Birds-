@@ -596,7 +596,9 @@ function buildGeo(t: TerrainDef, theme: ThemeId): Geo {
         ? P.rock.cap ?? 'none'
         : theme === 'snow'
           ? 'snow'
-          : 'none';
+          : maxY - minY > 1.2 && P.rock.cap === 'moss'
+            ? 'moss'
+            : 'none';
   const T = kind === 'ground' ? edgeThickness(P.ground.edge) : edgeKind === 'snow' ? 0.26 : edgeKind === 'moss' ? 0.14 : 0;
 
   // фестончатый нижний край кромки

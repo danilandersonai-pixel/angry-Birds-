@@ -312,16 +312,28 @@ function measure(theme: ThemeId): Record<string, Stat> {
     const bg = new Background(theme);
     for (const viewH of [15, 35]) {
       const base: ViewInfo = { screenW: 1920, screenH: 1080, camX: viewH === 15 ? 10 : 30, camY: -1.2 + viewH / 2, scale: 1080 / viewH, dpr: 1, time: 0 };
-      bg.draw(ctx, base); // прогрев: построение полос
+      bg.prewarm(base); // прогрев: построение полос под этот вид
+      bg.draw(ctx, base);
       drawTerrain(ctx, TERRAIN, theme, base);
       ctx.getImageData(0, 0, 1, 1);
       const tb: number[] = [];
       const tt: number[] = [];
       const tf: number[] = [];
+      const phases: Record<string, number[]> = {};
       for (let i = 0; i < 40; i++) {
         const v = { ...base, camX: base.camX + i * 0.15, time: i / 60 };
         let t0 = performance.now();
+        if (flush) {
+          let tp = performance.now();
+          bg._phase = (label) => {
+            ctx.getImageData(0, 0, 1, 1);
+            const now = performance.now();
+            (phases[label] ??= []).push(now - tp);
+            tp = performance.now();
+          };
+        }
         bg.draw(ctx, v);
+        bg._phase = null;
         if (flush) ctx.getImageData(0, 0, 1, 1);
         tb.push(performance.now() - t0);
         t0 = performance.now();
@@ -337,6 +349,7 @@ function measure(theme: ThemeId): Record<string, Stat> {
       out[`bg:${tag}`] = stat(tb);
       out[`terrain:${tag}`] = stat(tt);
       out[`fg:${tag}`] = stat(tf);
+      for (const [k, a] of Object.entries(phases)) out[`phase:${k}:${viewH}`] = stat(a);
     }
   }
   return out;
@@ -464,8 +477,16 @@ function build(): void {
         lines.push(`${THEME_INFO[t].name}:`);
         lines.push(`  фон 15 м   запись ${f('bg:record:15')} · растр ${f('bg:raster:15')}`);
         lines.push(`  фон 35 м   запись ${f('bg:record:35')} · растр ${f('bg:raster:35')}`);
-        lines.push(`  рельеф 15  растр ${f('terrain:raster:15')}`);
-        lines.push(`  передн. 15 растр ${f('fg:raster:15')}`);
+        lines.push(`  рельеф 15  запись ${f('terrain:record:15')} · растр ${f('terrain:raster:15')}`);
+        lines.push(`  передн. 15 запись ${f('fg:record:15')} · растр ${f('fg:raster:15')}`);
+        if (params.get('phases') === '1')
+          lines.push(
+            '  фазы 15: ' +
+              Object.keys(m)
+                .filter((k) => k.startsWith('phase:') && k.endsWith(':15'))
+                .map((k) => `${k.split(':')[1]} ${m[k].avg.toFixed(2)}`)
+                .join(', '),
+          );
       }
       perfEl.textContent = lines.join('\n');
       (window as unknown as { __perf: unknown }).__perf = res;

@@ -135,11 +135,11 @@ export class WinView implements OverlayView {
     for (const b of this.btns) b.setAttribute('aria-disabled', 'true');
 
     this.panel.append(
+      h('div', { class: 'res-rays-clip', 'aria-hidden': 'true' }, h('div', { class: 'res-glow' }), h('div', { class: 'res-rays' })),
       stars,
       h('div', { class: 'res-label', text: S.winScore }),
       this.scoreEl,
-      this.bestEl,
-      this.badge,
+      h('div', { class: 'res-best-row' }, this.bestEl, this.badge),
       ...(msg ? [h('div', { class: 'res-msg', text: msg })] : []),
       h('div', { class: 'res-btns' }, ...this.btns),
     );
@@ -252,7 +252,7 @@ export class WinView implements OverlayView {
 
   private showBadge(animate: boolean): void {
     this.badge.style.visibility = 'visible';
-    this.bestEl.textContent = t('winBest', { score: fmt(Math.max(this.r.best, this.r.score)) });
+    this.bestEl.textContent = '';
     this.ctx.sfx('newRecord');
     if (animate && !motion.reduced) {
       const a = anim(

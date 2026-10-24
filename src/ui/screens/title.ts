@@ -44,9 +44,8 @@ export class TitleView implements View {
     // талисманы вокруг логотипа (готовые спрайты персонажей)
     const red = h('div', { class: 'logo-mascot tt-red' }, characterCanvas('bird', 'red', 'aim', 66));
     const pig = h('div', { class: 'logo-mascot tt-pig' }, characterCanvas('pig', 'medium', 'laugh', 50));
-    const chuck = h('div', { class: 'logo-mascot tt-chuck' }, characterCanvas('bird', 'chuck', 'fly', 38));
     logo.prepend(red);
-    logo.append(pig, chuck);
+    logo.append(pig);
 
     this.play = button({
       color: 'green',

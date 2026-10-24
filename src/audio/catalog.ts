@@ -26,6 +26,8 @@ export interface SoundDef {
   param?: number;
   /** Ожидаемая длина выше −50 дБ, мс — только там, где она указана в docs/research/05-audio.md §8, §13. */
   expectMs?: number;
+  /** Подстройка громкости, дБ (калибровка по громкости, см. LOUDNESS_TRIM_DB). */
+  trimDb: number;
   fn: (s: F.S, t: number, param: number) => number;
 }
 
@@ -42,7 +44,28 @@ const LAUNCH_MS: Record<BirdType, number> = { red: 485, blues: 252, chuck: 403, 
 const TIER_I = [0.15, 0.5, 0.9] as const;
 const TIER_RU = ['лёгкий', 'средний', 'сильный'] as const;
 
-const defs: SoundDef[] = [
+/**
+ * Калибровка «весомости»: рецепты из 05-audio выровнены по ПИКУ, а слышим мы громкость.
+ * Поправки, дБ, посчитаны по максимальной моментальной громкости (BS.1770, окно 400 мс) офлайн-рендера
+ * через игровой граф (scripts/render-audio.mjs) к целям класса, LUFS:
+ *   взрывы −13 · крик при запуске −13 (Синие −14.5, Теренс −14) · способности −15 · разрушения −16 · смех/гибель свиней −17
+ *   реплика выбора −19 · «уф» −20 · трещины, удары (сильные) −20…−21 · лёд −17 · земля −21 · захват рогатки −27
+ *   звёзды −13/−12/−11 · бонус −14 · джинглы −14/−16 · UI −23…−24 · hover −36.
+ */
+export const LOUDNESS_TRIM_DB: Readonly<Record<string, number>> = {
+  'slingGrab': 1, 'hop': -1, 'launch:red': -2.5, 'hurt:red': 1, 'launch:blues': -4.5, 'select:blues': -3.5,
+  'hurt:blues': -4, 'select:chuck': 3, 'launch:bomb': 2, 'select:bomb': 2, 'hurt:bomb': 3, 'launch:matilda': 1.5,
+  'select:matilda': -1.5, 'hurt:matilda': -5.5, 'launch:hal': -1.5, 'hurt:hal': -1, 'launch:terence': 2.5, 'select:terence': 2,
+  'hurt:terence': 5.5, 'launch:silver': -5.5, 'select:silver': -2.5, 'hurt:silver': -6, 'feather': 2, 'ab:silver': -8.5,
+  'ab:bombSwell': -2, 'fuse': -4, 'iceHit:0': -3.5, 'iceHit:1': -3.5, 'iceHit:2': -3.5, 'ground:0': -2,
+  'ground:1': -1.5, 'woodBreak': 2, 'iceShatter': -1, 'boom:tnt': 1.5, 'boom:bomb': 1.5, 'boom:egg': 2,
+  'helmet': -4.5, 'star:0': -1, 'star:1': -1.5, 'star:2': -2.5, 'bonus': -2.5, 'scoreDone': -3,
+  'jingle:win': 2, 'jingle:lose': 2, 'ui:click': 1.5, 'ui:toggleOn': -2, 'ui:toggleOff': -2, 'ui:popIn': -2,
+  'ui:locked': -4, 'ui:whoosh': -1, 'ui:hover': 7.5,
+};
+
+type DefIn = Omit<SoundDef, 'trimDb'>;
+const defs0: DefIn[] = [
   // ── рогатка ──
   { key: 'slingGrab', group: 'sling', label: 'Захват', cat: 'sling', dur: 0.25, bake: 1, prio: 0, expectMs: 140, fn: (s, t) => F.slingGrab(s, t) },
   { key: 'slingStretch', group: 'sling', label: 'Скрип натяжения', cat: 'sling', dur: 0.3, bake: 0, prio: 0, param: 0.6, expectMs: 120, fn: (s, t, p) => F.slingStretch(s, t, p) },
@@ -52,7 +75,7 @@ const defs: SoundDef[] = [
   { key: 'hop', group: 'sling', label: 'Прыжок на рогатку', cat: 'sling', dur: 0.6, bake: 1, prio: 0, expectMs: 480, fn: (s, t) => F.birdHop(s, t) },
 
   // ── птицы ──
-  ...BIRDS.flatMap((b): SoundDef[] => [
+  ...BIRDS.flatMap((b): DefIn[] => [
     { key: `launch:${b}`, group: 'birds', label: `${BIRD_RU[b]}: крик`, cat: 'birdVox', dur: 0.85, bake: 1, prio: b === 'red' ? 0 : 1, expectMs: LAUNCH_MS[b], fn: (s, t) => F.birdLaunch(s, t, b) },
     { key: `select:${b}`, group: 'birds', label: `${BIRD_RU[b]}: выбор`, cat: 'birdVox', dur: 0.6, bake: 1, prio: b === 'red' ? 0 : 1, fn: (s, t) => F.birdSelect(s, t, b) },
     { key: `hurt:${b}`, group: 'birds', label: `${BIRD_RU[b]}: «уф»`, cat: 'birdVox', dur: 0.35, bake: 1, prio: b === 'red' ? 0 : 1, fn: (s, t) => F.birdHurt(s, t, b) },
@@ -71,20 +94,20 @@ const defs: SoundDef[] = [
 
   // ── материалы ──
   ...(['wood', 'ice', 'stone'] as const).flatMap((m) =>
-    TIER_I.map((I, ti): SoundDef => ({
+    TIER_I.map((I, ti): DefIn => ({
       key: `${m}Hit:${ti}`, group: 'material', label: `${m === 'wood' ? 'Дерево' : m === 'ice' ? 'Лёд' : 'Камень'}: удар ${TIER_RU[ti]}`,
       cat: 'impact', dur: m === 'ice' ? 1.6 : 0.7, bake: 3, prio: 0,
       expectMs: m === 'wood' ? [306, 380, 448][ti]! : m === 'ice' ? [653, 900, 1117][ti]! : [250, 300, 355][ti]!,
       fn: (s, t) => (m === 'wood' ? F.woodHit(s, t, I) : m === 'ice' ? F.iceHit(s, t, I) : F.stoneHit(s, t, I)),
     })),
   ),
-  ...[0.3, 0.9].map((I, ti): SoundDef => ({
+  ...[0.3, 0.9].map((I, ti): DefIn => ({
     key: `ground:${ti}`, group: 'material', label: `Земля: удар ${ti ? 'сильный' : 'лёгкий'}`, cat: 'impact', dur: 0.5, bake: 2, prio: 0, expectMs: 331,
     fn: (s, t) => F.groundThud(s, t, I),
   })),
   { key: 'pigBump', group: 'material', label: 'Свинья: «бонк»', cat: 'impact', dur: 0.3, bake: 2, prio: 0, expectMs: 206, fn: (s, t) => F.pigBump(s, t) },
   ...(['wood', 'ice', 'stone'] as const).flatMap((m) =>
-    [1, 2, 3].map((st): SoundDef => ({
+    [1, 2, 3].map((st): DefIn => ({
       key: `${m}Crack:${st}`, group: 'material', label: `${m === 'wood' ? 'Дерево' : m === 'ice' ? 'Лёд' : 'Камень'}: трещина ${st}`,
       cat: 'break', dur: 0.5, bake: 2, prio: 0, expectMs: m === 'wood' ? 253 : m === 'ice' ? 266 : 380,
       fn: (s, t) => (m === 'wood' ? F.woodCrack(s, t, st) : m === 'ice' ? F.iceCrack(s, t, st) : F.stoneCrack(s, t, st)),
@@ -96,14 +119,14 @@ const defs: SoundDef[] = [
   { key: 'rubble', group: 'material', label: 'Обрушение (обломки)', cat: 'break', dur: 1.4, bake: 2, prio: 1, expectMs: 1175, fn: (s, t) => F.rubble(s, t, 6) },
 
   // ── взрывы ──
-  ...(['tnt', 'bomb', 'egg'] as const).map((src): SoundDef => ({
+  ...(['tnt', 'bomb', 'egg'] as const).map((src): DefIn => ({
     key: `boom:${src}`, group: 'explosion', label: `Взрыв: ${src === 'tnt' ? 'TNT' : src === 'bomb' ? 'Бомб' : 'яйцо'}`,
     cat: 'explosion', dur: 3.2, bake: 2, prio: src === 'tnt' ? 0 : 1, send: 0.25, expectMs: src === 'tnt' ? 1959 : src === 'bomb' ? 1757 : 1768,
     fn: (s, t) => F.explosion(s, t, src),
   })),
 
   // ── свиньи ──
-  ...PIGS.flatMap((p): SoundDef[] => [
+  ...PIGS.flatMap((p): DefIn[] => [
     { key: `pigGrunt:${p}`, group: 'pig', label: `Хрюк: ${PIG_RU[p]}`, cat: 'pigVox', dur: 0.45, bake: 1, prio: 1, expectMs: 305, fn: (s, t) => F.pigGrunt(s, t, p) },
     { key: `pigHurt:${p}`, group: 'pig', label: `Ушиб: ${PIG_RU[p]}`, cat: 'pigVox', dur: 0.3, bake: 1, prio: 0, expectMs: 214, fn: (s, t) => F.pigHurt(s, t, p) },
     { key: `pigLaugh:${p}`, group: 'pig', label: `Смех: ${PIG_RU[p]}`, cat: 'pigVox', dur: 1.0, bake: 1, prio: 1, expectMs: p === 'king' ? 845 : 560, fn: (s, t) => F.pigLaugh(s, t, p) },
@@ -113,7 +136,7 @@ const defs: SoundDef[] = [
   { key: 'helmet', group: 'pig', label: 'Каска слетела', cat: 'impact', dur: 1.5, bake: 1, prio: 1, expectMs: 1114, fn: (s, t) => F.helmetClang(s, t) },
 
   // ── награды (живой синтез: длинные колокольные хвосты) ──
-  ...[0, 1, 2].map((i): SoundDef => ({
+  ...[0, 1, 2].map((i): DefIn => ({
     key: `star:${i}`, group: 'reward', label: `Звезда ${i + 1}`, cat: 'reward', dur: 4.5, bake: 0, prio: 2, expectMs: i === 2 ? 3758 : 3531,
     fn: (s, t) => F.star(s, t, i),
   })),
@@ -126,11 +149,13 @@ const defs: SoundDef[] = [
   { key: 'jingle:lose', group: 'reward', label: 'Джингл поражения', cat: 'reward', dur: 2.8, bake: 0, prio: 2, expectMs: 2396, fn: (s, t) => playJingle(s.ctx, s.nb, s.out, DEFEAT, t, 0.8) },
 
   // ── интерфейс ──
-  ...(['click', 'back', 'toggleOn', 'toggleOff', 'popIn', 'locked', 'whoosh', 'hover'] as const).map((u): SoundDef => ({
+  ...(['click', 'back', 'toggleOn', 'toggleOff', 'popIn', 'locked', 'whoosh', 'hover'] as const).map((u): DefIn => ({
     key: `ui:${u}`, group: 'ui', label: `UI: ${u}`, cat: 'ui', dur: 0.65, bake: 1, prio: 2,
     fn: (s, t) => F.ui(s, t, u),
   })),
 ];
+
+const defs: SoundDef[] = defs0.map((d) => ({ ...d, trimDb: LOUDNESS_TRIM_DB[d.key] ?? 0 }));
 
 /** Все звуки по ключу. */
 export const SOUNDS: ReadonlyMap<string, SoundDef> = new Map(defs.map((d) => [d.key, d]));
@@ -138,4 +163,9 @@ export const SOUND_LIST: readonly SoundDef[] = defs;
 
 export function soundDef(key: string): SoundDef | undefined {
   return SOUNDS.get(key);
+}
+
+/** Линейный множитель громкости звука (подстройка калибровки). */
+export function trimGain(d: SoundDef): number {
+  return 10 ** (d.trimDb / 20);
 }

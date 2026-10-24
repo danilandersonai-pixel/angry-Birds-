@@ -27,6 +27,7 @@ export const S = {
   starsOf: '{got}/{total}',
   episodeLockedReq: 'Пройдите «{prev}» и соберите {n} {stars}',
   episodeLockedShort: 'Эпизод закрыт',
+  episodeLockedCard: 'Нужно {n} {stars} в эпизоде {prev}',
   episodeUnlocked: 'Открыт эпизод «{name}»!',
   episodeAria: 'Эпизод {n} «{name}»: {got} из {total} звёзд',
   episodeAriaLocked: 'Эпизод {n} «{name}», закрыт. {req}',

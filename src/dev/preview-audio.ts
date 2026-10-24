@@ -6,7 +6,7 @@
 import type { GameEvent } from '../core/events';
 import type { ThemeId } from '../core/types';
 import { AudioEngine } from '../audio/AudioEngine';
-import { type SoundDef, type SoundGroup, SOUND_LIST, soundDef } from '../audio/catalog';
+import { type SoundDef, type SoundGroup, SOUND_LIST, soundDef, trimGain } from '../audio/catalog';
 import { type CompParams, createMixGraph } from '../audio/graph';
 import { CAT_MIX } from '../audio/mix';
 import { makeNoiseBank, makeTanhCurve, mulberry32 } from '../audio/noise';
@@ -70,7 +70,7 @@ function sfxItem(def: SoundDef, name = def.key.replace(/:/g, '_'), param = def.p
       if (chain) {
         const g = graph(oc);
         const inp = oc.createGain();
-        inp.gain.value = CAT_MIX[def.cat].gain;
+        inp.gain.value = CAT_MIX[def.cat].gain * trimGain(def);
         inp.connect(g.busFor(def.cat));
         if (def.send) {
           const sg = oc.createGain();

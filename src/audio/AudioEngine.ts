@@ -11,7 +11,7 @@
 import type { GameEvent, SessionState } from '../core/events';
 import type { PigType, ThemeId } from '../core/types';
 import { BAKE_LIST, bakeAll, type OfflineCtor } from './bake';
-import { soundDef } from './catalog';
+import { soundDef, trimGain } from './catalog';
 import { BUS_LEVEL, createMixGraph, type MixGraph } from './graph';
 import {
   type Cue, type FrameEvent, type Listener, type PlanState, type PlayCue, type RewardKind, type UiSoundName,
@@ -430,8 +430,8 @@ export class AudioEngine {
     const def = soundDef(q.key);
     if (!c || !g || !def || c.state !== 'running') return null;
     const cat: Cat = q.cat;
-    const gain = q.gain * CAT_MIX[cat].gain;
-    if (!(gain >= 0.02)) return null; // слишком тихо/далеко — не тратим голос
+    if (!(q.gain * CAT_MIX[cat].gain >= 0.02)) return null; // слишком тихо/далеко — не тратим голос
+    const gain = q.gain * CAT_MIX[cat].gain * trimGain(def);
     const now = c.currentTime;
     const slot = this.pool.acquire(q.key, cat, q.score * CAT_MIX[cat].prio, cooldownFor(q.key, cat), now);
     if (!slot) return null;

@@ -202,6 +202,7 @@ export class UI {
   showPause(): void {
     if (this._screen !== 'game' || this.overlay) return;
     this.hideHint();
+    this.hud?.hideLevelLabel();
     const v = new PauseView(this.ctx, this.level, this.birdsLeft);
     this.openOverlay(v);
     this.announce(S.a11yPaused);
@@ -218,6 +219,7 @@ export class UI {
     if (this._screen !== 'game') return;
     this.closeOverlay(true);
     this.hideHint();
+    this.hud?.setDim(true);
     this.openOverlay(new WinView(this.ctx, r));
   }
 
@@ -225,6 +227,7 @@ export class UI {
     if (this._screen !== 'game') return;
     this.closeOverlay(true);
     this.hideHint();
+    this.hud?.setDim(true);
     this.openOverlay(new LoseView(this.ctx, r.levelId));
   }
 
@@ -501,6 +504,7 @@ export class UI {
     const v = this.overlay;
     if (!v) return;
     this.overlay = null;
+    this.hud?.setDim(false);
     v.el.setAttribute('inert', '');
     if (immediate) {
       v.destroy?.();
@@ -769,7 +773,12 @@ export class UI {
     return h(
       'div',
       { class: 'rotate', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'abui-rot-title', 'data-testid': 'rotate-overlay' },
-      h('div', { class: 'rotate-phone', html: icon('phone') }),
+      h('div', {
+        class: 'rotate-phone',
+        html:
+          icon('phone') +
+          '<svg class="rotate-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 6.5A9.5 9.5 0 0 0 7 3.6"/><path d="M8.6 1.6 6.6 3.7l2.6 1.2"/></svg>',
+      }),
       h('h2', { class: 'ts', id: 'abui-rot-title', text: S.rotateTitle }),
       h('p', { text: S.rotateBody }),
       anyway,

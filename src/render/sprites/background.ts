@@ -1,10 +1,18 @@
 // Параллакс-фон трёх тем: небо, солнце, облака (дрейф), горы/острова, море, холмы, деревья — плюс
-// передний план и (реэкспорт) рельеф. Слои — бесшовные горизонтальные полосы, запечённые в offscreen-холсты
-// по ступеням масштаба; каждый кадр — только drawImage и пара заливок (см. docs/research/04-visual.md §2–§5).
+// передний план и (реэкспорт) рельеф. Слои — бесшовные горизонтальные полосы, запечённые в offscreen-холсты;
+// каждый кадр — только drawImage и пара заливок (см. docs/research/04-visual.md §2–§5).
 //
 // Математика слоя (04 §3.1): sL = sRef·(s/sRef)^f, sRef = H/15;
 //   X = W/2 + (xL − camX·f)·sL;  Y = H/2 − (yL + baseY − camY·f)·sL.
-// Ниже полосы каждый непрозрачный слой заливается своим нижним цветом до низа экрана — щелей нет при любом зуме.
+// Ниже полосы непрозрачный слой заливается своим нижним цветом — щелей нет при любом зуме и соотношении сторон.
+//
+// Производительность:
+//  • отсечение перерисовки: у каждого слоя известна «линия непрозрачности»; всё, что ниже линии следующих
+//    слоёв, не рисуется (каждый пиксель экрана закрашивается ≈ 1 раз + прозрачные края силуэтов);
+//  • полосы режутся на столбцы по высоте содержимого — прозрачный верх полосы не блитится;
+//  • при неподвижном зуме полосы и облака строятся ровно под текущий масштаб и рисуются 1:1 (быстрый путь
+//    и на CPU-растре); пока зум меняется — ближайшая готовая полоса с масштабированием, не больше
+//    одной перестройки за кадр.
 
 import type { ThemeId } from '../../core/types';
 import { createCanvas, ctx2d, type AnyCanvas, type Ctx2D } from '../canvas';
@@ -74,7 +82,7 @@ const PAL: Record<ThemeId, Palette> = {
       [1, '#E4F6F6'],
     ],
     sun: { x: 0.8, y: 0.15, r: 0.055, core: '#FFF8D8', glow: '#FFF1B0', glowA: 0.6 },
-    cloud: { top: '#FFFFFF', bottom: '#CFE5F4', shade: '#B3D1E9', alpha: 0.96 },
+    cloud: { top: '#FFFFFF', bottom: '#D6E9F6', shade: '#A9C9E4', alpha: 0.97 },
     fog: '#DDF3F7',
     mountains: { light: '#BFE0EE', fill: '#9DCBE0', shade: '#7FB0CB' },
     mountainsBack: { light: '#D3EBF4', fill: '#BCDDEB', shade: '#A8CFE2' },
@@ -99,10 +107,10 @@ const PAL: Record<ThemeId, Palette> = {
       trunk: '#8A5C34',
       trunkDark: '#5A3A20',
       leaf: '#4AA33A',
-      leafLight: '#86D152',
+      leafLight: '#8AD455',
       leafDark: '#2B7428',
       berm: '#2F7D2B',
-      bermLight: '#58AD3E',
+      bermLight: '#62B444',
       bermDark: '#215F20',
       flowers: ['#FFE04A', '#FFFFFF', '#FF8FB4'],
     },
@@ -117,7 +125,7 @@ const PAL: Record<ThemeId, Palette> = {
       [1, '#FFD27C'],
     ],
     sun: { x: 0.64, y: 0.5, r: 0.085, core: '#FFF0B4', glow: '#FFB25A', glowA: 0.7, onHorizon: true },
-    cloud: { top: '#FFD6AE', bottom: '#C9668A', shade: '#A9507E', alpha: 0.93 },
+    cloud: { top: '#FFD9B4', bottom: '#D9779A', shade: '#A44E80', alpha: 0.95 },
     fog: '#FFB98A',
     mountains: { light: '#8C568F', fill: '#6C3F7C', shade: '#55306A' },
     sea: { top: '#F7B06C', mid: '#D9787A', bottom: '#7E4482', sparkle: '#FFE8B0', line: '#FFD7A0' },
@@ -138,8 +146,8 @@ const PAL: Record<ThemeId, Palette> = {
       leafLight: '#5C8E46',
       leafDark: '#1F4430',
       rim: '#FFB070',
-      berm: '#C9875C',
-      bermLight: '#E7A86C',
+      berm: '#D08E5E',
+      bermLight: '#EDB070',
       bermDark: '#1F4430',
       flowers: ['#FF6F61', '#FFD27A'],
     },
@@ -153,7 +161,7 @@ const PAL: Record<ThemeId, Palette> = {
       [1, '#EAF4FB'],
     ],
     sun: { x: 0.18, y: 0.13, r: 0.045, core: '#FFFFFF', glow: '#FFFFFF', glowA: 0.55 },
-    cloud: { top: '#FFFFFF', bottom: '#C8D9EC', shade: '#AFC4DE', alpha: 0.92 },
+    cloud: { top: '#FFFFFF', bottom: '#D2E1F2', shade: '#A6BDDB', alpha: 0.95 },
     fog: '#E4F2FB',
     mountains: { light: '#C6D5EE', fill: '#9BB2D7', shade: '#7A92C0', snow: '#F6FAFF', snowShade: '#CFDDF0' },
     mountainsBack: { light: '#DCE6F5', fill: '#C2D2EA', shade: '#AABCDC', snow: '#FAFCFF', snowShade: '#E0E9F6' },
@@ -179,7 +187,7 @@ const PAL: Record<ThemeId, Palette> = {
       bermLight: '#FFFFFF',
       bermDark: '#B9CBE3',
     },
-    fg: { a: '#EAF2FB', b: '#BACDE5', c: '#FFFFFF', accent: [] },
+    fg: { a: '#F4F8FD', b: '#BCCDE4', c: '#FFFFFF', accent: [] },
     snowfall: true,
   },
 };
@@ -191,7 +199,7 @@ export const THEME_INFO: Record<ThemeId, { name: string; skyTop: string; skyBott
   snow: { name: 'Снежные вершины', skyTop: '#2766BE', skyBottom: '#EAF4FB', accent: '#9FC8F0' },
 };
 
-// ───────────────────────── слои ─────────────────────────
+// ───────────────────────── параметры кэша ─────────────────────────
 
 /** Высота вида рогатки, м — масштаб, при котором слои рисуются «как задуманы». */
 const AIM_VIEW_H = 15;
@@ -199,13 +207,40 @@ const AIM_VIEW_H = 15;
 const TILE_MAX_PX = 2048;
 /** Предел ширины полосы на период, px (память). */
 const STRIP_MAX_PX = 7168;
-/** Сколько полос (ступеней масштаба) держать на слой. */
+/** Сколько полос держать на слой. */
 const STRIPS_PER_LAYER = 2;
-/** Перестраивать полосу, если её масштаб отличается от нужного сильнее этого (гистерезис). */
-const REBUILD_LO = 0.8;
-const REBUILD_HI = 1.25;
-/** Новую полосу строим, когда зум не менялся столько, мс (кроме самой первой). */
+/** Новую полосу / облака строим, когда масштаб не менялся столько, мс (кроме самой первой). */
 const STABLE_MS = 250;
+/** Ширина столбца для обрезки прозрачного верха полосы, м слоя. */
+const BIN_M = 1;
+
+// ───────────────────────── типы слоёв ─────────────────────────
+
+/** Максимальная высота содержимого по столбцам периода (для обрезки прозрачного верха). */
+class Tops {
+  readonly n: number;
+  readonly v: Float32Array;
+  constructor(period: number) {
+    this.n = Math.ceil(period / BIN_M);
+    this.v = new Float32Array(this.n).fill(-1e9);
+  }
+  /** Содержимое в [x0, x1] (м слоя, с переносом через период) поднимается до top. */
+  mark(x0: number, x1: number, top: number): void {
+    const i0 = Math.floor(x0 / BIN_M);
+    const i1 = Math.floor(x1 / BIN_M);
+    for (let i = i0; i <= i1; i++) {
+      const k = ((i % this.n) + this.n) % this.n;
+      if (top > this.v[k]) this.v[k] = top;
+    }
+  }
+}
+
+interface BuildOut {
+  /** Цвет нижнего края (заливка до низа экрана) или null — слой не непрозрачен снизу. */
+  fill: string | null;
+  /** Высота над базой (м слоя), ниже которой полоса непрозрачна по всей ширине. */
+  opaqueTop: number;
+}
 
 interface StripLayer {
   id: string;
@@ -214,29 +249,37 @@ interface StripLayer {
   baseY: number;
   height: number;
   depth: number;
+  /** Доля разрешения при dpr > 1.25 (экономия памяти; при dpr ≈ 1 — всегда 1:1). */
   res: number;
   seed: number;
-  /** Нарисовать один период в «метрах слоя» (Y вверх, 0 — база). Вернуть цвет нижнего края (для заливки). */
-  build: (c: Ctx2D, L: StripLayer, P: Palette) => string | null;
+  /** Нарисовать один период в «метрах слоя» (Y вверх, 0 — база) и отметить высоты содержимого. */
+  build: (c: Ctx2D, L: StripLayer, P: Palette, tops: Tops) => BuildOut;
   /** Дымка после построения (атмосферная перспектива). */
   haze?: number;
 }
 
+/** Кусок полосы для блита: тайл, столбец [sx, sx+sw) и верх содержимого sy (px тайла). */
+interface Piece {
+  tile: number;
+  sx: number;
+  sw: number;
+  sy: number;
+}
+
 interface Strip {
   tiles: AnyCanvas[];
-  /** Начало каждого тайла по X, м слоя. */
+  /** Начало тайла в px полосы. */
   tileX: number[];
-  tileW: number[];
+  totalPx: number;
   ppm: number;
   hPx: number;
   fill: string | null;
-  bucket: number;
+  opaqueTop: number;
+  pieces: Piece[];
 }
 
 interface LayerState {
   strips: Strip[];
-  wantBucket: number;
-  wantSince: number;
 }
 
 interface CloudItem {
@@ -247,28 +290,21 @@ interface CloudItem {
 }
 
 interface CloudLayer {
-  id: string;
   f: number;
   period: number;
   baseY: number;
   drift: number;
-  res: number;
   items: CloudItem[];
 }
 
 const layerScale = (v: ViewInfo, sRef: number, f: number): number => sRef * Math.pow(v.scale / sRef, f);
-const bucketOf = (ppm: number): number => Math.pow(2, Math.round(4 * Math.log2(Math.max(1e-3, ppm))) / 4);
+const nowMs = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
 function makeClouds(seed: number, count: number, P: number, wMin: number, wMax: number, yMin: number, yMax: number): CloudItem[] {
   const r = rand(seed);
   const out: CloudItem[] = [];
   for (let i = 0; i < count; i++) {
-    out.push({
-      x: ((i + r() * 0.6) * P) / count,
-      y: lerp(yMin, yMax, r()),
-      w: lerp(wMin, wMax, r()),
-      seed: Math.floor(r() * 1e6),
-    });
+    out.push({ x: ((i + r() * 0.6) * P) / count, y: lerp(yMin, yMax, r()), w: lerp(wMin, wMax, r()), seed: Math.floor(r() * 1e6) });
   }
   return out;
 }
@@ -307,6 +343,15 @@ function sample(P: number, perM: number, H: (x: number) => number): Array<[numbe
   return pts;
 }
 
+function markProfile(tops: Tops, pts: Array<[number, number]>, extra: number): number {
+  let min = Infinity;
+  for (const [x, y] of pts) {
+    tops.mark(x, x, y + extra);
+    min = Math.min(min, y);
+  }
+  return min;
+}
+
 function silhouette(c: Ctx2D, pts: Array<[number, number]>, bottom: number): void {
   c.beginPath();
   c.moveTo(pts[0][0], bottom);
@@ -334,21 +379,29 @@ function slopeShade(c: Ctx2D, pts: Array<[number, number]>, kx: number, ky: numb
   }
 }
 
+function strokeLine(c: Ctx2D, pts: Array<[number, number]>, dy: number): void {
+  c.beginPath();
+  pts.forEach((p, i) => (i ? c.lineTo(p[0], p[1] + dy) : c.moveTo(p[0], p[1] + dy)));
+  c.stroke();
+}
+
 // ───────────────────────── построители полос ─────────────────────────
 
-/** Горный хребет: градиент, теневые склоны, снег, светлый гребень, дымка у подножия. */
+/** Горный хребет: градиент, теневые склоны, снег, светлый гребень, дымка у подножия. Возвращает нижний цвет и минимум профиля. */
 function drawRange(
   c: Ctx2D,
   L: StripLayer,
   M: RangePal,
   fog: string,
   H: (x: number) => number,
-  opt: { fogA: number; fogTop: number; snowFrac: number; topY: number; haze?: number },
-): string {
+  tops: Tops,
+  opt: { fogA: number; fogTop: number; snowFrac: number },
+): [string, number] {
   const P = L.period;
   const pts = sample(P, 6, H);
+  const minH = markProfile(tops, pts, 0.15);
   const bottomCol = mix(M.fill, fog, 0.5);
-  const g = c.createLinearGradient(0, opt.topY, 0, -L.depth);
+  const g = c.createLinearGradient(0, L.height, 0, -L.depth);
   g.addColorStop(0, M.light);
   g.addColorStop(0.5, M.fill);
   g.addColorStop(1, bottomCol);
@@ -365,14 +418,14 @@ function drawRange(
     for (const p of pts) maxH = Math.max(maxH, p[1]);
     const snowY = maxH * opt.snowFrac;
     const snow = new Path2D();
-    snow.moveTo(0, opt.topY + 1);
+    snow.moveTo(0, L.height + 1);
     for (let i = 0; i < pts.length; i++) {
       const x = pts[i][0];
       // рваный нижний край снега; периодичен по P (целые частоты)
       const w = 0.4 * Math.sin((TAU * 23 * x) / P) + 0.25 * Math.sin((TAU * 51 * x) / P + 1) + 0.12 * Math.sin((TAU * 97 * x) / P);
       snow.lineTo(x, snowY + w - Math.max(0, pts[i][1] - snowY) * 0.08);
     }
-    snow.lineTo(P, opt.topY + 1);
+    snow.lineTo(P, L.height + 1);
     snow.closePath();
     c.fillStyle = M.snow;
     c.fill(snow);
@@ -384,21 +437,19 @@ function drawRange(
     c.restore();
   }
   // светлый гребень (контровой свет)
-  c.beginPath();
-  pts.forEach((p, i) => (i ? c.lineTo(p[0], p[1]) : c.moveTo(p[0], p[1])));
   c.lineWidth = 0.14;
   c.strokeStyle = rgba(M.snow ?? M.light, 0.7);
-  c.stroke();
+  strokeLine(c, pts, 0);
   const fg = c.createLinearGradient(0, opt.fogTop, 0, -L.depth * 0.3);
   fg.addColorStop(0, rgba(fog, 0));
   fg.addColorStop(1, rgba(fog, opt.fogA));
   c.fillStyle = fg;
   c.fillRect(0, -L.depth, P, opt.fogTop + L.depth);
   c.restore();
-  return mix(bottomCol, fog, opt.fogA);
+  return [mix(bottomCol, fog, opt.fogA), minH];
 }
 
-function buildMountains(c: Ctx2D, L: StripLayer, P: Palette): string {
+function buildMountains(c: Ctx2D, L: StripLayer, P: Palette, tops: Tops): BuildOut {
   const k = 0.9;
   if (P.mountainsBack) {
     const back = ridgedProfile(L.seed + 5, L.period, [
@@ -407,12 +458,7 @@ function buildMountains(c: Ctx2D, L: StripLayer, P: Palette): string {
       [8, 0.8],
       [13, 0.35],
     ]);
-    drawRange(c, L, P.mountainsBack, P.fog, (x) => 1.6 + back(x) * k, {
-      fogA: 0.6,
-      fogTop: 3.5,
-      snowFrac: 0.66,
-      topY: L.height,
-    });
+    drawRange(c, L, P.mountainsBack, P.fog, (x) => 1.6 + back(x) * k, tops, { fogA: 0.6, fogTop: 3.5, snowFrac: 0.66 });
   }
   const main = ridgedProfile(L.seed, L.period, [
     [2, 3.2],
@@ -420,16 +466,12 @@ function buildMountains(c: Ctx2D, L: StripLayer, P: Palette): string {
     [5, 1.1],
     [9, 0.45],
   ]);
-  return drawRange(c, L, P.mountains, P.fog, (x) => 0.4 + main(x) * k, {
-    fogA: 0.55,
-    fogTop: 1.4,
-    snowFrac: 0.6,
-    topY: L.height,
-  });
+  const [fill, minH] = drawRange(c, L, P.mountains, P.fog, (x) => 0.4 + main(x) * k, tops, { fogA: 0.55, fogTop: 1.4, snowFrac: 0.6 });
+  return { fill, opaqueTop: minH - 0.05 };
 }
 
-/** Вторая (ближняя) гряда снежных гор (snow). */
-function buildRangeFar(c: Ctx2D, L: StripLayer, P: Palette): string {
+/** Вторая (ближняя) гряда снежных гор (snow) с ёлочками-силуэтами у подножия. */
+function buildRangeFar(c: Ctx2D, L: StripLayer, P: Palette, tops: Tops): BuildOut {
   const M = P.rangeFar!;
   const prof = ridgedProfile(L.seed, L.period, [
     [2, 1.6],
@@ -437,24 +479,14 @@ function buildRangeFar(c: Ctx2D, L: StripLayer, P: Palette): string {
     [5, 0.7],
     [11, 0.25],
   ]);
-  const col = drawRange(c, L, M, P.fog, (x) => 0.5 + prof(x), {
-    fogA: 0.35,
-    fogTop: 0.9,
-    snowFrac: 0.55,
-    topY: L.height,
-  });
-  // ёлочки-силуэты у подножия
+  const H = (x: number): number => 0.5 + prof(x);
+  const [fill, minH] = drawRange(c, L, M, P.fog, H, tops, { fogA: 0.35, fogTop: 0.9, snowFrac: 0.55 });
   const r = rand(L.seed + 3);
-  const pts = sample(L.period, 4, (x) => 0.5 + prof(x));
-  const minAt = (x: number): number => {
-    const i = clamp(Math.round((x / L.period) * (pts.length - 1)), 0, pts.length - 1);
-    return pts[i][1];
-  };
   c.fillStyle = mix(M.shade, P.fog, 0.25);
   c.beginPath();
   for (let i = 0; i < 60; i++) {
     const x = r() * L.period;
-    const top = Math.min(minAt(x) - 0.1, lerp(0.2, 0.9, r()));
+    const top = Math.min(H(x) - 0.1, lerp(0.2, 0.9, r()));
     const h = lerp(0.35, 0.7, r());
     for (const dx of [0, L.period, -L.period]) {
       const X = x + dx;
@@ -465,7 +497,7 @@ function buildRangeFar(c: Ctx2D, L: StripLayer, P: Palette): string {
     }
   }
   c.fill();
-  return col;
+  return { fill, opaqueTop: minH - 0.05 };
 }
 
 /** Холмы: градиент, мягкая тень склонов, светлый «рим», полосы-поля, декор, дымка. */
@@ -474,16 +506,19 @@ function buildHills(
   L: StripLayer,
   P: Palette,
   C: HillPal,
+  tops: Tops,
   terms: Array<[number, number]>,
   amp0: number,
   deco: (c: Ctx2D, x: number, y: number, r: () => number) => void,
   decoDensity: number,
+  decoTop: number,
   fogA: number,
-): string {
+): BuildOut {
   const Pm = L.period;
   const prof = sineProfile(L.seed, Pm, terms);
   const H = (x: number): number => amp0 + prof(x);
   const pts = sample(Pm, 5, H);
+  const minH = markProfile(tops, pts, 0.12);
   const g = c.createLinearGradient(0, L.height, 0, -L.depth);
   g.addColorStop(0, C.top);
   g.addColorStop(1, C.bottom);
@@ -497,22 +532,15 @@ function buildHills(
   slopeShade(c, pts, 1.6, 0.55);
   c.fill();
   // полосы-поля вдоль рельефа
-  for (const [off, a] of [
-    [0.55, 0.16],
-    [1.25, 0.12],
-  ] as const) {
-    c.beginPath();
-    pts.forEach((p, i) => (i ? c.lineTo(p[0], p[1] - off) : c.moveTo(p[0], p[1] - off)));
-    c.lineWidth = 0.22;
-    c.strokeStyle = rgba(C.rim, a);
-    c.stroke();
-  }
+  c.lineWidth = 0.22;
+  c.strokeStyle = rgba(C.rim, 0.16);
+  strokeLine(c, pts, -0.55);
+  c.strokeStyle = rgba(C.rim, 0.11);
+  strokeLine(c, pts, -1.25);
   // светлый «рим» по гребню
-  c.beginPath();
-  pts.forEach((p, i) => (i ? c.lineTo(p[0], p[1] - 0.06) : c.moveTo(p[0], p[1] - 0.06)));
   c.lineWidth = 0.15;
   c.strokeStyle = rgba(C.rim, 0.9);
-  c.stroke();
+  strokeLine(c, pts, -0.06);
   c.restore();
   // декор по гребню (с переносом через край периода)
   const r = rand(L.seed + 101);
@@ -521,10 +549,12 @@ function buildHills(
     const x = r() * Pm;
     const sub = r();
     const seed = Math.floor(r() * 1e6);
+    const y = H(x) - 0.04 - sub * 0.12;
+    tops.mark(x - 1.2, x + 1.2, y + decoTop);
     for (const dx of [0, Pm, -Pm]) {
       const X = x + dx;
       if (X < -2 || X > Pm + 2) continue;
-      deco(c, X, H(x) - 0.04 - sub * 0.12, rand(seed));
+      deco(c, X, y, rand(seed));
     }
   }
   // дымка книзу
@@ -537,45 +567,74 @@ function buildHills(
   c.fillStyle = fg;
   c.fillRect(0, -L.depth, Pm, amp0 + L.depth);
   c.restore();
-  return mix(C.bottom, P.fog, fogA);
+  return { fill: mix(C.bottom, P.fog, fogA), opaqueTop: minH - 0.05 };
 }
 
-// ───────────────────────── декор холмов ─────────────────────────
+// ───────────────────────── декор: кусты, деревца ─────────────────────────
 
-function blobs(c: Ctx2D, list: Array<[number, number, number]>, color: string): void {
-  c.fillStyle = color;
-  c.beginPath();
+type Blob = [number, number, number];
+
+function blobPath(list: Blob[], dx = 0, dy = 0, k = 1): Path2D {
+  const p = new Path2D();
   for (const [x, y, r] of list) {
-    c.moveTo(x + r, y);
-    c.arc(x, y, r, 0, TAU);
+    p.moveTo(x + dx + r * k, y + dy);
+    p.arc(x + dx, y + dy, r * k, 0, TAU);
   }
-  c.fill();
+  return p;
 }
 
-/** Куст из трёх-четырёх кругов с тенью и бликом. */
+/**
+ * Пышная масса листвы/куста (свет сверху-слева, ось Y вверх): тёмный силуэт → освещённое тело со сдвигом
+ * (по краю снизу-справа остаётся тень) → дуги-блики на верхне-левых краях «клубов».
+ */
+function foliage(c: Ctx2D, list: Blob[], dark: string, base: string, light: string, shift: number, specks = 0, r?: () => number): void {
+  const body = blobPath(list);
+  c.fillStyle = dark;
+  c.fill(body);
+  c.save();
+  c.clip(body);
+  c.fillStyle = base;
+  c.fill(blobPath(list, -shift, shift * 1.2, 0.97));
+  c.restore();
+  c.lineCap = 'round';
+  c.strokeStyle = rgba(light, 0.9);
+  for (const [x, y, rr] of list) {
+    c.lineWidth = rr * 0.2;
+    c.beginPath();
+    c.arc(x - shift * 0.6, y + shift * 0.6, rr * 0.72, Math.PI * 0.58, Math.PI * 0.92);
+    c.stroke();
+  }
+  if (specks && r) {
+    c.fillStyle = rgba(light, 0.85);
+    c.beginPath();
+    for (let i = 0; i < specks; i++) {
+      const q = list[Math.floor(r() * list.length)];
+      const a = lerp(Math.PI * 0.4, Math.PI * 1.0, r());
+      const d = q[2] * lerp(0.35, 0.7, r());
+      const px = q[0] + Math.cos(a) * d;
+      const py = q[1] + Math.sin(a) * d;
+      const rr = q[2] * lerp(0.07, 0.11, r());
+      c.moveTo(px + rr, py);
+      c.arc(px, py, rr, 0, TAU);
+    }
+    c.fill();
+  }
+}
+
+/** Куст из 3–4 клубов (+ цветы). */
 function bush(c: Ctx2D, x: number, y: number, s: number, C: { dark: string; base: string; light: string }, r: () => number, flowers?: string[]): void {
-  const parts: Array<[number, number, number]> = [
+  const parts: Blob[] = [
     [x - 0.6 * s, y + 0.25 * s, 0.55 * s],
     [x, y + 0.45 * s, 0.72 * s],
     [x + 0.62 * s, y + 0.22 * s, 0.5 * s],
   ];
   if (r() < 0.5) parts.push([x + 0.2 * s, y + 0.75 * s, 0.45 * s]);
-  blobs(
-    c,
-    parts.map(([a, b, q]) => [a + 0.06 * s, b - 0.06 * s, q * 1.04]),
-    C.dark,
-  );
-  blobs(c, parts, C.base);
-  blobs(
-    c,
-    parts.map(([a, b, q]) => [a - q * 0.25, b + q * 0.3, q * 0.45]),
-    rgba(C.light, 0.85),
-  );
+  foliage(c, parts, C.dark, C.base, C.light, 0.09 * s);
   if (flowers && flowers.length && r() < 0.55) {
     for (let i = 0; i < 4; i++) {
       const p = parts[Math.floor(r() * parts.length)];
       const a = r() * TAU;
-      const d = p[2] * lerp(0.2, 0.75, r());
+      const d = p[2] * lerp(0.2, 0.7, r());
       c.fillStyle = flowers[Math.floor(r() * flowers.length)];
       c.beginPath();
       c.arc(p[0] + Math.cos(a) * d, p[1] + Math.sin(a) * d, 0.07 * s, 0, TAU);
@@ -588,9 +647,7 @@ function bush(c: Ctx2D, x: number, y: number, s: number, C: { dark: string; base
 function lollipop(c: Ctx2D, x: number, y: number, s: number, dark: string, base: string, light: string, trunk: string): void {
   c.fillStyle = trunk;
   c.fillRect(x - 0.07 * s, y - 0.1, 0.14 * s, 1.2 * s + 0.1);
-  blobs(c, [[x + 0.05 * s, y + 1.55 * s, 0.68 * s]], dark);
-  blobs(c, [[x, y + 1.6 * s, 0.64 * s]], base);
-  blobs(c, [[x - 0.2 * s, y + 1.8 * s, 0.3 * s]], rgba(light, 0.85));
+  foliage(c, [[x, y + 1.6 * s, 0.64 * s]], dark, base, light, 0.07 * s);
 }
 
 /** Маленькая ель (силуэт, опционально со снегом). */
@@ -628,6 +685,7 @@ function smallPine(c: Ctx2D, x: number, y: number, h: number, base: string, dark
 
 // ───────────────────────── деревья (средний план) ─────────────────────────
 
+/** Лиственное дерево: 3 вида кроны (круглая, тополь, раскидистая). Возвращает высоту верха. */
 function roundTree(c: Ctx2D, x: number, h: number, T: TreePal, r: () => number): void {
   const variant = r();
   const tw = h * 0.07;
@@ -662,15 +720,15 @@ function roundTree(c: Ctx2D, x: number, h: number, T: TreePal, r: () => number):
   c.lineTo(x + h * 0.13 + lean, h * 0.64);
   c.stroke();
   // крона
-  let parts: Array<[number, number, number]>;
+  let parts: Blob[];
   if (variant < 0.55) {
     parts = [
-      [0, 0.7, 0.27],
+      [0, 0.52, 0.17],
       [-0.2, 0.6, 0.2],
       [0.21, 0.6, 0.2],
+      [0, 0.7, 0.27],
       [-0.1, 0.86, 0.19],
       [0.12, 0.84, 0.18],
-      [0.0, 0.52, 0.17],
     ];
   } else if (variant < 0.8) {
     // высокий тополь
@@ -691,28 +749,13 @@ function roundTree(c: Ctx2D, x: number, h: number, T: TreePal, r: () => number):
       [0.14, 0.77, 0.17],
     ];
   }
-  const sc = (q: [number, number, number], dx: number, dy: number, k: number): [number, number, number] => [
-    x + lean + (q[0] + dx) * h,
-    (q[1] + dy) * h,
-    q[2] * h * k,
-  ];
-  blobs(c, parts.map((q) => sc(q, 0.025, -0.035, 1.04)), T.leafDark);
-  blobs(c, parts.map((q) => sc(q, -0.005, 0.005, 0.94)), T.leaf);
-  blobs(c, parts.map((q) => sc(q, -q[2] * 0.3, q[2] * 0.32, 0.5)), rgba(T.leafLight, 0.92));
-  // мелкие «листочки» на освещённой стороне
-  c.fillStyle = rgba(T.leafLight, 0.9);
+  const list: Blob[] = parts.map(([bx, by, br]) => [x + lean + bx * h, by * h, br * h]);
+  // тень кроны на стволе
+  c.fillStyle = rgba(T.trunkDark, 0.7);
   c.beginPath();
-  for (let i = 0; i < 9; i++) {
-    const q = parts[Math.floor(r() * parts.length)];
-    const a = lerp(Math.PI * 0.45, Math.PI * 1.05, r());
-    const d = q[2] * lerp(0.55, 0.85, r());
-    const px = x + lean + q[0] * h + Math.cos(a) * d * h;
-    const py = q[1] * h + Math.sin(a) * d * h;
-    const rr = h * lerp(0.018, 0.03, r());
-    c.moveTo(px + rr, py);
-    c.arc(px, py, rr, 0, TAU);
-  }
+  c.ellipse(x + lean, h * 0.5, tw * 1.1, h * 0.06, 0, 0, TAU);
   c.fill();
+  foliage(c, list, T.leafDark, T.leaf, T.leafLight, h * 0.03, 10, r);
 }
 
 function pineTree(c: Ctx2D, x: number, h: number, T: TreePal, r: () => number): void {
@@ -802,14 +845,6 @@ function palmTree(c: Ctx2D, x: number, h: number, T: TreePal, r: () => number): 
   for (let i = right.length - 1; i >= 0; i--) c.lineTo(right[i][0], right[i][1]);
   c.closePath();
   c.fill();
-  c.strokeStyle = T.trunkDark;
-  c.lineWidth = h * 0.012;
-  c.beginPath();
-  for (let i = 1; i < N; i++) {
-    c.moveTo(left[i][0], left[i][1]);
-    c.lineTo(right[i][0], right[i][1] - h * 0.012);
-  }
-  c.stroke();
   // тёмная сторона ствола
   c.fillStyle = rgba(T.trunkDark, 0.55);
   c.beginPath();
@@ -821,6 +856,14 @@ function palmTree(c: Ctx2D, x: number, h: number, T: TreePal, r: () => number): 
   for (let i = N; i >= 0; i--) c.lineTo(right[i][0], right[i][1]);
   c.closePath();
   c.fill();
+  c.strokeStyle = T.trunkDark;
+  c.lineWidth = h * 0.012;
+  c.beginPath();
+  for (let i = 1; i < N; i++) {
+    c.moveTo(left[i][0], left[i][1]);
+    c.lineTo(right[i][0], right[i][1] - h * 0.012);
+  }
+  c.stroke();
   // листья-перья: сначала задние (тёмные), потом передние
   const fronds = 8;
   for (let pass = 0; pass < 2; pass++) {
@@ -888,17 +931,20 @@ function frond(c: Ctx2D, x0: number, y0: number, a: number, L: number, h: number
   }
 }
 
-/** Вал под деревьями: кусты / дюны / сугробы. */
-function buildBerm(c: Ctx2D, L: StripLayer, P: Palette, r: () => number): void {
+/** Вал под деревьями: живая изгородь (meadow), песчаный вал с кустами (beach), сугробы (snow). Возвращает минимум высоты. */
+function buildBerm(c: Ctx2D, L: StripLayer, P: Palette, r: () => number, tops: Tops): number {
   const T = P.trees;
   const Pm = L.period;
   const kind = T.kind;
-  // основа вала — периодическая волна
-  const wave = (x: number): number =>
-    0.38 + 0.2 * Math.sin((TAU * 7 * x) / Pm) + 0.12 * Math.sin((TAU * 17 * x) / Pm + 2) + 0.06 * Math.sin((TAU * 41 * x) / Pm);
+  const wave =
+    kind === 'palm'
+      ? (x: number): number => 0.45 + 0.22 * Math.sin((TAU * 3 * x) / Pm) + 0.1 * Math.sin((TAU * 7 * x) / Pm + 2) + 0.04 * Math.sin((TAU * 13 * x) / Pm)
+      : (x: number): number =>
+          0.38 + 0.2 * Math.sin((TAU * 7 * x) / Pm) + 0.12 * Math.sin((TAU * 17 * x) / Pm + 2) + 0.06 * Math.sin((TAU * 41 * x) / Pm);
   const pts = sample(Pm, 6, wave);
+  const minH = markProfile(tops, pts, 0.1);
   const g = c.createLinearGradient(0, 1.0, 0, -L.depth);
-  g.addColorStop(0, kind === 'round' ? T.bermLight : T.berm);
+  g.addColorStop(0, T.bermLight);
   g.addColorStop(0.4, T.berm);
   g.addColorStop(1, kind === 'round' ? T.bermDark : mix(T.berm, T.bermDark, kind === 'pine' ? 0.6 : 0.15));
   silhouette(c, pts, -L.depth);
@@ -910,6 +956,7 @@ function buildBerm(c: Ctx2D, L: StripLayer, P: Palette, r: () => number): void {
       const x = r() * Pm;
       const s = lerp(0.35, 0.7, r());
       const seed = Math.floor(r() * 1e6);
+      tops.mark(x - s * 1.3, x + s * 1.3, wave(x) + s * 1.3);
       for (const dx of [0, Pm, -Pm]) {
         if (x + dx < -2 || x + dx > Pm + 2) continue;
         bush(c, x + dx, wave(x) - 0.25, s, { dark: T.bermDark, base: T.berm, light: T.bermLight }, rand(seed), T.flowers);
@@ -917,10 +964,11 @@ function buildBerm(c: Ctx2D, L: StripLayer, P: Palette, r: () => number): void {
     }
   } else if (kind === 'palm') {
     // тропические кусты на песчаном валу
-    for (let i = 0; i < Math.round(n * 0.6); i++) {
+    for (let i = 0; i < Math.round(n * 0.5); i++) {
       const x = r() * Pm;
       const s = lerp(0.3, 0.55, r());
       const seed = Math.floor(r() * 1e6);
+      tops.mark(x - s * 1.3, x + s * 1.3, wave(x) + s * 1.3);
       for (const dx of [0, Pm, -Pm]) {
         if (x + dx < -2 || x + dx > Pm + 2) continue;
         bush(c, x + dx, wave(x) - 0.3, s, { dark: T.bermDark, base: T.leafDark, light: T.leaf }, rand(seed), T.flowers);
@@ -929,11 +977,9 @@ function buildBerm(c: Ctx2D, L: StripLayer, P: Palette, r: () => number): void {
     c.save();
     silhouette(c, pts, -L.depth);
     c.clip();
-    c.beginPath();
-    pts.forEach((p, i) => (i ? c.lineTo(p[0], p[1] - 0.05) : c.moveTo(p[0], p[1] - 0.05)));
-    c.lineWidth = 0.12;
-    c.strokeStyle = rgba(T.bermLight, 0.9);
-    c.stroke();
+    c.lineWidth = 0.1;
+    c.strokeStyle = rgba(T.bermLight, 0.8);
+    strokeLine(c, pts, -0.05);
     c.restore();
   } else {
     // сугробы с тенью
@@ -945,56 +991,57 @@ function buildBerm(c: Ctx2D, L: StripLayer, P: Palette, r: () => number): void {
     c.fill();
     c.restore();
   }
+  return minH;
 }
 
-function buildTrees(c: Ctx2D, L: StripLayer, P: Palette): string {
+function buildTrees(c: Ctx2D, L: StripLayer, P: Palette, tops: Tops): BuildOut {
   const T = P.trees;
   const Pm = L.period;
   const r = rand(L.seed);
   const n = Math.round(Pm / (T.kind === 'palm' ? 4.2 : 3.0));
   const items: Array<[number, number, number]> = [];
-  for (let i = 0; i < n; i++) items.push([((i + r() * 0.75) * Pm) / n, lerp(2.5, 4.6, r()), Math.floor(r() * 1e6)]);
+  for (let i = 0; i < n; i++) items.push([((i + r() * 0.75) * Pm) / n, lerp(2.3, 4.1, r()), Math.floor(r() * 1e6)]);
   // дальний ряд (меньше и светлее) — для глубины
   const back: Array<[number, number, number]> = [];
-  if (T.kind !== 'palm') for (let i = 0; i < n; i++) back.push([((i + 0.5 + r() * 0.5) * Pm) / n, lerp(1.6, 2.6, r()), Math.floor(r() * 1e6)]);
-  const draw = (x: number, h: number, seed: number): void => {
-    const rr = rand(seed);
+  if (T.kind !== 'palm') for (let i = 0; i < n; i++) back.push([((i + 0.5 + r() * 0.5) * Pm) / n, lerp(1.5, 2.4, r()), Math.floor(r() * 1e6)]);
+  const kH = T.kind === 'pine' ? 1.2 : T.kind === 'palm' ? 1.3 : 1;
+  const draw = (x: number, h: number, seed: number, pal: TreePal): void => {
+    const hh = h * kH;
+    // ширина кроны с запасом: у пальмы — наклон и длинные листья
+    const half = T.kind === 'palm' ? hh * 1.05 : hh * 0.5;
+    tops.mark(x - half, x + half, hh * (T.kind === 'palm' ? 1.32 : 1.12) + 0.15);
     for (const dx of [0, -Pm, Pm]) {
-      if (x + dx < -3 || x + dx > Pm + 3) continue;
-      if (T.kind === 'round') roundTree(c, x + dx, h, T, rr);
-      else if (T.kind === 'pine') pineTree(c, x + dx, h * 1.2, T, rr);
-      else palmTree(c, x + dx, h * 1.3, T, rr);
+      if (x + dx < -half - 0.5 || x + dx > Pm + half + 0.5) continue;
+      const rr = rand(seed);
+      if (T.kind === 'round') roundTree(c, x + dx, hh, pal, rr);
+      else if (T.kind === 'pine') pineTree(c, x + dx, hh, pal, rr);
+      else palmTree(c, x + dx, hh, pal, rr);
     }
   };
   if (back.length) {
+    const k = 0.3;
     const fogT: TreePal = {
       ...T,
-      leaf: mix(T.leaf, P.fog, 0.3),
-      leafDark: mix(T.leafDark, P.fog, 0.3),
-      leafLight: mix(T.leafLight, P.fog, 0.3),
-      trunk: mix(T.trunk, P.fog, 0.3),
-      trunkDark: mix(T.trunkDark, P.fog, 0.3),
-      snowShade: T.snowShade ? mix(T.snowShade, P.fog, 0.3) : undefined,
+      leaf: mix(T.leaf, P.fog, k),
+      leafDark: mix(T.leafDark, P.fog, k),
+      leafLight: mix(T.leafLight, P.fog, k),
+      trunk: mix(T.trunk, P.fog, k),
+      trunkDark: mix(T.trunkDark, P.fog, k),
+      snowShade: T.snowShade ? mix(T.snowShade, P.fog, k) : undefined,
     };
-    for (const [x, h, seed] of back) {
-      const rr = rand(seed);
-      for (const dx of [0, -Pm, Pm]) {
-        if (x + dx < -3 || x + dx > Pm + 3) continue;
-        if (T.kind === 'round') roundTree(c, x + dx, h, fogT, rr);
-        else pineTree(c, x + dx, h * 1.2, fogT, rr);
-      }
-    }
+    for (const [x, h, seed] of back) draw(x, h, seed, fogT);
   }
-  for (const [x, h, seed] of items) draw(x, h, seed);
-  buildBerm(c, L, P, r);
-  const bottom = P.trees.kind === 'round' ? P.trees.bermDark : mix(T.berm, T.bermDark, T.kind === 'pine' ? 0.6 : 0.15);
-  return bottom;
+  for (const [x, h, seed] of items) draw(x, h, seed, T);
+  const minH = buildBerm(c, L, P, r, tops);
+  const fill = T.kind === 'round' ? T.bermDark : mix(T.berm, T.bermDark, T.kind === 'pine' ? 0.6 : 0.15);
+  return { fill, opaqueTop: minH - 0.05 };
 }
 
 /** Море (beach): градиент от горизонта, полосы волн. База слоя = линия горизонта. */
-function buildSea(c: Ctx2D, L: StripLayer, P: Palette): string {
+function buildSea(c: Ctx2D, L: StripLayer, P: Palette, tops: Tops): BuildOut {
   const S = P.sea!;
   const Pm = L.period;
+  tops.mark(0, Pm, 0.05);
   const g = c.createLinearGradient(0, 0, 0, -L.depth);
   g.addColorStop(0, S.top);
   g.addColorStop(0.28, S.mid);
@@ -1023,11 +1070,11 @@ function buildSea(c: Ctx2D, L: StripLayer, P: Palette): string {
       c.stroke();
     }
   }
-  return S.bottom;
+  return { fill: S.bottom, opaqueTop: 0 };
 }
 
 /** Острова на горизонте (beach) — силуэты с пальмами, отражение в воде. */
-function buildIslands(c: Ctx2D, L: StripLayer, P: Palette): null {
+function buildIslands(c: Ctx2D, L: StripLayer, P: Palette, tops: Tops): BuildOut {
   const I = P.islands!;
   const Pm = L.period;
   const r = rand(L.seed);
@@ -1039,6 +1086,7 @@ function buildIslands(c: Ctx2D, L: StripLayer, P: Palette): null {
   ];
   for (const [cx, w, hh] of list) {
     const seed = Math.floor(r() * 1e6);
+    tops.mark(cx - w / 2 - 1, cx + w / 2 + 1, hh * 1.8);
     for (const dx of [0, Pm, -Pm]) {
       const X = cx + dx;
       if (X + w < 0 || X - w > Pm) continue;
@@ -1073,33 +1121,36 @@ function buildIslands(c: Ctx2D, L: StripLayer, P: Palette): null {
       c.fill();
       // пальмы-силуэты
       c.strokeStyle = I.palm;
-      c.fillStyle = I.palm;
       c.lineCap = 'round';
       const np = Math.max(1, Math.round(w / 3));
       for (let k = 0; k < np; k++) {
         const u = lerp(0.3, 0.7, rr());
-        const i0 = Math.round(u * 60);
-        const [bx, by] = pts[i0];
-        const ph2 = hh * lerp(0.45, 0.7, rr());
+        const [bx, by] = pts[Math.round(u * 60)];
+        const ph2 = hh * lerp(0.3, 0.45, rr());
         const lx = (rr() - 0.5) * ph2 * 0.6;
-        c.lineWidth = 0.09;
+        c.lineWidth = 0.07;
         c.beginPath();
         c.moveTo(bx, by - 0.1);
         c.quadraticCurveTo(bx + lx * 0.2, by + ph2 * 0.6, bx + lx, by + ph2);
         c.stroke();
-        c.lineWidth = 0.07;
+        c.lineWidth = 0.055;
         for (let f = 0; f < 6; f++) {
-          const a = Math.PI * (0.05 + f / 5 * 0.9);
+          const a = Math.PI * (0.05 + (f / 5) * 0.9);
           const fl = ph2 * 0.38;
           c.beginPath();
           c.moveTo(bx + lx, by + ph2);
-          c.quadraticCurveTo(bx + lx + Math.cos(a) * fl * 0.6, by + ph2 + Math.sin(a) * fl * 0.4 + fl * 0.15, bx + lx + Math.cos(a) * fl, by + ph2 + Math.sin(a) * fl * 0.3 - fl * 0.3);
+          c.quadraticCurveTo(
+            bx + lx + Math.cos(a) * fl * 0.6,
+            by + ph2 + Math.sin(a) * fl * 0.4 + fl * 0.15,
+            bx + lx + Math.cos(a) * fl,
+            by + ph2 + Math.sin(a) * fl * 0.3 - fl * 0.3,
+          );
           c.stroke();
         }
       }
     }
   }
-  return null;
+  return { fill: null, opaqueTop: -1e9 };
 }
 
 // ───────────────────────── спрайты облаков и солнца ─────────────────────────
@@ -1112,17 +1163,24 @@ interface CloudSprite {
   ppm: number;
 }
 
+/**
+ * Кучевое облако: тело-объединение кругов с плоским дном; тень по нижне-правому краю (тело со сдвигом),
+ * светлая кайма по верхне-левому краю (через временный холст) — без «пузырей» внутри.
+ */
 function renderCloud(seed: number, widthM: number, ppm: number, C: Palette['cloud']): CloudSprite {
   const r = rand(seed);
   const w = widthM;
   const h = w * 0.44;
   const base = h * 0.8;
-  const padX = 0.3;
+  const padX = 0.12 * widthM + 0.25;
   const padTop = 0.5;
-  const c = createCanvas((w + padX * 2) * ppm, (h + padTop + 0.1) * ppm);
+  const W = Math.ceil((w + padX * 2) * ppm);
+  const Hh = Math.ceil((h + padTop + 0.1) * ppm);
+  const c = createCanvas(W, Hh);
   const ctx = ctx2d(c);
-  ctx.setTransform(ppm, 0, 0, ppm, padX * ppm, padTop * ppm); // метры, Y вниз, (0,0) — левый верх облака
-  const parts: Array<[number, number, number]> = [];
+  const toM = (cx: Ctx2D): void => cx.setTransform(ppm, 0, 0, ppm, padX * ppm, padTop * ppm); // метры, Y вниз
+  toM(ctx);
+  const parts: Blob[] = [];
   const n = 5 + Math.floor(r() * 3);
   for (let i = 0; i < n; i++) {
     const t = (i + 0.5) / n;
@@ -1133,49 +1191,55 @@ function renderCloud(seed: number, widthM: number, ppm: number, C: Palette['clou
   // верхние «шапки» кучевого облака
   const top = 2 + Math.floor(r() * 2);
   for (let i = 0; i < top; i++) {
-    const t = lerp(0.3, 0.7, (i + r() * 0.6) / top);
+    const t = lerp(0.28, 0.72, (i + r() * 0.6) / top);
     const rr = h * lerp(0.26, 0.36, r());
     parts.push([w * t, base - h * 0.55 - rr * 0.15, rr]);
   }
-  const body = new Path2D();
-  for (const [x, y, rr] of parts) {
-    body.moveTo(x + rr, y);
-    body.arc(x, y, rr, 0, TAU);
-  }
+  const body = blobPath(parts);
   body.rect(w * 0.1, base - h * 0.25, w * 0.8, h * 0.25);
+  const lit = blobPath(parts, -0.035 * w, -0.09 * h, 1);
+  lit.rect(w * 0.1 - 0.035 * w, base - h * 0.25 - 0.09 * h, w * 0.8, h * 0.25);
   ctx.save();
   ctx.beginPath();
   ctx.rect(-padX, -padTop, w + padX * 2, base + padTop); // плоское дно
   ctx.clip();
+  // 1) тень (весь силуэт)
+  const gs = ctx.createLinearGradient(0, base - h, 0, base);
+  gs.addColorStop(0, mix(C.top, C.shade, 0.45));
+  gs.addColorStop(1, C.shade);
+  ctx.fillStyle = gs;
+  ctx.fill(body);
+  // 2) освещённое тело со сдвигом вверх-влево
+  ctx.clip(body);
   const g = ctx.createLinearGradient(0, base - h, 0, base);
   g.addColorStop(0, C.top);
-  g.addColorStop(0.5, C.top);
+  g.addColorStop(0.55, C.top);
   g.addColorStop(1, C.bottom);
   ctx.fillStyle = g;
-  ctx.fill(body);
-  ctx.clip(body);
-  // подбрюшье: тени снизу-справа от каждого «клуба»
-  ctx.fillStyle = rgba(C.shade, 0.42);
-  for (const [x, y, rr] of parts) {
-    ctx.beginPath();
-    ctx.arc(x + rr * 0.22, y + rr * 0.5, rr * 0.82, 0, TAU);
-    ctx.fill();
-  }
-  ctx.fillStyle = rgba(C.bottom, 0.5);
-  ctx.fillRect(-padX, base - h * 0.12, w + padX * 2, h * 0.12);
-  // блики сверху-слева
-  ctx.fillStyle = 'rgba(255,255,255,0.6)';
-  for (const [x, y, rr] of parts) {
-    ctx.beginPath();
-    ctx.arc(x - rr * 0.28, y - rr * 0.34, rr * 0.48, 0, TAU);
-    ctx.fill();
-  }
+  ctx.fill(lit);
+  ctx.restore();
+  // 4) светлая кайма сверху-слева: силуэт минус силуэт со сдвигом вниз-вправо
+  const tmp = createCanvas(W, Hh);
+  const tc = ctx2d(tmp);
+  toM(tc);
+  tc.fillStyle = '#FFFFFF';
+  tc.fill(body);
+  tc.globalCompositeOperation = 'destination-out';
+  tc.fill(blobPath(parts, 0.022 * w, 0.06 * h, 1));
+  tc.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 0.75;
+  ctx.beginPath();
+  ctx.rect(0, 0, W, (padTop + base) * ppm);
+  ctx.clip();
+  ctx.drawImage(tmp, 0, 0);
   ctx.restore();
   return { canvas: c, ox: padX * ppm, oy: (padTop + base) * ppm, ppm };
 }
 
-function renderGlow(color: string, a: number): AnyCanvas {
-  const S = 256;
+function renderGlow(color: string, a: number, size: number): AnyCanvas {
+  const S = Math.max(8, Math.ceil(size));
   const c = createCanvas(S, S);
   const ctx = ctx2d(c);
   const g = ctx.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
@@ -1193,7 +1257,7 @@ function renderGlow(color: string, a: number): AnyCanvas {
 
 let probe: CanvasRenderingContext2D | null = null;
 
-/** Средний цвет пикселя полосы (низ) — точная заливка «под слоем». */
+/** Цвет пикселя полосы (низ) — точная заливка «под слоем». */
 function sampleColor(src: AnyCanvas, x: number, y: number): string | null {
   if (!probe) {
     const pc = createCanvas(1, 1);
@@ -1207,41 +1271,73 @@ function sampleColor(src: AnyCanvas, x: number, y: number): string | null {
   return `rgb(${d[0]},${d[1]},${d[2]})`;
 }
 
+/** Столбцы с близкой высотой содержимого объединяются (меньше вызовов drawImage). */
+function runsOf(t: Tops, period: number): Array<[number, number, number]> {
+  const out: Array<[number, number, number]> = [];
+  let i = 0;
+  while (i < t.n) {
+    let lo = t.v[i];
+    let hi = t.v[i];
+    let j = i + 1;
+    while (j < t.n) {
+      const v = t.v[j];
+      const nlo = Math.min(lo, v);
+      const nhi = Math.max(hi, v);
+      if (nhi - nlo > 0.8) break;
+      lo = nlo;
+      hi = nhi;
+      j++;
+    }
+    out.push([i * BIN_M, Math.min(period, j * BIN_M), hi]);
+    i = j;
+  }
+  return out;
+}
+
 /**
- * Параллакс-фон темы. draw() рисует небо и все фоновые слои на весь экран (в экранных координатах);
- * полосы строятся лениво и кэшируются по ступеням масштаба, не чаще одной перестройки за кадр.
+ * Параллакс-фон темы. draw() рисует небо и все фоновые слои на весь экран (в экранных координатах).
+ * prewarm() — построить всё заранее (экран загрузки).
  */
 export class Background {
   readonly theme: ThemeId;
   private readonly P: Palette;
   private readonly cloudsFar: CloudLayer;
   private readonly cloudsNear: CloudLayer;
-  private readonly back: StripLayer[] = [];
-  private readonly sea: StripLayer | null = null;
-  private readonly islands: StripLayer | null = null;
-  private readonly mid: StripLayer[] = [];
+  /** Полосы в порядке отрисовки; облака вставляются перед индексами nearAt / после неба. */
+  private readonly strips: StripLayer[] = [];
+  private readonly nearAt: number;
+  private readonly glitterAfter: number;
   private readonly states = new Map<string, LayerState>();
-  private readonly cloudCache = new Map<string, CloudSprite>();
-  private readonly glow: AnyCanvas;
+  private readonly clouds = new Map<number, CloudSprite[]>();
+  private glow: AnyCanvas | null = null;
+  private skyBand: { c: AnyCanvas; W: number; H: number } | null = null;
   private buildsLeft = 1;
-  private skyGrad: { g: CanvasGradient; key: string } | null = null;
+  private cloudBuildsLeft = 2;
+  private lastScale = -1;
+  private lastH = -1;
+  private scaleSince = 0;
+  /** Отладка: вызывается после каждой фазы draw() (замер растеризации по фазам в предпросмотре). */
+  _phase: ((label: string) => void) | null = null;
 
   constructor(theme: ThemeId) {
     this.theme = theme;
     const P = PAL[theme];
     this.P = P;
-    this.glow = renderGlow(P.sun.glow, P.sun.glowA);
-    this.cloudsFar = { id: 'cloudsFar', f: 0.05, period: 70, baseY: 1.0, drift: 0.25, res: 0.75, items: makeClouds(3, 7, 70, 3, 6, 1.6, 4.6) };
-    this.cloudsNear = { id: 'cloudsNear', f: 0.18, period: 90, baseY: 3.0, drift: 0.5, res: 0.75, items: makeClouds(5, 4, 90, 4.5, 7.5, 0.6, 2.6) };
+    this.cloudsFar = { f: 0.05, period: 70, baseY: 1.0, drift: 0.25, items: makeClouds(3, 7, 70, 3, 6, 1.6, 4.6) };
+    this.cloudsNear = { f: 0.18, period: 90, baseY: 3.0, drift: 0.5, items: makeClouds(5, 4, 90, 4.5, 7.5, 0.6, 2.6) };
+    let glitter = -1;
     if (theme === 'beach') {
-      this.sea = { id: 'sea', f: 0.1, period: 40, baseY: -0.6, height: 0, depth: 9, res: 0.5, seed: 7, build: buildSea };
-      this.islands = { id: 'islands', f: 0.1, period: 70, baseY: -0.6, height: 3.6, depth: 0.4, res: 0.6, seed: 13, build: buildIslands };
+      this.strips.push({ id: 'sea', f: 0.1, period: 40, baseY: -0.6, height: 0, depth: 9, res: 0.5, seed: 7, build: buildSea });
+      glitter = 0;
+      this.strips.push({ id: 'islands', f: 0.1, period: 70, baseY: -0.6, height: 4.4, depth: 0.4, res: 0.6, seed: 13, build: buildIslands });
     } else {
-      this.back.push({ id: 'mountains', f: 0.12, period: 64, baseY: -1.0, height: 8.5, depth: 1.5, res: 0.5, seed: 11, build: buildMountains });
+      this.strips.push({ id: 'mountains', f: 0.12, period: 64, baseY: -1.0, height: 8.5, depth: 1.5, res: 0.5, seed: 11, build: buildMountains });
     }
+    this.glitterAfter = glitter;
+    this.nearAt = this.strips.length;
     if (theme === 'meadow') {
       const H = P.hillsFar!;
-      this.mid.push({
+      this.strips.push({
         id: 'hillsFar',
         f: 0.25,
         period: 44,
@@ -1250,12 +1346,13 @@ export class Background {
         depth: 1.5,
         res: 0.6,
         seed: 21,
-        build: (c, L, Pp) =>
+        build: (c, L, Pp, tops) =>
           buildHills(
             c,
             L,
             Pp,
             H,
+            tops,
             [
               [1, 0.6],
               [2, 0.5],
@@ -1268,11 +1365,12 @@ export class Background {
               else bush(cc, x, y, lerp(0.18, 0.34, r()), { dark: H.deco, base: mix(H.deco, H.top, 0.3), light: H.decoLight }, r);
             },
             0.75,
+            0.95,
             0.3,
           ),
       });
     } else if (theme === 'snow') {
-      this.mid.push({ id: 'rangeFar', f: 0.25, period: 48, baseY: -1.5, height: 5.0, depth: 1.5, res: 0.6, seed: 21, build: buildRangeFar });
+      this.strips.push({ id: 'rangeFar', f: 0.25, period: 48, baseY: -1.5, height: 5.0, depth: 1.5, res: 0.6, seed: 21, build: buildRangeFar });
     }
     const N = P.hillsNear;
     const nearDeco =
@@ -1320,21 +1418,22 @@ export class Background {
                 cc.fill();
               }
             };
-    this.mid.push({
+    this.strips.push({
       id: 'hillsNear',
       f: 0.4,
       period: 36,
       baseY: -2.0,
-      height: 4.0,
+      height: 4.2,
       depth: 1.5,
       res: 0.75,
       seed: theme === 'beach' ? 33 : 31,
-      build: (c, L, Pp) =>
+      build: (c, L, Pp, tops) =>
         buildHills(
           c,
           L,
           Pp,
           N,
+          tops,
           theme === 'beach'
             ? [
                 [1, 0.4],
@@ -1351,32 +1450,40 @@ export class Background {
           1.5,
           nearDeco,
           theme === 'beach' ? 0.35 : theme === 'snow' ? 0.4 : 0.45,
-          0.12,
+          1.4,
+          0.14,
         ),
     });
-    this.mid.push({ id: 'trees', f: 0.62, period: 30, baseY: -1.6, height: 8.5, depth: 1.5, res: 0.85, seed: 41, build: buildTrees, haze: 0.16 });
+    this.strips.push({ id: 'trees', f: 0.62, period: 30, baseY: -1.6, height: 7.8, depth: 1.5, res: 0.85, seed: 41, build: buildTrees, haze: 0.2 });
   }
 
-  /** Построить все полосы для данного вида заранее (экран загрузки). */
+  /** Построить все полосы и облака для данного вида заранее (экран загрузки). */
   prewarm(view: ViewInfo): void {
     const sRef = view.screenH / AIM_VIEW_H;
-    for (const L of this.allStrips()) this.ensureStrip(L, layerScale(view, sRef, L.f) * L.res, view, true);
-  }
-
-  private allStrips(): StripLayer[] {
-    const out = [...this.back];
-    if (this.sea) out.push(this.sea);
-    if (this.islands) out.push(this.islands);
-    return out.concat(this.mid);
+    this.lastScale = view.scale;
+    this.lastH = view.screenH;
+    this.scaleSince = nowMs() - STABLE_MS;
+    for (const L of this.strips) this.stripFor(L, view, sRef, true);
+    for (const C of [this.cloudsFar, this.cloudsNear]) {
+      const sL = layerScale(view, sRef, C.f);
+      for (const c of C.items) this.cloudFor(c, sL, true);
+    }
   }
 
   draw(ctx: CanvasRenderingContext2D, view: ViewInfo): void {
     const W = view.screenW;
     const H = view.screenH;
     if (W <= 0 || H <= 0 || view.scale <= 0) return;
-    this.buildsLeft = 1;
     const sRef = H / AIM_VIEW_H;
-    const P = this.P;
+    const now = nowMs();
+    if (view.scale !== this.lastScale || H !== this.lastH) {
+      if (this.lastScale < 0) this.scaleSince = now - STABLE_MS;
+      else this.scaleSince = now;
+      this.lastScale = view.scale;
+      this.lastH = H;
+    }
+    this.buildsLeft = 1;
+    this.cloudBuildsLeft = 2;
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = 1;
@@ -1384,49 +1491,103 @@ export class Background {
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'low';
 
-    // линия горизонта: база гор (или горизонт моря)
-    const hz = this.sea ?? this.back[0];
-    const sH = layerScale(view, sRef, hz.f);
-    const horizonY = H / 2 - (hz.baseY - view.camY * hz.f) * sH;
-
-    this.drawSky(ctx, view, horizonY);
-    this.drawSun(ctx, view, sRef, horizonY);
-    this.drawClouds(ctx, view, sRef, this.cloudsFar);
-    for (const L of this.back) this.drawStrip(ctx, view, sRef, L);
-    if (this.sea) {
-      this.drawStrip(ctx, view, sRef, this.sea);
-      this.drawSeaGlitter(ctx, view, sRef, horizonY);
+    // 1. полосы и линии непрозрачности
+    const n = this.strips.length;
+    const strips: Array<Strip | null> = [];
+    const geo: Array<{ sL: number; yTop: number; cover: number }> = [];
+    for (const L of this.strips) {
+      const sL = layerScale(view, sRef, L.f);
+      const yBase = H / 2 - (L.baseY - view.camY * L.f) * sL;
+      const yTop = yBase - L.height * sL;
+      const s = yTop < H ? this.stripFor(L, view, sRef, false) : null;
+      strips.push(s);
+      const cover = s && s.fill ? yBase - s.opaqueTop * sL : yTop >= H && L.depth > 0 ? H : Infinity;
+      geo.push({ sL, yTop, cover });
     }
-    if (this.islands) this.drawStrip(ctx, view, sRef, this.islands);
-    this.drawClouds(ctx, view, sRef, this.cloudsNear);
-    for (const L of this.mid) this.drawStrip(ctx, view, sRef, L);
-    if (P.snowfall) this.drawSnowfall(ctx, view, sRef);
+    // limit[i] — ниже этой линии слой i закрыт следующими слоями
+    const limit = new Array<number>(n + 1).fill(H);
+    let run = H;
+    for (let i = n - 1; i >= 0; i--) {
+      limit[i] = run;
+      run = Math.min(run, Math.ceil(geo[i].cover) + 2);
+    }
+    const skyLimit = Math.min(H, run);
+
+    // 2. небо, солнце, дальние облака
+    const hz = this.strips[0];
+    const horizonY = H / 2 - (hz.baseY - view.camY * hz.f) * geo[0].sL;
+    const ph = this._phase;
+    ph?.('prep');
+    this.drawSky(ctx, view, horizonY, skyLimit);
+    ph?.('sky');
+    this.drawSun(ctx, view, sRef, horizonY, skyLimit);
+    ph?.('sun');
+    this.drawClouds(ctx, view, sRef, this.cloudsFar, skyLimit);
+    ph?.('cloudsFar');
+    // 3. слои
+    for (let i = 0; i < n; i++) {
+      if (i === this.nearAt) {
+        this.drawClouds(ctx, view, sRef, this.cloudsNear, Math.min(limit[i - 1] ?? H, geo[i].cover + 2));
+        ph?.('cloudsNear');
+      }
+      const s = strips[i];
+      if (s) this.blitStrip(ctx, view, this.strips[i], s, geo[i].sL, geo[i].yTop, limit[i]);
+      ph?.(this.strips[i].id);
+      if (i === this.glitterAfter) {
+        this.drawSeaGlitter(ctx, view, sRef, horizonY, limit[i]);
+        ph?.('glitter');
+      }
+    }
+    if (this.P.snowfall) this.drawSnowfall(ctx, view, sRef);
+    ph?.('snowfall');
     ctx.restore();
   }
 
   // ── небо и солнце ──
 
-  private drawSky(ctx: Ctx2D, v: ViewInfo, horizonY: number): void {
-    // градиент «привязан» к горизонту: при подъёме камеры сверху открывается более густая синева
-    const top = horizonY - v.screenH * 0.62;
-    const key = `${Math.round(top)}:${Math.round(horizonY)}`;
-    if (!this.skyGrad || this.skyGrad.key !== key) {
-      const g = ctx.createLinearGradient(0, top, 0, horizonY);
-      for (const [o, col] of this.P.sky) g.addColorStop(o, col);
-      this.skyGrad = { g, key };
+  private drawSky(ctx: Ctx2D, v: ViewInfo, horizonY: number, limit: number): void {
+    const W = v.screenW;
+    const H = v.screenH;
+    const sky = this.P.sky;
+    // полоса градиента высотой 0.62·H, «привязанная» к горизонту; выше — сплошной верхний цвет, ниже — нижний
+    const gH = Math.max(2, Math.round(H * 0.62));
+    if (!this.skyBand || this.skyBand.W !== W || this.skyBand.H !== H) {
+      const c = createCanvas(W, gH);
+      const cx = ctx2d(c);
+      const g = cx.createLinearGradient(0, 0, 0, gH);
+      for (const [o, col] of sky) g.addColorStop(o, col);
+      cx.fillStyle = g;
+      cx.fillRect(0, 0, W, gH);
+      this.skyBand = { c, W, H };
     }
-    ctx.fillStyle = this.skyGrad.g;
-    ctx.fillRect(0, 0, v.screenW, v.screenH);
+    const top = Math.round(horizonY) - gH;
+    const bot = top + gH;
+    if (top > 0) {
+      ctx.fillStyle = sky[0][1];
+      ctx.fillRect(0, 0, W, Math.min(top, limit));
+    }
+    const y0 = Math.max(0, top);
+    const y1 = Math.min(limit, bot);
+    if (y1 > y0) ctx.drawImage(this.skyBand.c, 0, y0 - top, W, y1 - y0, 0, y0, W, y1 - y0);
+    if (bot < limit) {
+      ctx.fillStyle = sky[sky.length - 1][1];
+      ctx.fillRect(0, Math.max(0, bot), W, limit - Math.max(0, bot));
+    }
   }
 
-  private drawSun(ctx: Ctx2D, v: ViewInfo, sRef: number, horizonY: number): void {
+  private drawSun(ctx: Ctx2D, v: ViewInfo, sRef: number, horizonY: number, limit: number): void {
     const S = this.P.sun;
     const R = S.r * v.screenH;
     const sx = S.x * v.screenW - v.camX * 0.02 * sRef;
     const sy = S.onHorizon ? horizonY - R * 0.35 : S.y * v.screenH + v.camY * 0.02 * sRef;
-    const gr = R * 4.8;
-    if (sy + gr > 0 && sy - gr < v.screenH) ctx.drawImage(this.glow, sx - gr, sy - gr, gr * 2, gr * 2);
-    if (sy + R < 0) return;
+    const gr = Math.round(R * 4.8);
+    if (!this.glow || this.glow.width !== gr * 2) this.glow = renderGlow(S.glow, S.glowA, gr * 2);
+    if (sy - gr < limit && sy + gr > 0) {
+      const y0 = Math.round(sy) - gr;
+      const h = Math.min(gr * 2, limit - y0);
+      if (h > 0) ctx.drawImage(this.glow, 0, 0, gr * 2, h, Math.round(sx) - gr, y0, gr * 2, h);
+    }
+    if (sy + R < 0 || sy - R > limit) return;
     const core = ctx.createRadialGradient(sx - R * 0.3, sy - R * 0.3, R * 0.1, sx, sy, R);
     core.addColorStop(0, '#FFFFFF');
     core.addColorStop(1, S.core);
@@ -1436,29 +1597,31 @@ export class Background {
     ctx.fill();
   }
 
-  /** Солнечная дорожка на воде (beach): мерцающие штрихи под солнцем. */
-  private drawSeaGlitter(ctx: Ctx2D, v: ViewInfo, sRef: number, horizonY: number): void {
+  /** Солнечная дорожка на воде (beach): отражённое свечение и мерцающие штрихи под солнцем. */
+  private drawSeaGlitter(ctx: Ctx2D, v: ViewInfo, sRef: number, horizonY: number, limit: number): void {
     const S = this.P.sea!;
     const sx = this.P.sun.x * v.screenW - v.camX * 0.02 * sRef;
     const R = this.P.sun.r * v.screenH;
-    const bottom = Math.min(v.screenH, horizonY + v.screenH * 0.32);
+    const bottom = Math.min(limit, horizonY + v.screenH * 0.32);
     if (bottom <= horizonY) return;
-    // отражённое свечение
-    const gw = R * 5;
-    const gh = R * 1.4;
-    ctx.globalAlpha = 0.75;
-    ctx.drawImage(this.glow, sx - gw, horizonY - gh * 0.3, gw * 2, gh * 2);
-    ctx.globalAlpha = 1;
+    if (this.glow) {
+      const gw = R * 5;
+      const gh = Math.min(R * 2.8, bottom - horizonY + R * 0.4);
+      ctx.globalAlpha = 0.7;
+      ctx.drawImage(this.glow, 0, this.glow.height / 2, this.glow.width, this.glow.height / 2, sx - gw, horizonY - R * 0.1, gw * 2, gh);
+      ctx.globalAlpha = 1;
+    }
     const r = rand(5);
     const t = v.time;
     ctx.fillStyle = S.sparkle;
     const n = 30;
     for (let i = 0; i < n; i++) {
       const u = i / n;
-      const y = horizonY + 3 * v.dpr + u * u * (bottom - horizonY);
+      const y = horizonY + 3 * v.dpr + u * u * (horizonY + v.screenH * 0.32 - horizonY);
       const w = R * (0.5 + 2.4 * u) * lerp(0.4, 1, r());
       const jx = (r() - 0.5) * R * 0.8 * u;
       const a = (0.9 - 0.55 * u) * (0.65 + 0.35 * Math.sin(2.6 * t + i * 1.9 + r() * 3));
+      if (y > bottom) continue;
       ctx.globalAlpha = clamp(a, 0, 1);
       const hh = (1.2 + 2.6 * u) * v.dpr;
       ctx.fillRect(sx - w / 2 + jx + Math.sin(t * 0.8 + i) * u * 3 * v.dpr, y, w, hh);
@@ -1468,22 +1631,35 @@ export class Background {
 
   // ── облака ──
 
-  private cloudSprite(c: CloudItem, ppmWant: number): CloudSprite {
-    const b = bucketOf(ppmWant);
-    const key = `${c.seed}:${b}`;
-    let s = this.cloudCache.get(key);
-    if (!s) {
-      s = renderCloud(c.seed, c.w, b, this.P.cloud);
-      this.cloudCache.set(key, s);
-      if (this.cloudCache.size > 48) {
-        const first = this.cloudCache.keys().next().value;
-        if (first !== undefined && first !== key) this.cloudCache.delete(first);
+  /** Спрайт облака под масштаб sL: точный при неподвижном зуме, иначе ближайший готовый. */
+  private cloudFor(c: CloudItem, sL: number, force: boolean): CloudSprite {
+    let list = this.clouds.get(c.seed);
+    if (!list) {
+      list = [];
+      this.clouds.set(c.seed, list);
+    }
+    let best: CloudSprite | null = null;
+    let err = Infinity;
+    for (const s of list) {
+      const e = Math.abs(Math.log(sL / s.ppm));
+      if (e < err) {
+        err = e;
+        best = s;
       }
     }
-    return s;
+    if (best && err < 1e-4) return best;
+    const stable = nowMs() - this.scaleSince >= STABLE_MS;
+    if (!best || force || (stable && this.cloudBuildsLeft > 0)) {
+      if (best) this.cloudBuildsLeft--;
+      const s = renderCloud(c.seed, c.w, sL, this.P.cloud);
+      list.push(s);
+      if (list.length > 2) list.shift();
+      return s;
+    }
+    return best;
   }
 
-  private drawClouds(ctx: Ctx2D, v: ViewInfo, sRef: number, L: CloudLayer): void {
+  private drawClouds(ctx: Ctx2D, v: ViewInfo, sRef: number, L: CloudLayer, limit: number): void {
     const sL = layerScale(v, sRef, L.f);
     const periodPx = L.period * sL;
     const drift = L.drift * v.time;
@@ -1491,15 +1667,16 @@ export class Background {
     for (const c of L.items) {
       const yb = v.screenH / 2 - (L.baseY + c.y - v.camY * L.f) * sL;
       const hPx = c.w * 0.6 * sL;
-      if (yb < 0 || yb - hPx > v.screenH) continue;
+      if (yb < 0 || yb - hPx > limit) continue;
       const wPx = (c.w + 0.6) * sL;
       let x = v.screenW / 2 + (c.x + drift - v.camX * L.f) * sL;
       x = ((x % periodPx) + periodPx) % periodPx;
       for (let X = x - periodPx; X < v.screenW; X += periodPx) {
         if (X + wPx < 0) continue;
-        const s = this.cloudSprite(c, sL * L.res);
+        const s = this.cloudFor(c, sL, false);
         const k = sL / s.ppm;
-        ctx.drawImage(s.canvas, X - s.ox * k, yb - s.oy * k, s.canvas.width * k, s.canvas.height * k);
+        if (Math.abs(k - 1) < 1e-3) ctx.drawImage(s.canvas, Math.round(X - s.ox), Math.round(yb - s.oy));
+        else ctx.drawImage(s.canvas, X - s.ox * k, yb - s.oy * k, s.canvas.width * k, s.canvas.height * k);
       }
     }
     ctx.globalAlpha = 1;
@@ -1521,10 +1698,11 @@ export class Background {
       const ph = r() * TAU;
       const fx = r();
       const fy = r();
-      const xx = fx * (W + 40) - v.camX * par + Math.sin(t * lerp(0.5, 1, r()) + ph) * 10 * v.dpr + t * 8 * v.dpr;
+      const sw = lerp(0.5, 1, r());
+      const xx = fx * (W + 40) - v.camX * par + Math.sin(t * sw + ph) * 10 * v.dpr + t * 8 * v.dpr;
       const yy = fy * (H + 40) + t * vy + v.camY * par;
-      const X = ((xx % (W + 40)) + (W + 40)) % (W + 40) - 20;
-      const Y = ((yy % (H + 40)) + (H + 40)) % (H + 40) - 20;
+      const X = (((xx % (W + 40)) + (W + 40)) % (W + 40)) - 20;
+      const Y = (((yy % (H + 40)) + (H + 40)) % (H + 40)) - 20;
       ctx.moveTo(X + sz, Y);
       ctx.arc(X, Y, sz, 0, TAU);
     }
@@ -1533,60 +1711,46 @@ export class Background {
 
   // ── полосы ──
 
-  private stateOf(L: StripLayer): LayerState {
+  /** Полоса под текущий масштаб: точная (1:1) при неподвижном зуме, иначе ближайшая готовая. */
+  private stripFor(L: StripLayer, v: ViewInfo, sRef: number, force: boolean): Strip {
     let st = this.states.get(L.id);
     if (!st) {
-      st = { strips: [], wantBucket: 0, wantSince: 0 };
+      st = { strips: [] };
       this.states.set(L.id, st);
     }
-    return st;
-  }
-
-  /** Выбрать (или построить) полосу под нужную плотность пикселей. */
-  private ensureStrip(L: StripLayer, ppmWant: number, v: ViewInfo, force = false): Strip | null {
-    const st = this.stateOf(L);
-    const ppmCap = STRIP_MAX_PX / L.period;
-    const want = Math.min(ppmWant, ppmCap);
+    const res = v.dpr > 1.25 ? L.res : 1;
+    const want = Math.min(layerScale(v, sRef, L.f) * res, STRIP_MAX_PX / L.period);
+    const totalWant = Math.max(8, Math.round(L.period * want));
     let best: Strip | null = null;
-    let bestErr = Infinity;
+    let err = Infinity;
     for (const s of st.strips) {
-      const q = want / s.ppm;
-      const err = Math.abs(Math.log(q));
-      if (err < bestErr) {
-        bestErr = err;
+      if (s.totalPx === totalWant) return s;
+      const e = Math.abs(Math.log(totalWant / s.totalPx));
+      if (e < err) {
+        err = e;
         best = s;
       }
     }
-    const q = best ? want / best.ppm : 0;
-    if (best && q >= REBUILD_LO && q <= REBUILD_HI) return best;
-    const b = Math.min(bucketOf(want), ppmCap);
-    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-    if (st.wantBucket !== b) {
-      st.wantBucket = b;
-      st.wantSince = now;
-    }
-    const stable = now - st.wantSince >= STABLE_MS;
+    const stable = nowMs() - this.scaleSince >= STABLE_MS;
     if (!best || force || (stable && this.buildsLeft > 0)) {
       if (best) this.buildsLeft--;
-      const s = this.buildStrip(L, b);
+      const s = this.buildStrip(L, totalWant);
       st.strips.push(s);
       while (st.strips.length > STRIPS_PER_LAYER) st.strips.shift();
-      void v;
       return s;
     }
     return best;
   }
 
-  private buildStrip(L: StripLayer, bucket: number): Strip {
-    const totalPx = Math.max(8, Math.round(L.period * bucket));
+  private buildStrip(L: StripLayer, totalPx: number): Strip {
     const ppm = totalPx / L.period;
     const hPx = Math.max(2, Math.ceil((L.height + L.depth) * ppm));
     const nTiles = Math.ceil(totalPx / TILE_MAX_PX);
     const tilePx = Math.ceil(totalPx / nTiles);
     const tiles: AnyCanvas[] = [];
     const tileX: number[] = [];
-    const tileW: number[] = [];
-    let fill: string | null = null;
+    let out: BuildOut = { fill: null, opaqueTop: -1e9 };
+    let tops: Tops | null = null;
     for (let i = 0; i < nTiles; i++) {
       const x0 = i * tilePx;
       const w = Math.min(tilePx, totalPx - x0);
@@ -1594,7 +1758,9 @@ export class Background {
       const cx = ctx2d(c);
       cx.setTransform(ppm, 0, 0, -ppm, -x0, L.height * ppm);
       cx.lineJoin = 'round';
-      const f = L.build(cx, L, this.P);
+      const t = new Tops(L.period);
+      out = L.build(cx, L, this.P, t);
+      if (!tops) tops = t;
       if (L.haze) {
         cx.setTransform(1, 0, 0, 1, 0, 0);
         cx.globalCompositeOperation = 'source-atop';
@@ -1602,46 +1768,60 @@ export class Background {
         cx.fillRect(0, 0, w, hPx);
         cx.globalCompositeOperation = 'source-over';
       }
-      if (i === 0 && f !== null) fill = sampleColor(c, Math.floor(w / 2), hPx - 1) ?? f;
       tiles.push(c);
-      tileX.push(x0 / ppm);
-      tileW.push(w / ppm);
+      tileX.push(x0);
     }
-    return { tiles, tileX, tileW, ppm, hPx, fill, bucket };
+    let fill: string | null = null;
+    if (out.fill !== null) fill = sampleColor(tiles[0], Math.floor(tiles[0].width / 2), hPx - 1) ?? out.fill;
+    // куски для блита: столбцы с общей высотой содержимого, разрезанные по тайлам
+    const pieces: Piece[] = [];
+    for (const [x0m, x1m, topM] of runsOf(tops!, L.period)) {
+      const a = Math.round(x0m * ppm);
+      const b = Math.round(x1m * ppm);
+      const sy = clamp(Math.floor((L.height - topM - 0.12) * ppm), 0, hPx - 1);
+      for (let i = 0; i < tiles.length; i++) {
+        const t0 = tileX[i];
+        const t1 = t0 + tiles[i].width;
+        const lo = Math.max(a, t0);
+        const hi = Math.min(b, t1);
+        if (hi > lo) pieces.push({ tile: i, sx: lo - t0, sw: hi - lo, sy });
+      }
+    }
+    return { tiles, tileX, totalPx, ppm, hPx, fill, opaqueTop: out.opaqueTop, pieces };
   }
 
-  private drawStrip(ctx: Ctx2D, v: ViewInfo, sRef: number, L: StripLayer): void {
+  /** Блит полосы: периодические копии, куски по столбцам, обрезка снизу по limit, заливка ниже полосы. */
+  private blitStrip(ctx: Ctx2D, v: ViewInfo, L: StripLayer, s: Strip, sL: number, yTopF: number, limit: number): void {
     const W = v.screenW;
-    const H = v.screenH;
-    const sL = layerScale(v, sRef, L.f);
-    const yBase = H / 2 - (L.baseY - v.camY * L.f) * sL;
-    const yTop = yBase - L.height * sL;
-    const hDraw = (L.height + L.depth) * sL;
-    if (yTop >= H) return; // слой целиком ниже экрана
-    const s = this.ensureStrip(L, sL * L.res, v);
-    if (!s) return;
-    const periodPx = L.period * sL;
-    if (yTop + hDraw > 0) {
+    let k = sL / s.ppm;
+    const exact = Math.abs(k - 1) < 2e-3;
+    if (exact) k = 1;
+    const yTop = exact ? Math.round(yTopF) : yTopF;
+    const yBot = yTop + s.hPx * k;
+    const y1 = Math.min(yBot, limit);
+    if (y1 > yTop && yTop < v.screenH) {
+      const periodPx = s.totalPx * k;
       let x0 = W / 2 - v.camX * L.f * sL;
-      x0 = ((x0 % periodPx) + periodPx) % periodPx - periodPx;
+      x0 = (((x0 % periodPx) + periodPx) % periodPx) - periodPx;
+      if (exact) x0 = Math.round(x0);
       for (let px = x0; px < W; px += periodPx) {
-        for (let i = 0; i < s.tiles.length; i++) {
-          const tx = px + s.tileX[i] * sL;
-          const tw = s.tileW[i] * sL;
-          if (tx > W || tx + tw < 0) continue;
-          // целые границы тайлов — без щелей и наложений между копиями
-          const xl = Math.round(tx);
-          const xr = Math.round(tx + tw);
-          ctx.drawImage(s.tiles[i], xl, yTop, xr - xl, hDraw);
+        for (const p of s.pieces) {
+          const sx0 = s.tileX[p.tile] + p.sx;
+          const xl = Math.round(px + sx0 * k);
+          const xr = Math.round(px + (sx0 + p.sw) * k);
+          if (xr <= 0 || xl >= W || xr <= xl) continue;
+          const dy0 = yTop + p.sy * k;
+          if (dy0 >= y1) continue;
+          const sh = Math.min(s.hPx - p.sy, (y1 - dy0) / k);
+          if (sh <= 0) continue;
+          ctx.drawImage(s.tiles[p.tile], p.sx, p.sy, p.sw, sh, xl, dy0, xr - xl, sh * k);
         }
       }
     }
-    if (s.fill) {
-      const yb = Math.max(0, Math.floor(yTop + hDraw - 1));
-      if (yb < H) {
-        ctx.fillStyle = s.fill;
-        ctx.fillRect(0, yb, W, H - yb);
-      }
+    if (s.fill && limit > yBot - 1) {
+      const yb = Math.max(0, Math.floor(yBot - 1));
+      ctx.fillStyle = s.fill;
+      ctx.fillRect(0, yb, W, limit - yb);
     }
   }
 }
@@ -1649,21 +1829,22 @@ export class Background {
 // ───────────────────────── передний план ─────────────────────────
 
 /**
- * Передний план: пучки травы с цветами (meadow), пляжная трава (beach), сугробы (snow) у нижнего края.
- * Y — мировая (база на 0.55 м ниже земли), X — параллакс 1.2, лёгкое покачивание от ветра.
- * Над уровнем земли выступает не больше ~0.3 м (≈2–3 % высоты кадра в виде рогатки).
+ * Передний план: пучки травы, широколистные кустики и цветы (meadow / beach), сугробы с сухими травинками (snow),
+ * поднимающиеся из-за нижнего края кадра. Основания — на мировой Y = −1.5 м (камера ниже не опускается, 01 §6.1),
+ * верхушки не выше −0.1 м: игровую зону (над землёй) передний план не перекрывает. X — параллакс 1.2, лёгкое
+ * покачивание от ветра.
  */
 export function drawForeground(ctx: CanvasRenderingContext2D, theme: ThemeId, view: ViewInfo): void {
   const P = PAL[theme];
-  const s0 = view.scale * 1.08;
+  const s0 = view.scale * 1.15;
   if (s0 <= 0) return;
   const f = 1.2;
-  const yb = view.screenH / 2 - (-0.55 - view.camY) * view.scale;
-  if (yb - 0.9 * s0 > view.screenH) return;
+  const yb = view.screenH / 2 - (-1.5 - view.camY) * view.scale;
+  if (yb - 1.3 * s0 > view.screenH) return;
   const Pm = 18;
   const periodPx = Pm * s0;
   let x0 = view.screenW / 2 - view.camX * f * s0;
-  x0 = ((x0 % periodPx) + periodPx) % periodPx - periodPx;
+  x0 = (((x0 % periodPx) + periodPx) % periodPx) - periodPx;
   const t = view.time;
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -1672,12 +1853,15 @@ export function drawForeground(ctx: CanvasRenderingContext2D, theme: ThemeId, vi
   const pathA = new Path2D();
   const pathB = new Path2D();
   const pathC = new Path2D();
-  const mound = new Path2D();
+  const leaves = new Path2D();
+  const leavesLit = new Path2D();
+  const twigs = new Path2D();
   const flowers: Array<[number, number, number, string]> = [];
   for (let px = x0; px < view.screenW + periodPx; px += periodPx) {
     const r = rand(8 + theme.length);
-    for (let i = 0; i < 9; i++) {
-      const cx = px + ((i + r() * 0.7) / 9) * periodPx;
+    const count = theme === 'snow' ? 6 : 9;
+    for (let i = 0; i < count; i++) {
+      const cx = px + ((i + r() * 0.7) / count) * periodPx;
       const s = s0 * lerp(0.75, 1.05, r());
       const kind = r();
       const flower = r();
@@ -1685,22 +1869,51 @@ export function drawForeground(ctx: CanvasRenderingContext2D, theme: ThemeId, vi
       const nb = 6 + Math.floor(r() * 4);
       const hs: number[] = [];
       for (let j = 0; j < nb; j++) hs.push(r());
-      if (cx < -s * 1.5 || cx > view.screenW + s * 1.5) continue;
+      if (cx < -s * 2 || cx > view.screenW + s * 2) continue;
+      const sway = Math.sin(1.3 * t + cx * 0.013) * 0.06;
       if (theme === 'snow') {
-        // сугроб: тень + тело + блик
-        const w = s * lerp(0.8, 1.15, kind);
-        mound.moveTo(cx + w + 0.06 * s, yb + 0.12 * s);
-        mound.ellipse(cx + 0.06 * s, yb + 0.12 * s, w, 0.46 * s, 0, 0, TAU);
-        pathA.moveTo(cx + w * 0.95, yb + 0.14 * s);
-        pathA.ellipse(cx, yb + 0.14 * s, w * 0.95, 0.42 * s, 0, 0, TAU);
-        pathC.moveTo(cx - w * 0.2 + w * 0.45, yb - 0.12 * s);
-        pathC.ellipse(cx - w * 0.2, yb - 0.12 * s, w * 0.45, 0.12 * s, 0, 0, TAU);
+        // невысокий сугроб с плоским дном: тень, затенённое тело, освещённая шапка, блик
+        const w = s * lerp(0.6, 0.95, kind);
+        const h = s * lerp(0.26, 0.4, flower);
+        const by = yb + 0.12 * s;
+        shadow.moveTo(cx + w * 1.05 + 0.05 * s, by + 0.03 * s);
+        shadow.ellipse(cx + 0.05 * s, by + 0.03 * s, w * 1.05, 0.07 * s, 0, 0, TAU);
+        pathB.moveTo(cx + w, by);
+        pathB.ellipse(cx, by, w, h, 0, Math.PI, TAU);
+        pathA.moveTo(cx + w * 0.8, by - h * 0.12);
+        pathA.ellipse(cx - w * 0.12, by - h * 0.12, w * 0.92, h * 0.86, 0, Math.PI, TAU);
+        pathC.moveTo(cx - w * 0.3 + w * 0.26, by - h * 0.72);
+        pathC.ellipse(cx - w * 0.3, by - h * 0.72, w * 0.26, h * 0.1, -0.15, 0, TAU);
+        if (hs[0] < 0.6) {
+          // сухие травинки из снега
+          for (let j = 0; j < 3; j++) {
+            const bx = cx + (hs[j + 1] - 0.5) * w;
+            const hh = s * lerp(0.25, 0.45, hs[j + 2]);
+            const lean = (hs[j + 3] - 0.5) * 0.3 * s + sway * hh * 2;
+            twigs.moveTo(bx, by - h * 0.5);
+            twigs.quadraticCurveTo(bx + lean * 0.3, by - h * 0.5 - hh * 0.6, bx + lean, by - h * 0.5 - hh);
+          }
+        }
         continue;
       }
-      // кочка под пучком — пучок «растёт» из неё
-      mound.moveTo(cx + 0.42 * s, yb + 0.12 * s);
-      mound.ellipse(cx, yb + 0.12 * s, 0.42 * s, 0.2 * s, 0, 0, TAU);
-      const sway = Math.sin(1.3 * t + cx * 0.013) * 0.06;
+      // мягкая тень у основания
+      shadow.moveTo(cx + 0.42 * s, yb + 0.1 * s);
+      shadow.ellipse(cx, yb + 0.1 * s, 0.42 * s, 0.08 * s, 0, 0, TAU);
+      if (kind < 0.22) {
+        // широколистный кустик: 4–5 листьев веером
+        const nl = 4 + Math.floor(hs[0] * 2);
+        for (let j = 0; j < nl; j++) {
+          const a = -Math.PI / 2 + (j / (nl - 1) - 0.5) * 2.2 + sway;
+          const L = s * lerp(0.32, 0.46, hs[j]);
+          const lx = cx + Math.cos(a) * L * 0.55;
+          const ly = yb + 0.06 * s + Math.sin(a) * L * 0.55;
+          leaves.moveTo(lx + L * 0.5 * Math.cos(a), ly + L * 0.5 * Math.sin(a));
+          leaves.ellipse(lx, ly, L * 0.52, L * 0.2, a, 0, TAU);
+          leavesLit.moveTo(lx - 0.02 * s, ly - 0.02 * s);
+          leavesLit.ellipse(lx - 0.02 * s, ly - 0.02 * s, L * 0.38, L * 0.08, a, 0, TAU);
+        }
+        continue;
+      }
       for (let j = 0; j < nb; j++) {
         const u = j / (nb - 1) - 0.5;
         const h = s * lerp(0.35, theme === 'beach' ? 0.85 : 0.72, hs[j]) * (1 - Math.abs(u) * 0.6);
@@ -1717,15 +1930,25 @@ export function drawForeground(ctx: CanvasRenderingContext2D, theme: ThemeId, vi
     }
   }
   if (theme === 'snow') {
+    ctx.fillStyle = 'rgba(120,145,190,0.35)';
+    ctx.fill(shadow);
     ctx.fillStyle = P.fg.b;
-    ctx.fill(mound);
+    ctx.fill(pathB);
     ctx.fillStyle = P.fg.a;
     ctx.fill(pathA);
-    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
     ctx.fill(pathC);
+    ctx.strokeStyle = '#7A6A5A';
+    ctx.lineCap = 'round';
+    ctx.lineWidth = Math.max(1, 0.025 * s0);
+    ctx.stroke(twigs);
   } else {
+    ctx.fillStyle = 'rgba(20,40,10,0.22)';
+    ctx.fill(shadow);
     ctx.fillStyle = P.fg.a;
-    ctx.fill(mound);
+    ctx.fill(leaves);
+    ctx.fillStyle = rgba(P.fg.c, 0.85);
+    ctx.fill(leavesLit);
     ctx.fillStyle = P.fg.a;
     ctx.fill(pathA);
     ctx.fillStyle = P.fg.b;

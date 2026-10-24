@@ -95,6 +95,17 @@ export class HudView implements View {
     this.levelTimer = window.setTimeout(() => this.levelEl.classList.add('is-hidden'), 2500);
   }
 
+  /** Скрыть HUD под окном результата (07 §10.1: «в RESULTS HUD гаснет за 0.2 с»). */
+  setDim(on: boolean): void {
+    this.el.classList.toggle('is-dim', on);
+    if (on) this.hideLevelLabel();
+  }
+
+  hideLevelLabel(): void {
+    window.clearTimeout(this.levelTimer);
+    this.levelEl.classList.add('is-hidden');
+  }
+
   focus(): void {
     // в игре фокус не трогаем (ввод — на canvas); убираем его с кнопок меню
     const a = document.activeElement as HTMLElement | null;
