@@ -47,7 +47,10 @@ export interface BlockDef {
   y: number;
   w: number;
   h: number;
+  /** Зеркальный треугольник — angle = π/2 с переставленными w и h. */
   angle?: number;
+  /** Необязательный идентификатор для отладки и отчётов. */
+  id?: string;
 }
 
 /** Свинья. (x, y) — центр. */
@@ -55,6 +58,9 @@ export interface PigDef {
   type: PigType;
   x: number;
   y: number;
+  /** Свинья стоит на неустойчивом месте намеренно (проверка устойчивости не требует ≥0.7 м свободы). */
+  fragile?: true;
+  id?: string;
 }
 
 /** Ящик TNT (квадрат size×size). Взрывается от сильного удара. */
@@ -103,6 +109,36 @@ export interface LevelDef {
   stars: StarThresholds;
   /** Необязательная подсказка/обучение на старте уровня (рус.). */
   hint?: string;
+  /** Камера: точка обзора сооружения и высота вида рогатки (если не задано — ядро/камера считают сами). */
+  camera?: { castle?: { x: number; y: number; viewH: number }; aimViewH?: number };
+  /** Метаданные дизайна (игрой не используются; читают тесты и отчёты). */
+  meta?: LevelMeta;
+  /** Декор без физики (кусты, камни, таблички) — рисуется рендером. */
+  decor?: DecorDef[];
+  version?: 1;
+}
+
+/** Метаданные уровня для дизайна и проверки. */
+export interface LevelMeta {
+  /** Минимум птиц, которым решатель проходит уровень. */
+  nMin?: number;
+  /** Сложность 1..10. */
+  difficulty?: number;
+  /** Чему учит уровень (рус.). */
+  teach?: string;
+  /** Откуда пороги звёзд: 'solver' — по решателю, 'manual' — вручную. */
+  starsSource?: 'solver' | 'manual';
+  /** Произвольные данные калибровки (счёт решателя и т.п.). */
+  calib?: Record<string, number>;
+}
+
+/** Декоративный объект без физики. */
+export interface DecorDef {
+  kind: 'bush' | 'rock' | 'flower' | 'sign' | 'grass' | 'shell' | 'snowman' | 'pine';
+  x: number;
+  y: number;
+  scale?: number;
+  flip?: boolean;
 }
 
 /** Эпизод кампании. */
