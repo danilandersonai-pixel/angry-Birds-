@@ -1,0 +1,87 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+@font-face{font-family:'Rubik';font-weight:900;src:url('../../../node_modules/@fontsource/rubik/files/rubik-latin-900-normal.woff2') format('woff2');unicode-range:U+0000-00FF;}
+@font-face{font-family:'Rubik';font-weight:900;src:url('../../../node_modules/@fontsource/rubik/files/rubik-cyrillic-900-normal.woff2') format('woff2');unicode-range:U+0400-045F;}
+@font-face{font-family:'Luckiest Guy';src:url('../../../node_modules/@fontsource/luckiest-guy/files/luckiest-guy-latin-400-normal.woff2') format('woff2');}
+body{margin:0;background:#000}canvas{display:block}
+</style></head><body><canvas id=c></canvas>
+<script src="visual.js"></script>
+<script>
+const params = new URLSearchParams(location.search);
+const theme = params.get('theme') || 'meadow', viewH = +(params.get('viewH') || 15), W = +(params.get('w') || 1600), H = +(params.get('h') || 900);
+const c = document.getElementById('c'); c.width = W; c.height = H; const ctx = c.getContext('2d');
+Promise.all([document.fonts.load('900 40px Rubik', 'АБВабвёЁ0123'), document.fonts.load('40px "Luckiest Guy"', '0123')].map((p) => p.catch(() => null))).then(() => {
+  const t0 = performance.now();
+  const aspect = W / H, viewW = viewH * aspect;
+  const camX = 0 + 0.3 * viewW, camY = -1.2 + viewH / 2;
+  const v = makeView(W, H, viewH, camX, camY, 4.0);
+  drawBackground(ctx, v, theme);
+  const t1 = performance.now();
+  const terrain = [
+    { kind: 'ground', points: [[-40, 0], [11, 0], [12.2, 1.1], [21.5, 1.1], [22.7, 0], [130, 0], [130, -12], [-40, -12]] },
+    { kind: 'rock', points: [[24.5, 0], [25.2, 1.9], [26.4, 2.4], [27.8, 1.6], [28.4, 0]] },
+  ];
+  drawTerrain(ctx, v, terrain, theme);
+  const t2 = performance.now();
+  const ppu = v.scale; // спрайты под текущий масштаб
+  const G = 1.1; // верх плато
+  const blocks = [
+    ['wood', 'rect', 0.22, 1.7, 13.2, G + 0.85, 0, 0], ['wood', 'rect', 0.22, 1.7, 15.2, G + 0.85, 0, 1],
+    ['wood', 'rect', 2.6, 0.22, 14.2, G + 1.81, 0, 0],
+    ['ice', 'rect', 0.22, 1.7, 16.6, G + 0.85, 0, 2], ['ice', 'rect', 0.22, 1.7, 18.6, G + 0.85, 0, 0],
+    ['ice', 'rect', 2.6, 0.22, 17.6, G + 1.81, 0, 1],
+    ['stone', 'rect', 0.85, 0.85, 14.2, G + 2.345, 0, 0], ['stone', 'rect', 0.85, 0.85, 17.6, G + 2.345, 0, 2],
+    ['wood', 'rect', 0.85, 0.85, 20.3, G + 0.425, 0, 3], ['stone', 'circle', 0.8, 0.8, 20.3, G + 1.25, 0, 1],
+    ['wood', 'isoTriangle', 1.7, 0.85, 15.9, G + 2.345 + 0.0, 0, 0],
+    ['stone', 'rect', 4.4, 0.22, 15.9, G + 2.88 - 0.11 + 0.11, 0, 0],
+    ['ice', 'rect', 0.85, 0.85, 12.2 + 0.0, G + 0.425 + 0.0, 0.0, 3],
+    ['wood', 'triangle', 0.85, 0.85, 21.3, G + 0.425, 0, 1],
+  ];
+  const seeds = [3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47];
+  // тени-подложки AO под блоками на земле
+  applyWorld(ctx, v); ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  // рогатка (зад) + задняя резинка + птица + ложе + передняя резинка + рогатка (перед)
+  const S = [0, 0], anchor = [0, 2.7], pull = [-1.6, 2.0];
+  drawShadow(ctx, v, -1.6, 0, 0.45); drawShadow(ctx, v, -2.7, 0, 0.3);
+  drawSlingPart(ctx, v, 0, 0, 'back');
+  const dir = [anchor[0] - pull[0], anchor[1] - pull[1]], dl = Math.hypot(dir[0], dir[1]); dir[0] /= dl; dir[1] /= dl;
+  const perp = [-dir[1], dir[0]], tt = dl / 2.6, bw = lerp(0.17, 0.08, tt);
+  const e1 = [pull[0] + perp[0] * 0.38 - dir[0] * 0.2, pull[1] + perp[1] * 0.38 - dir[1] * 0.2], e2 = [pull[0] - perp[0] * 0.38 - dir[0] * 0.2, pull[1] - perp[1] * 0.38 - dir[1] * 0.2];
+  drawBand(ctx, v, [-0.30, 2.92], e1, bw);
+  drawBall(ctx, v, pull[0], pull[1], 0.45, '#D8302A', '#5A0E0A', '#FF7A66');
+  drawPouch(ctx, v, pull, dir, 0.45);
+  drawBand(ctx, v, [0.28, 2.88], e2, bw);
+  drawSlingPart(ctx, v, 0, 0, 'front');
+  drawBall(ctx, v, -2.7, 0.3, 0.3, '#5AA8E8', '#0E3A66', '#A8DCFF');
+  drawBall(ctx, v, -3.6, 0.5, 0.5, '#FFD21F', '#6A4A00', '#FFF4A0');
+  const t3 = performance.now();
+  // блоки
+  const sprites = [];
+  blocks.forEach((b, i) => { const spr = renderBlock(b[0], b[1], b[2], b[3], b[7], seeds[i], ppu); drawBlockSprite(ctx, v, spr, ppu, b[4], b[5], b[6]); });
+  const t4 = performance.now();
+  // свиньи
+  drawBall(ctx, v, 14.2, G + 0.45, 0.45, '#7FD444', '#1F4A0E', '#C8F59A');
+  drawBall(ctx, v, 17.6, G + 0.35, 0.35, '#7FD444', '#1F4A0E', '#C8F59A');
+  drawBall(ctx, v, 15.9, G + 3.4 + 0.45, 0.45, '#7FD444', '#1F4A0E', '#C8F59A');
+  // след прошлого выстрела
+  const trail = []; for (let i = 0; i < 40; i++) { const tt = i * 0.05; trail.push([0.2 + 13 * tt * 0.7, 2.9 + 13 * tt * 0.7 - 0.5 * 12.5 * tt * tt]); }
+  drawTrail(ctx, v, trail.filter((p) => p[1] > 0.3 && p[0] < 11.5));
+  // эффекты
+  drawPigPoof(ctx, v, 20.0, 3.4, 0.5, 0.2, 9);
+  drawDebris(ctx, v, 18.0, 3.6, 'ice', 0.18, 4, 10);
+  drawDust(ctx, v, 18.6, 3.0, 0.6, 0.25, 'ice', 3);
+  drawScore(ctx, v, 20.0, 4.1, '5000', '#8BD62E', '#1E4A0B', 0.9, 0.3, { weight: 900, family: 'Rubik' });
+  drawScore(ctx, v, 18.0, 4.6, '500', '#9FE3FF', '#1D4E6B', 0.6, 0.3, { weight: 900, family: 'Rubik' });
+  drawForeground(ctx, v, theme);
+  if (theme === 'night') { ctx.setTransform(1,0,0,1,0,0); ctx.globalCompositeOperation = 'multiply'; ctx.fillStyle = '#9AA6D6'; ctx.fillRect(0, 0, W, H); ctx.globalCompositeOperation = 'source-over'; }
+  const t5 = performance.now();
+  // HUD-пример
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.font = '900 34px Rubik'; ctx.textAlign = 'right'; ctx.textBaseline = 'top'; ctx.lineJoin = 'round';
+  ctx.lineWidth = 7; ctx.strokeStyle = '#222'; ctx.strokeText('Счёт: 41 230', W - 24, 18); ctx.fillStyle = '#FFF'; ctx.fillText('Счёт: 41 230', W - 24, 18);
+  ctx.font = '900 22px Rubik'; ctx.lineWidth = 5; ctx.strokeText('Рекорд: 52 800', W - 24, 60); ctx.fillStyle = '#FFE14D'; ctx.fillText('Рекорд: 52 800', W - 24, 60);
+  window.__timing = { bg: +(t1 - t0).toFixed(1), terrain: +(t2 - t1).toFixed(1), sling: +(t3 - t2).toFixed(1), blocks: +(t4 - t3).toFixed(1), fx: +(t5 - t4).toFixed(1) };
+  // повторный кадр фона (кэш тайлов прогрет) — замер
+  const c2 = makeCanvas(W, H), x2 = c2.getContext('2d'); const r0 = performance.now(); for (let i = 0; i < 20; i++) { drawBackground(x2, Object.assign({}, v, { camX: v.camX + i * 0.3 }), theme); drawTerrain(x2, v, terrain, theme); } window.__timing.bgFrameWarm = +((performance.now() - r0) / 20).toFixed(2);
+  window.__done = true;
+});
+</script></body></html>
