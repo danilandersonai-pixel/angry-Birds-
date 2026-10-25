@@ -1,6 +1,6 @@
 // Строки интерфейса (07 §18): подстановки, числа ru-RU, множественное число, «ё», без латиницы в русских строках.
 import { describe, expect, it } from 'vitest';
-import { BIRDS, LOSE_TIPS, S, STARS, STARS_ACC, TAUNTS, TIPS, fmt, plural, t } from '../../src/ui/strings';
+import { BIRDS, LOSE_TIPS, S, STARS, STARS_ACC, TAUNTS, TAUNTS_CLOSE, TAUNTS_FAR, TAUNTS_ZERO, TIPS, fmt, pickTaunt, plural, t } from '../../src/ui/strings';
 
 describe('strings', () => {
   it('t() подставляет {name} и не трогает неизвестные ключи', () => {
@@ -46,9 +46,29 @@ describe('strings', () => {
     }
     expect(S.hudScore).toBe('Счёт');
     expect(S.loseRetry).toBe('Ещё раз');
-    for (const list of [TIPS, LOSE_TIPS, TAUNTS]) {
+    for (const list of [TIPS, LOSE_TIPS, TAUNTS, TAUNTS_CLOSE, TAUNTS_FAR, TAUNTS_ZERO]) {
       expect(list.length).toBeGreaterThan(0);
       for (const s of list) expect(s.includes('...')).toBe(false);
     }
+  });
+
+  it('pickTaunt: «Почти получилось!» — только когда осталась одна свинья и счёт не 0 (плейтест №2, Б7)', () => {
+    const ALMOST = 'Почти получилось!';
+    const rnds = [0, 0.2, 0.34, 0.5, 0.67, 0.99, 1];
+    const all = (r: { pigsLeft?: number; score?: number }): string[] => rnds.map((x) => pickTaunt(r, () => x));
+    // счёт 0 и три свиньи (скриншот плейтеста) — никогда не «почти»
+    for (const s of all({ pigsLeft: 3, score: 0 })) expect(TAUNTS_ZERO).toContain(s);
+    for (const s of all({ pigsLeft: 1, score: 0 })) expect(s).not.toBe(ALMOST);
+    for (const s of all({ pigsLeft: 2, score: 15000 })) {
+      expect(s).not.toBe(ALMOST);
+      expect(TAUNTS_FAR).toContain(s);
+    }
+    for (const s of all({ pigsLeft: 1, score: 23450 })) expect(TAUNTS_CLOSE).toContain(s);
+    expect(pickTaunt({ pigsLeft: 1, score: 1 }, () => 0)).toBe(ALMOST);
+    // без данных о свиньях — без «почти»; без всего — тоже
+    for (const s of [...all({ score: 5000 }), ...all({})]) expect(s).not.toBe(ALMOST);
+    // мусорные значения не ломают выбор
+    expect(TAUNTS_FAR).toContain(pickTaunt({ pigsLeft: Number.NaN, score: Number.NaN }, () => 0.5));
+    expect(TAUNTS_FAR).toContain(pickTaunt({}, () => Number.NaN));
   });
 });

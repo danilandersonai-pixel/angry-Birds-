@@ -20,7 +20,11 @@ describe('константы (00 §1.15)', () => {
     expect(C.BIRDS.terence.mult.stone).toBe(2.0);
     expect(C.ABILITY.SILVER.DIVE_MULT.stone).toBe(3.0);
     expect(C.RETIRE.FLIGHT_MAX).toBe(10);
-    expect(C.TIMING.LINGER_MAX).toBe(0.6);
+    // V_MAX 24 → 21 и тайминги финала (integ-final Б3, Б4)
+    expect(C.LAUNCH.V_MAX).toBe(21);
+    expect(C.DAMAGE.BIRD_SPEED_COMP).toBeCloseTo(24 / 21, 12);
+    expect(C.TIMING).toMatchObject({ LINGER_MAX: 1.6, VICTORY_MAX: 2.0, CLEARED_BANNER: 0.4 });
+    expect(C.ABILITY.MATILDA.DESPAWN).toBe(1.0);
     expect(C.TIMING.CALM_HOLD).toBe(0.5);
     expect('TURN_MIN' in C.TIMING || 'TURN_MAX' in C.TIMING).toBe(false);
   });

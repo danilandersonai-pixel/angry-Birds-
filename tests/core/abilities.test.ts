@@ -1,4 +1,5 @@
-// Способности 8 птиц — приёмка по 00 §1.4 (числа при V_MAX = 24).
+// Способности 8 птиц — приёмка по 00 §1.4. Скорости способностей — в долях V_MAX; числа в названиях — при V_MAX = 21
+// (00 §1.4 считала при 24: Chuck 31.2…38.4, яйцо −16.8, Хэл ≥ 24.8, пике −25.2).
 
 import { describe, expect, it } from 'vitest';
 import { ABILITY, BIRD_FLIGHT, BIRDS, LAUNCH, MATERIALS, RETIRE, WORLD } from '../../src/config/constants';
@@ -126,8 +127,9 @@ describe('Blues', () => {
 
   it('сёстры рождаются в ±2.3·r поперёк курса; через 10 м пути разнос крайних растёт на 2.8 ± 0.2 м', () => {
     // 2.8 м по 02 §3.2 — это 2·10·tan 8°, вклад только расхождения курсов; начальный сдвиг ±0.58 м (00 §1.4) — сверху.
-    // Тап на вершине пологой дуги: модуль скорости почти постоянен, путь ≈ s·t
-    const { s, before } = tapWhen('blues', 20, 1, (b) => b.vy <= 0);
+    // Тап на вершине пологой дуги: модуль скорости почти постоянен, путь ≈ s·t. 30°, а не 20°: при V_MAX 21 вершина
+    // 20° ниже (3.7 м), и за 10 м нижняя сестра успевает коснуться земли
+    const { s, before } = tapWhen('blues', 30, 1, (b) => b.vy <= 0);
     const spread = () => {
       const b = birds(s);
       let m = 0;
@@ -172,7 +174,7 @@ describe('Blues', () => {
 });
 
 describe('Chuck', () => {
-  it('рывок: |v\'| = clamp(1.5·|v|, 31.2, 38.4) по текущему курсу, нос по скорости', () => {
+  it('рывок: |v\'| = clamp(1.5·|v|, 1.3·V, 1.6·V) = clamp(…, 27.3, 33.6) по текущему курсу, нос по скорости', () => {
     for (const [angle, t] of [[30, 0.3], [60, 1.2]] as const) {
       const { s, before } = tapWhen('chuck', angle, 1, after(t));
       s.step();
@@ -199,7 +201,8 @@ describe('Chuck', () => {
   });
 
   it('×2.2 действует и на первый твёрдый (не пробивающий) удар по дереву', () => {
-    // плита 4×2 (HP 78.4) рывком не пробивается: J ≈ 32.7 Н·с → урон 2.2·(J − m·v0) ≈ 53.6, а не 1.2·… ≈ 29.2
+    // плита 4×2 (HP 78.4) рывком не пробивается: J·BIRD_SPEED_COMP ≈ 30.5 Н·с → урон 2.2·(J·k − m·v0) ≈ 48.7,
+    // а с ×1.2 было бы ≈ 26.5 (при V_MAX 24 без компенсации — 53.6 и 29.2)
     const lvl = level({ birds: ['chuck'], blocks: [rect('wood', 9, 1, 4, 2)], pigs: [pigOn('small', 40, 0)] });
     const s = readySession(lvl);
     s.launch(0, 1);
@@ -210,15 +213,17 @@ describe('Chuck', () => {
     expect(ofType(events, 'blockDestroyed')).toHaveLength(0);
     const wood = MATERIALS.wood;
     const dealt = (1 - blocks(s)[0].health) * wood.hpPerKg * wood.density * 4 * 2;
-    expect(dealt).toBeGreaterThan(50);
+    expect(dealt).toBeGreaterThan(40);
   });
 });
 
 describe('Bomb', () => {
   it('взрыв по тапу рушит башню; тело птицы исчезает без «пуфа»', () => {
+    // V_MAX 21: Бомб (×0.95) достаёт башню на x = 24…28 только навесом — тап в полёте в 1 м перед левой колонной
     const s = readySession(hutLevel(['bomb', 'red']));
-    s.launch(17, 1);
-    const events = runUntil(s, () => s.focusBird()!.x > 24.5, 3);
+    s.launch(42, 1);
+    const events = runUntil(s, () => s.focusBird()!.x > 22.5, 3);
+    expect(s.focusBird()!.birdPose).toBe('fly');
     expect(s.activateAbility()).toBe(true);
     runFor(s, 2, events);
     expect(ofType(events, 'explosion').filter((e) => e.source === 'bomb')).toHaveLength(1);
@@ -266,7 +271,8 @@ describe('Bomb', () => {
 });
 
 describe('Matilda', () => {
-  it('яйцо v = (0, −16.8); Матильда — 60° ± 1° и |v| ≥ 14.9, легче (ρ 0.5) и слабее (×0.3), уходит через 3 с', () => {
+  it('яйцо v = (0, −0.7·V = −14.7); Матильда — 60° ± 1° и |v| ≥ 0.62·V = 13.0, легче (ρ 0.5) и слабее (×0.3), уходит через 1 с', () => {
+    expect(ABILITY.MATILDA.DESPAWN).toBe(1.0);
     const { s, ok, events } = tapWhen('matilda', 45, 1, after(0.5));
     expect(ok).toBe(true);
     const egg = [...s.entities()].find((e) => e.kind === 'egg')!;
@@ -292,9 +298,15 @@ describe('Matilda', () => {
     const f = s.focusBird()!;
     expect(f.kind).toBe('egg');
     expect(Math.hypot(f.x - boom[0].x, f.y - boom[0].y)).toBeLessThan(1e-9);
-    runFor(s, 1);
-    expect(s.focusBird()!.x).toBe(f.x); // точка неподвижна
-    runUntil(s, () => birds(s).length === 0, 5);
+    // пока Матильда не ушла (DESPAWN 1 с от тапа), камера стоит на точке взрыва
+    let held = 0;
+    for (let i = 0; i < 300 && birds(s).length > 0; i++) {
+      expect(s.focusBird()!.x).toBe(f.x); // точка неподвижна
+      s.step();
+      held++;
+    }
+    expect(held).toBeGreaterThan(5);
+    expect(birds(s)).toHaveLength(0);
     s.step();
     expect(s.focusBird()).toBeNull();
   });
@@ -314,7 +326,7 @@ describe('Hal', () => {
     return { t: steps / 60, s0 };
   }
 
-  it('курс −30° (вправо) → 200° ± 2°, дуга 0.50 ± 0.03 с без гравитации, скорость ≥ 24.8', () => {
+  it('курс −30° (вправо) → 200° ± 2°, дуга 0.50 ± 0.03 с без гравитации, скорость ≥ 0.9·V·1.15 = 21.7', () => {
     const { s, before, ok } = tapWhen('hal', 40, 1, (b) => deg(heading(b)) <= -30);
     expect(ok).toBe(true);
     const a0 = deg(heading(before));
@@ -343,7 +355,7 @@ describe('Hal', () => {
 });
 
 describe('Silver', () => {
-  it('петля 2π ± 0.05 рад за 0.57 ± 0.03 с, затем пике v = (0.1·s, −25.2), клювом вниз', () => {
+  it('петля 2π ± 0.05 рад за 0.57 ± 0.03 с, затем пике v = (0.1·s, −1.05·V = −22.05), клювом вниз', () => {
     const { s, before, ok } = tapWhen('silver', 45, 1, after(0.3));
     expect(ok).toBe(true);
     let turned = 0;

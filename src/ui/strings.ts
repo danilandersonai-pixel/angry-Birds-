@@ -201,10 +201,29 @@ export const LOSE_TIPS: readonly string[] = [
   'Попробуйте выстрел по высокой дуге — сверху конструкции слабее.',
 ];
 
-/** Дразнилки экрана поражения. */
+/** Дразнилки экрана поражения (все вместе; какую показать — pickTaunt). */
 export const TAUNTS: readonly string[] = [
   'Свиньи смеются… пока!',
   'Хрю-хрю! Попробуй ещё!',
   'Почти получилось!',
   'Башня устояла. Пока что.',
 ];
+/** Не хватило одной свиньи — «почти». */
+export const TAUNTS_CLOSE: readonly string[] = ['Почти получилось!', 'Осталась всего одна свинья!'];
+/** Две и больше живых свиньи (или неизвестно сколько) — без «почти». */
+export const TAUNTS_FAR: readonly string[] = ['Свиньи смеются… пока!', 'Хрю-хрю! Попробуй ещё!', 'Башня устояла. Пока что.'];
+/** Счёт 0 — ничего не задето. */
+export const TAUNTS_ZERO: readonly string[] = ['Свиньи даже не заметили!', 'Башня устояла. Пока что.', 'Хрю-хрю! Попробуй ещё!'];
+
+/**
+ * Дразнилка поражения по исходу (плейтест №2, Б7): «Почти получилось!» — только когда осталась одна свинья и счёт не 0;
+ * при счёте 0 — «даже не заметили»; при двух и больше свиньях или без данных — общие. rnd — для тестов.
+ */
+export function pickTaunt(r: { pigsLeft?: number; score?: number } = {}, rnd: () => number = Math.random): string {
+  const pigs = r.pigsLeft !== undefined && Number.isFinite(r.pigsLeft) ? Math.max(0, Math.floor(r.pigsLeft)) : null;
+  const score = r.score !== undefined && Number.isFinite(r.score) ? r.score : null;
+  const list = score !== null && score <= 0 ? TAUNTS_ZERO : pigs !== null && pigs <= 1 ? TAUNTS_CLOSE : TAUNTS_FAR;
+  const x = rnd();
+  const i = Math.floor((Number.isFinite(x) ? Math.min(0.999999, Math.max(0, x)) : 0) * list.length);
+  return list[i]!;
+}

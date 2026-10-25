@@ -11,6 +11,12 @@ export const randInt = (a: number, b: number): number => a + Math.floor(Math.ran
 /** Случайный знак ±1. */
 export const randSign = (): number => (Math.random() < 0.5 ? -1 : 1);
 
+/** Плавная ступень 0 → 1 на [e0, e1] (3u² − 2u³). */
+export const smoothstep = (e0: number, e1: number, v: number): number => {
+  const u = clamp((v - e0) / (e1 - e0), 0, 1);
+  return u * u * (3 - 2 * u);
+};
+
 export const easeOutCubic = (t: number): number => 1 - (1 - t) ** 3;
 export const easeOutQuad = (t: number): number => 1 - (1 - t) * (1 - t);
 export const easeOutBack = (t: number): number => {

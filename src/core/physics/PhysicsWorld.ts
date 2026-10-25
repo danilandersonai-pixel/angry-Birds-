@@ -327,7 +327,8 @@ export class PhysicsWorld {
     if (!isDestructible(target) || target.dead || (target.kind === 'pig' && target.helmetHp > 0)) return;
     const mb = bird.body.getMass();
     const mt = target.body.getMass();
-    const jEst = (1 + c.getRestitution()) * ((mb * mt) / (mb + mt)) * h.vn;
+    // оценка импульса — с той же компенсацией скорости, что и урон птицы (BIRD_SPEED_COMP), иначе пробитие реже таблицы 00 §1.7
+    const jEst = (1 + c.getRestitution()) * ((mb * mt) / (mb + mt)) * h.vn * DAMAGE.BIRD_SPEED_COMP;
     const dmg = bird.mult[target.target] * Math.max(0, jEst - mt * target.v0);
     if (dmg < target.hp) return;
     h.pierced = true;
@@ -359,10 +360,12 @@ export class PhysicsWorld {
 
   private impactDamage(target: Ent, source: Ent, h: Hit): void {
     if (!isDestructible(target) || target.dead) return;
-    const excess = h.J - target.body.getMass() * target.v0;
+    // удар птицы: импульс ×BIRD_SPEED_COMP до вычета порога — урон как при калибровочной V_MAX 24 (00 §1.7)
+    const bird = source.kind === 'bird';
+    const excess = (bird ? h.J * DAMAGE.BIRD_SPEED_COMP : h.J) - target.body.getMass() * target.v0;
     if (excess <= 0) return;
     let mult = 1;
-    if (source.kind === 'bird') mult = source.mult[target.target];
+    if (bird) mult = source.mult[target.target];
     else if (source.kind === 'terrain' && target.kind === 'pig') mult = DAMAGE.PIG_STATIC_MULT;
     let share = 0;
     if (target.kind === 'pig' && target.helmetHp > 0) {

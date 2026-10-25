@@ -77,6 +77,18 @@ const CRACKS_WOOD = [0, 1, 2, 4] as const;
 const CRACKS_STONE = [0, 1, 3, 5] as const;
 
 /**
+ * Обводка льда толще, чем у дерева и камня (Б12): полупрозрачное тело само по себе не отделяется от снега и
+ * облаков, силуэт держит тёмная кромка. Множитель к OUT_BLOCK и нижняя граница, px.
+ */
+const ICE_OUT_K = 1.3;
+const ICE_OUT_MIN_PX = 2;
+
+/** Толщина обводки блока, м (центр линии — на физической кромке). */
+function outlineWidth(material: Material, ppu: number): number {
+  return material === 'ice' ? Math.max(OUT_BLOCK * ICE_OUT_K, ICE_OUT_MIN_PX / ppu) : Math.max(OUT_BLOCK, 1.5 / ppu);
+}
+
+/**
  * Спрайт блока.
  * (ox, oy) — центр ограничивающего прямоугольника формы. Форма точно w×h (rect), круг диаметром w,
  * прямоугольный треугольник с прямым углом внизу-слева, равнобедренный с основанием внизу.
@@ -87,7 +99,7 @@ export function renderBlock(material: Material, shape: BlockShape, wM: number, h
   const h = shape === 'circle' ? w : Math.max(0.04, hM);
   const stage = clamp(Math.round(damageStage), 0, 3);
   const s = seedInt(seed);
-  const lw = Math.max(OUT_BLOCK, 1.5 / ppu);
+  const lw = outlineWidth(material, ppu);
   const { c, ctx, ox, oy } = beginCentered(w, h, lw / 2 + 3 / ppu, ppu);
   const g = makeGeo(material, shape, w, h, ppu, lw);
   if (material === 'wood') paintWood(ctx, g, s);
@@ -587,6 +599,10 @@ function woodLog(ctx: Ctx2D, g: Geo, rng: () => number): void {
 
 // ═════════════════════════════ ЛЁД ═════════════════════════════
 
+// Читаемость на любом фоне (Б12): насыщенно-голубое полупрозрачное тело, кромка-«толща» плотнее середины,
+// мягкая тёмно-синяя внутренняя тень вдоль всей кромки, толстая тёмная обводка (outlineWidth) и яркие белые блики
+// поверх. Полоса-«толща» у края тонирована голубым, а не белым: белёсая кромка сливалась со снегом и облаками.
+
 function paintIce(ctx: Ctx2D, g: Geo, seed: number): void {
   const rng = makeRng(hashSeed(seed, 0x1ce));
   const { w, h, mn } = g;
@@ -596,12 +612,12 @@ function paintIce(ctx: Ctx2D, g: Geo, seed: number): void {
   ctx.clip(g.path);
   // 1) прозрачная середина: диагональный градиент, сквозь него виден фон
   const body = ctx.createLinearGradient(-w / 2, -h / 2, w / 2, h / 2);
-  body.addColorStop(0, rgba(ICE.light, 0.8));
-  body.addColorStop(0.45, rgba(ICE.base, 0.6));
-  body.addColorStop(1, rgba(ICE.dark, 0.78));
+  body.addColorStop(0, rgba(ICE.light, 0.82));
+  body.addColorStop(0.42, rgba(ICE.base, 0.74));
+  body.addColorStop(1, rgba(ICE.dark, 0.86));
   ctx.fillStyle = body;
   ctx.fillRect(-w / 2, -h / 2, w, h);
-  // 2) толстая кромка стекла: плотнее и светлее середины
+  // 2) толстая кромка стекла: плотнее и насыщеннее середины (стекло у края «толще»)
   const e = clamp(0.17 * mn, 0.05, 0.15) + g.lw * 0.4;
   const inner: Pt[] = circle ? [] : insetPoly(g.poly, e);
   const innerPath = circle ? null : polyPath(inner);
@@ -614,11 +630,11 @@ function paintIce(ctx: Ctx2D, g: Geo, seed: number): void {
   }
   else if (innerPath) ring.addPath(innerPath);
   ctx.clip(ring, 'evenodd');
-  ctx.fillStyle = rgba(ICE.light, 0.4);
+  ctx.fillStyle = rgba(ICE.rim, 0.34);
   ctx.fillRect(-w / 2, -h / 2, w, h);
   ctx.restore();
-  if (circle) bevelCircle(ctx, R, e, '#FFFFFF', ICE.deep, 0.85, 0.55);
-  else bevelPoly(ctx, g.poly, e, '#FFFFFF', ICE.deep, 0.8, 0.5);
+  if (circle) bevelCircle(ctx, R, e, '#FFFFFF', ICE.deep, 0.75, 0.62);
+  else bevelPoly(ctx, g.poly, e, '#FFFFFF', ICE.deep, 0.72, 0.58);
   // 3) внутренняя грань кромки: светлая по тёмным сторонам, тёмная по светлым (стекло «наоборот»)
   if (circle) {
     ctx.lineWidth = det(g, 0.012, 0.8);
@@ -657,7 +673,7 @@ function paintIce(ctx: Ctx2D, g: Geo, seed: number): void {
   ctx.lineTo(-w / 2, h * 0.3);
   ctx.closePath();
   ctx.fill();
-  ctx.fillStyle = rgba(ICE.deep, 0.2);
+  ctx.fillStyle = rgba(ICE.deep, 0.22);
   ctx.beginPath();
   ctx.moveTo(w / 2, h / 2);
   ctx.lineTo(-w * 0.1, h / 2);
@@ -669,9 +685,10 @@ function paintIce(ctx: Ctx2D, g: Geo, seed: number): void {
   const off = lerp(-0.12, 0.05, rng()) * d;
   ctx.save();
   ctx.rotate(Math.PI / 4);
-  ctx.fillStyle = 'rgba(255,255,255,0.42)';
+  // блики яркие: на насыщенном теле они и дают «стекло», а не белёсую заливку
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
   ctx.fillRect(off - mn * 0.09, -d, mn * 0.18, 2 * d);
-  ctx.fillStyle = 'rgba(255,255,255,0.26)';
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
   ctx.fillRect(off + mn * 0.16, -d, mn * 0.06, 2 * d);
   if (g.mx / mn > 2.5) {
     // на длинных — повтор бликов
@@ -679,9 +696,9 @@ function paintIce(ctx: Ctx2D, g: Geo, seed: number): void {
     for (let k = 1; k * step < g.mx / 2 + mn; k++) {
       for (const sgn of [-1, 1]) {
         const o = off + (sgn * k * step) / Math.SQRT2;
-        ctx.fillStyle = 'rgba(255,255,255,0.3)';
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
         ctx.fillRect(o - mn * 0.07, -d, mn * 0.14, 2 * d);
-        ctx.fillStyle = 'rgba(255,255,255,0.18)';
+        ctx.fillStyle = 'rgba(255,255,255,0.28)';
         ctx.fillRect(o + mn * 0.13, -d, mn * 0.05, 2 * d);
       }
     }
@@ -690,6 +707,9 @@ function paintIce(ctx: Ctx2D, g: Geo, seed: number): void {
   ctx.restore();
   // 5) мягкое свечение-рефлекс снизу-справа и общий объём
   innerShadow(ctx, g.path, rgba(ICE.deep, 0.5), mn * 0.12, -0.03 * mn, -0.05 * mn, g.ppu, g.mx);
+  // лёгкая внутренняя тень по всей кромке: тёмно-синий ореол изнутри обводки отделяет лёд от светлого фона
+  const eb = Math.max(clamp(0.07 * mn, 0.025, 0.06), 2.5 * g.px);
+  innerShadow(ctx, g.path, rgba(ICE.edge, 0.78), eb, 0, 0, g.ppu, g.mx);
   if (circle) {
     const sg = ctx.createRadialGradient(-R * 0.35, -R * 0.4, R * 0.05, -R * 0.35, -R * 0.4, R * 0.55);
     sg.addColorStop(0, 'rgba(255,255,255,0.9)');
@@ -700,9 +720,9 @@ function paintIce(ctx: Ctx2D, g: Geo, seed: number): void {
     ctx.fill();
   }
   ctx.restore();
-  // 6) белая кромка-блик у обводки и искорка
-  if (circle) rimCircle(ctx, R, g.lw * 0.5 + det(g, 0.016, 1) * 0.6, det(g, 0.024, 1.2), '#FFFFFF', 0.95, 1.4);
-  else rimPoly(ctx, g.poly, g.lw * 0.5 + det(g, 0.016, 1) * 0.6, det(g, 0.024, 1.2), '#FFFFFF', 0.95, 0.15);
+  // 6) белая кромка-блик у обводки (поверх внутренней тени — контраст «тёмное–белое» на освещённых гранях) и искорка
+  if (circle) rimCircle(ctx, R, g.lw * 0.5 + det(g, 0.016, 1) * 0.6, det(g, 0.026, 1.3), '#FFFFFF', 1, 1.4);
+  else rimPoly(ctx, g.poly, g.lw * 0.5 + det(g, 0.016, 1) * 0.6, det(g, 0.026, 1.3), '#FFFFFF', 1, 0.15);
   const sp = clamp(mn * 0.13, 0.03, 0.09);
   if (sp * g.ppu >= 3) {
     let sx = -w / 2 + e + sp * 0.6;
@@ -1299,9 +1319,9 @@ export function renderDebris(material: Material, sizePx: number, seed: number): 
     }
     const p = polyPath(pts);
     const g = ctx.createLinearGradient(-L, -L, L, L);
-    g.addColorStop(0, 'rgba(228,248,255,0.97)');
-    g.addColorStop(0.5, 'rgba(150,215,245,0.93)');
-    g.addColorStop(1, 'rgba(92,176,226,0.95)');
+    g.addColorStop(0, 'rgba(214,245,255,0.97)');
+    g.addColorStop(0.5, 'rgba(124,205,244,0.93)');
+    g.addColorStop(1, 'rgba(62,159,221,0.95)');
     ctx.fillStyle = g;
     ctx.fill(p);
     ctx.lineWidth = olw;

@@ -1,7 +1,9 @@
 // Калибровочная таблица урона 00 §1.7 на настоящем ядре: урон первичного удара ±10 % и исход.
+// Таблица считалась при V_MAX = 24; теперь V_MAX = 21, и скорости строк пересчитаны в доли V_MAX (×S = V/24):
+// Red на полной силе — V, Terence — 0.88·V, пике Silver — 1.05·V. Урон совпадает за счёт DAMAGE.BIRD_SPEED_COMP.
 
 import { describe, expect, it } from 'vitest';
-import { ABILITY, BIRDS, EXPLOSION, MATERIALS, PIGS } from '../../src/config/constants';
+import { ABILITY, BIRDS, DAMAGE, EXPLOSION, LAUNCH, MATERIALS, PIGS } from '../../src/config/constants';
 import type { DamageMults } from '../../src/core/characters';
 import type { Destructible } from '../../src/core/physics/entities';
 import type { BirdType, LevelDef, Material, PigType } from '../../src/core/types';
@@ -9,6 +11,9 @@ import { level, pigOn, PIG_R, rect } from '../fixtures/levels';
 import { birdInto, dealt, destructibles, lift, physicsOf, stepWorld } from './helpers';
 
 const CHUCK_BOOST: DamageMults = { ...BIRDS.chuck.mult, wood: ABILITY.CHUCK.BOOSTED_WOOD };
+/** Полная сила Red и пересчёт скоростей таблицы 00 §1.7 (там V = 24) на текущую V_MAX. */
+const V = LAUNCH.V_MAX;
+const S = V / DAMAGE.BIRD_CALIB_V;
 
 /** Одиночный удар птицы по единственной цели уровня; урон берётся через 0.1 с (до вторичных ударов). */
 function hit(over: Partial<LevelDef>, bird: BirdType, speed: number, opts: { fromAbove?: boolean; mult?: DamageMults } = {}) {
@@ -28,100 +33,119 @@ function expectNear(actual: number, expected: number, tol = 0.1): void {
 }
 
 describe('калибровка урона (00 §1.7)', () => {
-  it('Red 24 м/с: колонна дерева ломается и пробивается, птица сохраняет скорость', () => {
-    const r = hit(block('wood', 0.5, 2), 'red', 24);
-    expectNear(r.dmg, 13.2);
-    expect(r.target.dead).toBe(true);
-    // пробитие: keep = clamp(1 − 0.5·9.8/13.2, 0.5, 0.9) ≈ 0.63
-    expectNear(r.bird.body.getLinearVelocity().x, 0.63 * 24, 0.12);
+  it('компенсация: V_MAX 21, импульс удара птицы ×24/21', () => {
+    expect(V).toBe(21);
+    expect(DAMAGE.BIRD_SPEED_COMP).toBeCloseTo(24 / 21, 12);
   });
 
-  it('Red 24 м/с: лёд 1×1 ломается, камень 1×1 — 24 %', () => {
-    const ice = hit(block('ice'), 'red', 24);
+  it('Red на полной силе (V): колонна дерева ломается и пробивается, птица сохраняет скорость', () => {
+    const r = hit(block('wood', 0.5, 2), 'red', V);
+    expectNear(r.dmg, 13.2);
+    expect(r.target.dead).toBe(true);
+    // пробитие: keep = clamp(1 − 0.5·9.8/13.2, 0.5, 0.9) ≈ 0.63 — оценка пробития с той же компенсацией
+    expectNear(r.bird.body.getLinearVelocity().x, 0.63 * V, 0.12);
+  });
+
+  it('без компенсации полная сила V = 21 недобирает урон: оценка −15 %, колонна дерева всё равно ломается', () => {
+    const D = DAMAGE as { BIRD_SPEED_COMP: number };
+    const k = D.BIRD_SPEED_COMP;
+    try {
+      D.BIRD_SPEED_COMP = 1;
+      const r = hit(pig('medium'), 'red', V);
+      expect(r.dmg).toBeLessThan(14.2 * 0.9);
+    } finally {
+      D.BIRD_SPEED_COMP = k;
+    }
+  });
+
+  it('Red на полной силе: лёд 1×1 ломается, камень 1×1 — 24 %', () => {
+    const ice = hit(block('ice'), 'red', V);
     expectNear(ice.dmg, 15.4);
     expect(ice.target.dead).toBe(true);
-    const stone = hit(block('stone'), 'red', 24);
+    const stone = hit(block('stone'), 'red', V);
     expectNear(stone.dmg, 14.0);
     expect(stone.target.dead).toBe(false);
     expectNear(stone.dmg / stone.hp, 0.24, 0.12);
   });
 
-  it('Red 24 м/с убивает small, medium, large и бригадира; король — 62 %', () => {
+  it('Red на полной силе убивает small, medium, large и бригадира; король — 62 %', () => {
     const table: Array<[PigType, number]> = [['small', 8.6], ['medium', 14.2], ['large', 18.1], ['mustache', 16.9]];
     for (const [type, dmg] of table) {
-      const r = hit(pig(type), 'red', 24);
+      const r = hit(pig(type), 'red', V);
       expectNear(r.dmg, dmg);
       expect(r.target.dead).toBe(true);
     }
-    const king = hit(pig('king'), 'red', 24);
+    const king = hit(pig('king'), 'red', V);
     expectNear(king.dmg, 19.1);
     expect(king.target.dead).toBe(false);
     expectNear(king.dmg / king.hp, 0.62);
   });
 
   it('каска держит прямой удар Red: сбоку каска 0.7 из 10, тело 0.5 из 6.7; сверху каска разбита, свинья жива', () => {
-    const side = hit(pig('helmet'), 'red', 24);
+    const side = hit(pig('helmet'), 'red', V);
     const p = side.target as Extract<Destructible, { kind: 'pig' }>;
     expect(p.dead).toBe(false);
     expect(p.helmetHp).toBeGreaterThan(0.4);
     expect(p.helmetHp).toBeLessThan(1.0);
     expect(p.hp).toBeGreaterThan(0.2);
     expect(p.hp).toBeLessThan(0.9);
-    const top = hit(pig('helmet'), 'red', 24, { fromAbove: true });
+    const top = hit(pig('helmet'), 'red', V, { fromAbove: true });
     const q = top.target as Extract<Destructible, { kind: 'pig' }>;
     expect(q.helmetHp).toBe(0);
     expect(q.dead).toBe(false);
     expect(q.hp).toBeLessThan(q.maxHp);
   });
 
-  it('докатившаяся Red (5 м/с) не убивает medium — 14 %; на 15 м/с убивает', () => {
-    const slow = hit(pig('medium'), 'red', 5);
+  it('докатившаяся Red (5·S ≈ 4.4 м/с) не убивает medium — 14 %; на 15·S ≈ 13.1 м/с убивает', () => {
+    const slow = hit(pig('medium'), 'red', 5 * S);
     expectNear(slow.dmg, 0.76, 0.15);
     expect(slow.target.dead).toBe(false);
-    expect(hit(pig('medium'), 'red', 15).target.dead).toBe(true);
+    expect(hit(pig('medium'), 'red', 15 * S).target.dead).toBe(true);
   });
 
-  it('Blue 24 м/с: пробивает стекло, дерево не берёт; small гибнет, medium нет', () => {
-    const ice = hit(block('ice'), 'blues', 24);
+  it('Blue на полной силе: пробивает стекло, дерево не берёт; small гибнет, medium нет', () => {
+    const ice = hit(block('ice'), 'blues', V);
     expectNear(ice.dmg, 25.7);
     expect(ice.target.dead).toBe(true);
-    const wood = hit(block('wood'), 'blues', 24);
+    const wood = hit(block('wood'), 'blues', V);
     expectNear(wood.dmg, 4.5);
     expect(wood.target.dead).toBe(false);
-    const small = hit(pig('small'), 'blues', 24);
+    const small = hit(pig('small'), 'blues', V);
     expectNear(small.dmg, 3.2);
     expect(small.target.dead).toBe(true);
-    const medium = hit(pig('medium'), 'blues', 24);
+    const medium = hit(pig('medium'), 'blues', V);
     expectNear(medium.dmg, 4.3);
     expect(medium.target.dead).toBe(false);
   });
 
-  it('Chuck 35 м/с после рывка пробивает три деревянные колонны подряд, камень 1×1 — 19 %', () => {
+  it('Chuck после рывка (35·S ≈ 30.6 м/с) пробивает три деревянные колонны подряд, камень 1×1 — 19 %', () => {
     const { pw } = physicsOf(level({ blocks: [rect('wood', 5, 1, 0.5, 2), rect('wood', 7, 1, 0.5, 2), rect('wood', 9, 1, 0.5, 2)] }));
     const cols = destructibles(pw);
-    birdInto(pw, 'chuck', cols[0], 35, { mult: CHUCK_BOOST });
+    birdInto(pw, 'chuck', cols[0], 35 * S, { mult: CHUCK_BOOST });
     stepWorld(pw, 0.5);
     expect(cols.every((c) => c.dead)).toBe(true);
     [39.6, 34.4, 29.2].forEach((dmg, i) => expectNear(dealt(cols[i]), dmg));
-    const stone = hit(block('stone'), 'chuck', 35, { mult: CHUCK_BOOST });
+    const stone = hit(block('stone'), 'chuck', 35 * S, { mult: CHUCK_BOOST });
     expectNear(stone.dmg, 11);
     expect(stone.target.dead).toBe(false);
   });
 
-  it('Terence 21.1 м/с убивает короля и ломает камень 1×1 (×2.0)', () => {
-    const king = hit(pig('king'), 'terence', 21.1);
+  it('Terence на полной силе (0.88·V ≈ 18.5 м/с) убивает короля и ломает камень 1×1 (×2.0)', () => {
+    const vt = BIRDS.terence.launchScale * V;
+    const king = hit(pig('king'), 'terence', vt);
     expectNear(king.dmg, 58.9);
     expect(king.target.dead).toBe(true);
-    const stone = hit(block('stone'), 'terence', 21.1);
+    const stone = hit(block('stone'), 'terence', vt);
     expectNear(stone.dmg, 63.3);
     expect(stone.target.dead).toBe(true);
   });
 
-  it('Silver в пике 25.2 м/с ломает камень 1×1 (×3.0), балку камня 4×0.5 — нет', () => {
-    const stone = hit(block('stone'), 'silver', 25.2, { fromAbove: true, mult: ABILITY.SILVER.DIVE_MULT });
+  it('Silver в пике (1.05·V ≈ 22.1 м/с) ломает камень 1×1 (×3.0), балку камня 4×0.5 — нет', () => {
+    const vd = ABILITY.SILVER.DIVE_K * V;
+    const stone = hit(block('stone'), 'silver', vd, { fromAbove: true, mult: ABILITY.SILVER.DIVE_MULT });
     expectNear(stone.dmg, 66.3);
     expect(stone.target.dead).toBe(true);
-    const beam = hit(block('stone', 4, 0.5), 'silver', 25.2, { fromAbove: true, mult: ABILITY.SILVER.DIVE_MULT });
+    const beam = hit(block('stone', 4, 0.5), 'silver', vd, { fromAbove: true, mult: ABILITY.SILVER.DIVE_MULT });
     expect(beam.target.dead).toBe(false);
     expect(beam.dmg / beam.hp).toBeGreaterThan(0.5);
   });

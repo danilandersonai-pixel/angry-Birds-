@@ -71,13 +71,25 @@ export const KEY_COOLDOWN_MS: Readonly<Record<string, number>> = {
   woodHit: 30, iceHit: 30, stoneHit: 30, ground: 50, pigBump: 60,
   woodCrack: 50, iceCrack: 50, stoneCrack: 50, woodBreak: 35, iceShatter: 35, stoneBreak: 35,
   rubble: 250, boom: 0, helmet: 100, pigHurt: 150, pigPop: 40, pigPopQuiet: 40, pigLaugh: 1500, pigGrunt: 2000,
-  tick: 45, ui: 40, star: 60, bonus: 60, jingle: 4000, ab: 100, fuse: 0,
+  tick: 45, ui: 40, star: 60, bonus: 60, jingle: 4000, ab: 100, fuse: 0, cleared: 1500,
 };
 
 /** Кулдаун для ключа звука, мс. */
 export function cooldownFor(key: string, cat: Cat): number {
   const k = key.split(':')[0]!;
   return KEY_COOLDOWN_MS[k] ?? CAT_MIX[cat].cooldown;
+}
+
+/**
+ * Ключи, чьи варианты делят один кулдаун: стадии трещины одного материала и удары о землю разной силы
+ * не звучат «пачкой» в одном окне кулдауна (на массовом обрушении это давало дробь одинаковых трещин и гул).
+ */
+export const SHARED_COOLDOWN: ReadonlySet<string> = new Set(['woodCrack', 'iceCrack', 'stoneCrack', 'ground']);
+
+/** По какому ключу считается кулдаун: префикс для SHARED_COOLDOWN ('woodCrack:2' → 'woodCrack'), иначе сам ключ. */
+export function cooldownKey(key: string): string {
+  const i = key.indexOf(':');
+  return i > 0 && SHARED_COOLDOWN.has(key.slice(0, i)) ? key.slice(0, i) : key;
 }
 
 /** Голос в пуле. Узлы Web Audio к нему привязывает движок через колбэки. */
@@ -131,9 +143,10 @@ export class VoicePool {
     return [...this.active];
   }
 
-  /** Запросить голос. null — отказ (кулдаун или нет места, а новый звук не важнее звучащих). */
+  /** Запросить голос. null — отказ (кулдаун или нет места, а новый звук не важнее звучащих). Кулдаун — по cooldownKey(key). */
   acquire(key: string, cat: Cat, score: number, cooldownMs: number, now: number, end = now + 5): VoiceSlot | null {
-    const last = this.lastPlay.get(key);
+    const ck = cooldownKey(key);
+    const last = this.lastPlay.get(ck);
     if (last !== undefined && (now - last) * 1000 < cooldownMs - 1e-6) {
       this.stats.cooldown++;
       return null;
@@ -150,7 +163,7 @@ export class VoicePool {
     }
     const v: VoiceSlot = { key, cat, score, start: now, end };
     this.active.push(v);
-    this.lastPlay.set(key, now);
+    this.lastPlay.set(ck, now);
     this.stats.played++;
     return v;
   }

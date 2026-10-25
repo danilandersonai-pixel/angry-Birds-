@@ -1,13 +1,21 @@
 // Страница предпросмотра блоков, TNT, яйца, осколков и рогатки.
 // Спрайты рисуются через drawImage так же, как это будет делать рендер (с учётом ox/oy/ppu).
 // Параметры URL: ?detail=1 — крупный план (рогатка и блоки на большом ppu);
-//                ?outline=1 — показать точные физические контуры форм пунктиром.
+//                ?outline=1 — показать точные физические контуры форм пунктиром;
+//                ?theme=snow|meadow|beach — блоки (прежде всего лёд) в настоящей сцене темы: фон Background,
+//                  рельеф drawTerrain и передний план drawForeground, как в игре (ppu спрайтов — ступенями кэша);
+//                ?theme=all — три темы рядом (луг | пляж | снег) для сравнения читаемости льда;
+//                &scale=N — масштаб сцены, CSS px на метр (по умолчанию 45, как вид рогатки в игре 1600×900).
 
 import '@fontsource/lilita-one';
 import '@fontsource/luckiest-guy';
-import type { BlockShape, Material } from '../core/types';
+import type { BlockShape, Material, TerrainDef, ThemeId } from '../core/types';
 import type { Sprite } from '../render/sprites/api';
+import type { ViewInfo } from '../render/view';
 import { SLINGSHOT } from '../config/constants';
+import { ppuBucket } from '../render/SpriteCache';
+import { Background, drawForeground } from '../render/sprites/background';
+import { drawTerrain } from '../render/sprites/terrain';
 import { renderBird } from '../render/sprites/birds';
 import { renderPig } from '../render/sprites/pigs';
 import { renderBlock, renderDebris, renderEgg, renderTnt } from '../render/sprites/blocks';
@@ -16,6 +24,7 @@ import { drawBand, drawPouch, renderSlingshot } from '../render/sprites/slingsho
 const params = new URLSearchParams(location.search);
 const detail = params.get('detail') === '1';
 const showOutline = params.get('outline') === '1';
+const themeParam = params.get('theme');
 
 const W = Math.max(1200, window.innerWidth);
 const H = Math.max(700, window.innerHeight);
@@ -324,6 +333,8 @@ async function main(): Promise<void> {
 
   if (params.get('bench') === '1') {
     bench(ctx);
+  } else if (themeParam) {
+    drawThemes(ctx, themeParam);
   } else if (detail) {
     drawDetail(ctx);
   } else {
@@ -434,6 +445,185 @@ function drawOverview(ctx: CanvasRenderingContext2D): void {
   // ── D: сцена
   const yD = baseS + 12;
   scene(ctx, 0, yD, W, H - yD, 62, -0.8);
+}
+
+// ───────────────────────── сцена темы: лёд на настоящем фоне ─────────────────────────
+
+const THEMES: ThemeId[] = ['meadow', 'beach', 'snow'];
+const THEME_RU: Record<ThemeId, string> = { meadow: 'луг', beach: 'пляж', snow: 'снег' };
+
+/** Блок сцены: материал, форма, x, y — центр bbox в мире (м, Y вверх), w, h, стадия, угол (CCW, рад). */
+type SceneBlock = [Material, BlockShape, number, number, number, number, number, number?];
+/** Свинья сцены: тип, x, y центра, радиус. */
+type ScenePig = ['small' | 'medium' | 'large', number, number, number];
+
+/** Земля под всей сценой (как flatGround уровней). */
+const SCENE_TERRAIN: TerrainDef[] = [
+  { kind: 'ground', points: [[-60, -10], [160, -10], [160, 0], [-60, 0]] },
+  // каменный уступ с откосами — лёд на снежной шапке скалы
+  { kind: 'rock', points: [[26.2, 0], [33.8, 0], [33, 2.5], [27, 2.5]] },
+];
+
+/** Полная сцена (≈ 35 м по ширине): ворота, ледяной дворец, ряд стадий, смешанная башня, уступ, «небесный» ряд. */
+function fullScene(): { blocks: SceneBlock[]; pigs: ScenePig[] } {
+  const b: SceneBlock[] = [
+    // ворота из льда
+    ['ice', 'rect', 2.25, 1, 0.5, 2, 0],
+    ['ice', 'rect', 3.75, 1, 0.5, 2, 0],
+    ['ice', 'rect', 3, 2.25, 2, 0.5, 0],
+    ['ice', 'rect', 2.25, 2.75, 0.5, 0.5, 0],
+    ['ice', 'rect', 3.75, 2.75, 0.5, 0.5, 1],
+    // ледяной дворец: два этажа и крыша
+    ['ice', 'rect', 6.75, 1, 0.5, 2, 0],
+    ['ice', 'rect', 10.25, 1, 0.5, 2, 1],
+    ['ice', 'rect', 8.5, 2.25, 4, 0.5, 0],
+    ['ice', 'rect', 6.75, 3.5, 0.5, 2, 0],
+    ['ice', 'rect', 10.25, 3.5, 0.5, 2, 2],
+    ['ice', 'rect', 8.5, 4.75, 4, 0.5, 0],
+    ['ice', 'isoTriangle', 8.5, 5.75, 4, 1.5, 0],
+    // ряд стадий 0..3: куб 1×1, на нём шар
+    ['ice', 'rect', 13, 0.5, 1, 1, 0],
+    ['ice', 'rect', 14.3, 0.5, 1, 1, 1],
+    ['ice', 'rect', 15.6, 0.5, 1, 1, 2],
+    ['ice', 'rect', 16.9, 0.5, 1, 1, 3],
+    ['ice', 'circle', 13, 1.5, 1, 1, 0],
+    ['ice', 'triangle', 14.3, 1.5, 1, 1, 1],
+    ['ice', 'circle', 15.6, 1.5, 1, 1, 2],
+    ['ice', 'isoTriangle', 16.9, 1.5, 1, 1, 3],
+    // смешанная башня: камень, лёд, дерево — для сравнения материалов
+    ['stone', 'rect', 21.5, 0.25, 4, 0.5, 0],
+    ['ice', 'rect', 19.75, 1.5, 0.5, 2, 0],
+    ['ice', 'rect', 23.25, 1.5, 0.5, 2, 0],
+    ['wood', 'rect', 21.5, 2.75, 4, 0.5, 0],
+    ['ice', 'triangle', 20, 3.5, 1, 1, 0],
+    ['ice', 'isoTriangle', 21.5, 3.5, 2, 1, 0],
+    ['stone', 'rect', 23, 3.25, 0.5, 0.5, 0],
+    ['wood', 'rect', 23, 3.75, 0.5, 0.5, 0],
+    // уступ: колонны, балка и горка кубиков
+    ['ice', 'rect', 27.75, 3.5, 0.5, 2, 0],
+    ['ice', 'rect', 30.25, 3.5, 0.5, 2, 0],
+    ['ice', 'rect', 29, 4.75, 3, 0.5, 1],
+    ['ice', 'rect', 31.75, 2.75, 0.5, 0.5, 0],
+    ['ice', 'rect', 32.25, 2.75, 0.5, 0.5, 0],
+    ['ice', 'rect', 32, 3.25, 0.5, 0.5, 2],
+    // одинокий тонкий столб на земле
+    ['ice', 'rect', 25, 1, 0.25, 2, 0],
+    // «небесный» ряд: на светлом небе и облаках (как обломки в полёте)
+    ['ice', 'rect', 2.5, 13, 1, 1, 0],
+    ['ice', 'rect', 4.5, 13, 1, 1, 2],
+    ['ice', 'circle', 6.5, 13, 1, 1, 0],
+    ['ice', 'triangle', 8.5, 13, 1, 1, 0],
+    ['ice', 'isoTriangle', 10.8, 13, 2, 1, 1],
+    ['ice', 'rect', 15, 13.2, 4, 0.5, 0, 0.25],
+    ['ice', 'rect', 18.5, 12.6, 0.5, 2, 3, -0.5],
+    ['ice', 'rect', 21, 13, 0.5, 0.5, 0, 0.6],
+    ['wood', 'rect', 23, 13, 1, 1, 0],
+    ['stone', 'rect', 25, 13, 1, 1, 0],
+    ['ice', 'rect', 28.5, 9.5, 2, 0.5, 0, -0.15],
+    ['ice', 'rect', 31, 10.5, 1, 1, 1, 0.4],
+  ];
+  const p: ScenePig[] = [
+    ['medium', 8.5, 0.6075, 0.6075],
+    ['small', 8.5, 2.5 + 0.405, 0.405],
+    ['small', 21.5, 0.5 + 0.405, 0.405],
+    ['small', 29, 2.5 + 0.405, 0.405],
+  ];
+  return { blocks: b, pigs: p };
+}
+
+/** Узкая сцена (≈ 12 м) для сравнения тем: башенка, ряд стадий и блоки на небе. */
+function narrowScene(): { blocks: SceneBlock[]; pigs: ScenePig[] } {
+  const b: SceneBlock[] = [
+    ['ice', 'rect', 1.75, 1, 0.5, 2, 0],
+    ['ice', 'rect', 4.25, 1, 0.5, 2, 1],
+    ['ice', 'rect', 3, 2.25, 3, 0.5, 0],
+    ['ice', 'isoTriangle', 3, 3, 3, 1, 0],
+    ['ice', 'rect', 6.5, 0.5, 1, 1, 0],
+    ['ice', 'circle', 6.5, 1.5, 1, 1, 2],
+    ['ice', 'rect', 7.75, 0.25, 0.5, 0.5, 3],
+    ['ice', 'triangle', 9, 0.5, 1, 1, 0],
+    ['wood', 'rect', 10.4, 0.5, 1, 1, 0],
+    ['ice', 'rect', 2, 12.5, 1, 1, 0],
+    ['ice', 'rect', 5, 12.6, 3, 0.5, 0, 0.2],
+    ['ice', 'triangle', 8, 12.5, 1, 1, 1],
+    ['stone', 'rect', 10, 12.5, 1, 1, 0],
+    ['ice', 'circle', 4, 9, 1, 1, 0],
+    ['ice', 'rect', 8.5, 8.8, 0.5, 2, 0, 0.9],
+  ];
+  return { blocks: b, pigs: [['medium', 3, 0.6075, 0.6075]] };
+}
+
+/** Мир → экран (пиксели устройства). */
+const wsx = (v: ViewInfo, x: number): number => (x - v.camX) * v.scale + v.screenW / 2;
+const wsy = (v: ViewInfo, y: number): number => v.screenH / 2 - (y - v.camY) * v.scale;
+
+/** Спрайт в мире так же, как Renderer.blit: ступень ppu кэша (вверх до √2), уменьшение до масштаба вида. */
+function worldSprite(ctx: CanvasRenderingContext2D, v: ViewInfo, s: Sprite, x: number, y: number, ang: number): void {
+  const k = v.scale / s.ppu;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.translate(wsx(v, x), wsy(v, y));
+  ctx.rotate(-ang);
+  ctx.scale(k, k);
+  ctx.drawImage(s.canvas, -s.ox, -s.oy);
+  ctx.restore();
+}
+
+/** Панель темы: фон → рельеф → тела → передний план (порядок Renderer), всё в пикселях устройства. */
+function themePanel(theme: ThemeId, wCss: number, hCss: number, S: number, narrow: boolean): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = Math.round(wCss * dpr);
+  c.height = Math.round(hCss * dpr);
+  const ctx = c.getContext('2d');
+  if (!ctx) return c;
+  const scale = S * dpr;
+  // земля на 9/10 высоты, левый край сцены — x = 0
+  const v: ViewInfo = {
+    screenW: c.width,
+    screenH: c.height,
+    camX: c.width / 2 / scale - 0.6,
+    camY: (0.4 * c.height) / scale,
+    scale,
+    dpr,
+    time: 0,
+  };
+  const bg = new Background(theme);
+  bg.prewarm(v);
+  bg.draw(ctx, v);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  drawTerrain(ctx, SCENE_TERRAIN, theme, v);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'low';
+  const { blocks, pigs } = narrow ? narrowScene() : fullScene();
+  const ppu = ppuBucket(scale);
+  blocks.forEach(([m, sh, x, y, w, h, st, a], i) => {
+    const s = timed(() => renderBlock(m, sh, w, h, st, i + 1, ppu));
+    checkClip(`${theme} ${m}/${sh} ${w}x${h} st${st}`, s);
+    worldSprite(ctx, v, s, x, y, a ?? 0);
+  });
+  for (const [type, x, y, r] of pigs) worldSprite(ctx, v, timed(() => renderPig(type, 'idle', 0, false, r, ppu)), x, y, 0);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  drawForeground(ctx, theme, v);
+  bg.dispose();
+  return c;
+}
+
+/** ?theme=…: одна тема на весь экран или три темы рядом (all). */
+function drawThemes(ctx: CanvasRenderingContext2D, which: string): void {
+  const S = Number(params.get('scale')) || 45;
+  const list: ThemeId[] = which === 'all' ? THEMES : THEMES.includes(which as ThemeId) ? [which as ThemeId] : ['snow'];
+  const colW = W / list.length;
+  list.forEach((t, i) => {
+    const panel = themePanel(t, colW, H, S, list.length > 1);
+    ctx.drawImage(panel, i * colW, 0, colW, H);
+    if (i > 0) {
+      ctx.fillStyle = 'rgba(20,40,70,0.9)';
+      ctx.fillRect(i * colW - 1, 0, 2, H);
+    }
+    label(ctx, `тема: ${THEME_RU[t]}`, i * colW + colW / 2, 44, 18, 'center', '#FFF6C8');
+  });
+  label(ctx, `Лёд в сцене темы (ppu ${S}, спрайты ступени ${ppuBucket(S * dpr).toFixed(0)})`, W / 2, 18, 20, 'center', '#FFF6C8');
 }
 
 /** Замер времени генерации спрайтов по материалам на типичных ppu. */

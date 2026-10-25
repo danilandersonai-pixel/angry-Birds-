@@ -6,7 +6,8 @@
 //  • частицы — пул объектов (лимит 600 / 400 / 250 по качеству), без аллокаций в кадре; при переполнении
 //    вытесняются самые старые с наименьшим приоритетом (пыль < обломки < перья < элементы взрыва);
 //  • облака-«пуфы» (свинья, птица) — 9 кругов в три прохода;
-//  • взрывы: вспышка ('lighter'), ударная волна-кольцо, огненные шары → дым (частицы), искры, угольки;
+//  • взрывы: вспышка ('lighter'), ударная волна-кольцо, огненные шары → дым (частицы), искры, угольки,
+//    остаточный дым — мягкие клубы в три яруса (тёмное основание, тёплая середина, светлый верх), ≈ 1.2–1.6 с;
 //  • всплывающие очки — отдельный список (popups.ts), лимит частиц на них не действует;
 //  • запросы тряски камеры (takeShake) и экранная вспышка (drawFlash).
 // Частицы рисуются кэшированными спрайтами (sprites.ts) — градиенты не создаются в кадре.
@@ -15,7 +16,7 @@ import type { ExplosionSource, GameEvent, ImpactSurface } from '../../core/event
 import type { BirdType, BlockShape, Material, TerrainDef } from '../../core/types';
 import type { ViewInfo } from '../view';
 import { buildGround, FLAT_GROUND, type GroundFn } from './ground';
-import { clamp, easeOutBack, easeOutCubic, lerp, rand, randInt, randSign, TAU } from './math';
+import { clamp, easeOutBack, easeOutCubic, lerp, rand, randInt, randSign, smoothstep, TAU } from './math';
 import { BIRD_FX, BIRD_PUFF, GROUND_DUST, MATERIAL_FX, PIG_PUFF } from './palette';
 import { Popups } from './popups';
 import {
@@ -29,8 +30,10 @@ import {
   SPR_HELMET,
   SPR_SHARD,
   SPR_SHELL,
+  softPuffSprite,
   SPR_SMOKE,
   SPR_SMOKE_DARK,
+  SPR_SMOKE_LIGHT,
   SPR_SPLINTER,
   SPR_STAR,
   SPR_STREAK,
@@ -59,17 +62,20 @@ const K_FEATHER = 2; // перо: парит, покачивается
 const K_TWINKLE = 3; // искорка: масштаб 0 → 1 → 0, 'lighter'
 const K_STREAK = 4; // искра-штрих вдоль скорости, 'lighter'
 const K_FIRE = 5; // огненный шар взрыва → дым
-const K_SMOKE = 6; // дым: плавное появление, рост, всплытие
+const K_SMOKE = 6; // дым: плавное появление, раздувание, плотная середина, мягкое рассеивание, всплытие
 const K_STAR = 7; // мультяшная звёздочка: pop-in, вращение
 const K_EMBER = 8; // уголёк: светящаяся точка, 'lighter'
 
-// Слои отрисовки (внутри draw): пыль/дым → обломки → перья → огонь → облака-пуфы → клубы поверх облаков → свечения.
+// Слои отрисовки (внутри draw): пыль/основание дыма → верх дыма → обломки → перья → огонь → облака-пуфы →
+// клубы поверх облаков → свечения. Внутри слоя порядок — порядок пула (после вытеснений произвольный), поэтому
+// светлый верх облака взрыва — отдельным слоем поверх тёмного основания.
 const L_BACK = 0;
 const L_DEBRIS = 1;
 const L_FEATHER = 2;
 const L_FIRE = 3;
 const L_TOP = 4;
 const L_GLOW = 5;
+const L_SMOKE_HI = 6;
 /** Слой по умолчанию для закона анимации (индекс — K_*). */
 const LAYER_OF = [L_DEBRIS, L_BACK, L_FEATHER, L_GLOW, L_GLOW, L_FIRE, L_BACK, L_DEBRIS, L_GLOW];
 
@@ -209,7 +215,7 @@ export class Fx {
     at([SPR_TWINKLE], [0.3, 0.6]);
     const dusts = [MATERIAL_FX.wood.dust, MATERIAL_FX.ice.dust, MATERIAL_FX.stone.dust, GROUND_DUST, '#FFFFFF', PIG_PUFF.white, PIG_PUFF.body];
     at(dusts.map(puffSprite), [0.5, 1.0]);
-    at([SPR_FIRE, SPR_SMOKE, SPR_SMOKE_DARK], [1.2, 2.4]);
+    at([SPR_FIRE, SPR_SMOKE, SPR_SMOKE_DARK, SPR_SMOKE_LIGHT, softPuffSprite(GROUND_DUST)], [1.2, 2.4, 4.0]);
     at([SPR_GLOW_WARM], [5]);
     at([SPR_STREAK], [0.6, 1.2]);
     return performance.now() - t0;
@@ -369,6 +375,7 @@ export class Fx {
   draw(ctx: CanvasRenderingContext2D, view: ViewInfo): void {
     ctx.save();
     this.drawLayer(ctx, view, L_BACK);
+    this.drawLayer(ctx, view, L_SMOKE_HI);
     this.drawLayer(ctx, view, L_DEBRIS);
     this.drawLayer(ctx, view, L_FEATHER);
     if (this.blasts.length) this.drawBlasts(ctx, view);
@@ -453,9 +460,11 @@ export class Fx {
           break;
         }
         case K_SMOKE: {
+          // клуб раздувается за ~0.7 с (×0.55 → ×1.15), дальше медленно растёт; плотный до 40 % жизни, затем
+          // мягко (smoothstep) тает — без «полупрозрачной середины», в которой видны пересечения кругов
           const k = t / p.life;
-          sizeMul = 1 + 0.7 * k;
-          alpha *= Math.min(1, t / 0.15) * (1 - k);
+          sizeMul = 0.55 + 0.6 * easeOutCubic(t < 0.7 ? t / 0.7 : 1) + 0.3 * k;
+          alpha *= Math.min(1, t / 0.12) * (1 - smoothstep(0.4, 1, k));
           break;
         }
         case K_STREAK: {
@@ -481,7 +490,8 @@ export class Fx {
           const grow = easeOutCubic(t < 0.2 ? t / 0.2 : 1);
           sizeMul = (0.4 + 0.8 * grow) * (1 + 0.5 * t);
           const heat = clamp(1 - (t - 0.06) / 0.25, 0, 1);
-          alpha = clamp(1 - (t - 0.35) / 0.4, 0, 1);
+          // шар уже стал дымом — передаёт плотность остаточному дыму под ним (плавно, 0.4 → 0.9 с)
+          alpha = 1 - smoothstep(0.4, 0.9, t);
           const px = p.size * sizeMul * s;
           if (alpha <= 0.01 || px < 1) continue;
           if (sx < -px || sx > W + px || sy < -px || sy > H + px) continue;
@@ -975,7 +985,7 @@ export class Fx {
     for (let i = 0; i < 9; i++) {
       const a = (i / 9) * TAU + rand(0, 0.5);
       const d = R * rand(0.15, 0.55);
-      const p = this.spawn(K_FIRE, SPR_FIRE, P_BLAST, x + Math.cos(a) * d * 0.4, y + Math.sin(a) * d * 0.4, Math.cos(a) * d * 0.8 * k, Math.sin(a) * d * 0.8 * k, 2 * R * rand(0.28, 0.45), 0.75);
+      const p = this.spawn(K_FIRE, SPR_FIRE, P_BLAST, x + Math.cos(a) * d * 0.4, y + Math.sin(a) * d * 0.4, Math.cos(a) * d * 0.8 * k, Math.sin(a) * d * 0.8 * k, 2 * R * rand(0.28, 0.45), 0.9);
       if (!p) break;
       p.drag = k;
       p.g = -0.9 * k; // всплытие 0.9 м/с
@@ -1000,18 +1010,7 @@ export class Fx {
       p.drag = 1.2;
       p.g = 9;
     }
-    // остаточный дым
-    const sm = this.cnt(5);
-    for (let i = 0; i < sm; i++) {
-      const a = rand(0, TAU);
-      const d = R * rand(0, 0.4);
-      const p = this.spawn(K_SMOKE, SPR_SMOKE_DARK, P_DUST, x + Math.cos(a) * d, y + Math.sin(a) * d + 0.2 * R, Math.cos(a) * 0.5, 0.4, R * rand(0.5, 0.8), rand(0.9, 1.4));
-      if (!p) break;
-      p.drag = 1.5;
-      p.g = -1.8; // всплытие ≈ 1.2 м/с
-      p.alpha = 0.55;
-      p.age = -rand(0.15, 0.28);
-    }
+    this.emitBlastSmoke(x, y, R);
     // скорлупа яйца Матильды
     if (source === 'egg') {
       for (let i = 0; i < 6; i++) {
@@ -1026,20 +1025,57 @@ export class Fx {
         p.bounce = 0.25;
       }
     }
-    // пыль по земле, если взрыв у поверхности
+    // пыль по земле, если взрыв у поверхности: мягкие клубы (без кругов-наложений) катятся в стороны
     const h = this.ground(x);
     if (h > -Infinity && Math.abs(y - h) < R) {
       const n = this.cnt(6);
-      const spr = puffSprite(GROUND_DUST);
+      const spr = softPuffSprite(GROUND_DUST);
       for (let i = 0; i < n; i++) {
         const side = i % 2 === 0 ? 1 : -1;
         const px = x + side * R * rand(0.1, 0.8);
         const gh = this.ground(px);
-        const p = this.spawn(K_DUST, spr, P_DUST, px, (gh > -Infinity ? gh : h) + 0.25, side * rand(6, 14), rand(0.5, 2), R * rand(0.35, 0.55), rand(0.8, 1.1));
+        const p = this.spawn(K_DUST, spr, P_DUST, px, (gh > -Infinity ? gh : h) + 0.25, side * rand(6, 14), rand(0.5, 2), R * rand(0.4, 0.6), rand(1.0, 1.3));
         if (!p) break;
         p.drag = 3.5;
         p.g = -1.5;
-        p.alpha = 0.6;
+        p.alpha = 0.7;
+      }
+    }
+  }
+
+  /**
+   * Остаточный дым взрыва (плейтест №2, Б5; AB2): плотное облако мягких клубов, тёмное у основания и светлее
+   * кверху, ≈ 1.2–1.6 с после огня. Клубы рождаются под огненными шарами (слой дыма рисуется раньше огня) через
+   * 0.22–0.3 с, когда шары уже дымят, и проступают, когда те гаснут (0.4–0.9 с); основание всплывает медленно и
+   * тает последним, верх — быстрее и раньше.
+   * 9 частиц (×плотность качества) приоритета взрыва — не вытесняются пылью и обломками того же кадра.
+   */
+  private emitBlastSmoke(x: number, y: number, R: number): void {
+    const h = this.ground(x);
+    // у земли основание облака ложится на неё (не уходит под землю), в воздухе — вокруг центра
+    const baseY = h > -Infinity && y - h < 0.6 * R ? Math.max(y, h + 0.3 * R) : y - 0.1 * R;
+    // [спрайт, доля по высоте (0 — основание, 1 — верх), число]
+    const tiers: ReadonlyArray<readonly [number, number, number]> = [
+      [SPR_SMOKE_DARK, 0, 3],
+      [SPR_SMOKE, 0.45, 3],
+      [SPR_SMOKE_LIGHT, 0.9, 3],
+    ];
+    for (const [spr, lv, n0] of tiers) {
+      const n = this.cnt(n0);
+      for (let i = 0; i < n; i++) {
+        // по ширине — равномерно с разбросом: основание шире, верх уже
+        const u = n > 1 ? i / (n - 1) - 0.5 : 0;
+        const spread = R * lerp(1.0, 0.6, lv);
+        const px = x + u * spread + rand(-0.12, 0.12) * R;
+        const py = baseY + lv * 0.75 * R + rand(-0.1, 0.1) * R;
+        const p = this.spawn(K_SMOKE, spr, P_BLAST, px, py, u * R * lerp(0.5, 0.25, lv), lerp(0.15, 0.5, lv), R * rand(0.75, 0.95) * lerp(1.1, 0.85, lv), rand(1.75, 2.05) - 0.4 * lv);
+        if (!p) return;
+        if (lv > 0) p.layer = L_SMOKE_HI;
+        p.drag = 1.4;
+        p.g = -lerp(0.5, 1.1, lv); // всплытие: основание ≈ 0.35 м/с, верх ≈ 0.8 м/с
+        p.alpha = lerp(0.95, 0.85, lv);
+        // рождаются, когда огонь уже дымит (раньше их всё равно не видно под шарами, а заливка стоит в пике кадра)
+        p.age = -rand(0.22, 0.3);
       }
     }
   }

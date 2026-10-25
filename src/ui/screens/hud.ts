@@ -27,6 +27,8 @@ export class HudView implements View {
   private readonly pigsEl: HTMLElement;
   private readonly pigsNum: HTMLElement;
   private readonly levelEl: HTMLElement;
+  /** Правый блок: рекорд, счёт, свиньи (rightRect — для камеры). */
+  private readonly rightEl: HTMLElement;
   private readonly homeWrap: HTMLElement | null = null;
   private readonly homeBadge: HTMLElement | null = null;
   private readonly homeBtn: HTMLButtonElement | null = null;
@@ -76,12 +78,13 @@ export class HudView implements View {
       home.tabIndex = -1;
     }
     this.skipEl = h('div', { class: 'hud-skip ts is-hidden', 'aria-hidden': 'true', 'data-testid': 'hud-skip', text: S.hudSkip });
+    this.rightEl = h('div', { class: 'hud-right', 'data-testid': 'hud-right' }, this.bestEl, this.scoreEl, this.pigsEl);
     this.el = h(
       'div',
       { class: 'hud', role: 'region', 'aria-label': `${level.id} ${level.name}` },
       h('div', { class: 'hud-left' }, this.pauseBtn, this.restartBtn),
       this.levelEl,
-      h('div', { class: 'hud-right' }, this.bestEl, this.scoreEl, this.pigsEl),
+      this.rightEl,
       this.homeWrap,
       this.skipEl,
     );
@@ -93,7 +96,7 @@ export class HudView implements View {
   }
 
   enter(): void {
-    const items = [this.pauseBtn, this.restartBtn, this.el.querySelector('.hud-right')!];
+    const items = [this.pauseBtn, this.restartBtn, this.rightEl];
     items.forEach((e, i) =>
       anim(e, [{ opacity: 0, transform: 'translateY(calc(-30 * var(--u)))' }, { opacity: 1, transform: 'none' }], {
         duration: motion.reduced ? 150 : 380,
@@ -103,6 +106,19 @@ export class HudView implements View {
       }),
     );
     this.showLevelLabel();
+  }
+
+  /**
+   * Прямоугольник правого блока (рекорд, счёт, свиньи) в CSS px окна, как у getBoundingClientRect, но по раскладке —
+   * без transform-анимаций (въезд HUD, «пульс» счёта). Счёт с первого кадра держит место под пятизначное число
+   * (.hud-score, min-width 3.1em), так что ширина почти не растёт по ходу уровня. null — HUD не в документе или не разложен.
+   */
+  rightRect(): DOMRect | null {
+    const el = this.rightEl;
+    if (!el.isConnected || !(el.offsetWidth > 0) || !(el.offsetHeight > 0)) return null;
+    // offsetLeft/Top — от .hud (position: absolute); сам .hud не трансформируется (гаснет только opacity)
+    const host = (el.offsetParent ?? this.el).getBoundingClientRect();
+    return new DOMRect(host.left + el.offsetLeft, host.top + el.offsetTop, el.offsetWidth, el.offsetHeight);
   }
 
   /** Плашка «1-3 · Название» на 2.5 с. */
@@ -128,6 +144,8 @@ export class HudView implements View {
     if (!w || on === this.homeOn) return;
     this.homeOn = on;
     if (this.homeBtn) this.homeBtn.tabIndex = on ? 0 : -1;
+    // прошлый pop-out держит конечное состояние (fill: forwards) — снять, чтобы pop-in шёл один и на композиторе
+    for (const a of w.getAnimations?.() ?? []) a.cancel();
     if (on) {
       w.classList.remove('is-hidden');
       popIn(w);

@@ -1,6 +1,9 @@
 // Экраны результата: победа (07 §12) и поражение (07 §13).
 // Победа: лента «Уровень пройден!», звёзды по очереди с «бумом» и искрами, подсчёт очков с тиканьем,
 // «Новый рекорд!» с конфетти. Поражение: красная лента и свинья, хохочущая до слёз.
+// Анимации — только «композиторные»: opacity и translate / scale / rotate (у HTML-элементов — отдельными свойствами,
+// у SVG — через transform: отдельные свойства на SVG Chromium не уводит на композитор). Закончившиеся анимации
+// снимает anim() — иначе бесконечные «пульс» и «качание» остаются на главном потоке (плейтест №2, Б10).
 
 import { characterCanvas } from '../art';
 import { CSS_EASE, Timeline, anim, done, motion, popIn } from '../anim';
@@ -8,12 +11,16 @@ import type { OverlayView, UiCtx } from '../ctx';
 import { appendAll, button, fitInto, focusEl, h, ribbon, withStarIcons } from '../dom';
 import { confetti, starBoom } from '../fx';
 import { starSvg } from '../icons';
-import { S, STARS, TAUNTS, fmt, plural, t } from '../strings';
+import { S, STARS, fmt, pickTaunt, plural, t } from '../strings';
 import { episodeGate, gateText } from '../rules';
 
 export interface WinResult {
   levelId: string;
   score: number;
+  /**
+   * Рекорд ДО этой победы (progress.saveResult → prevBest; 0 — первая победа). Показывается строкой «Рекорд: …»,
+   * пока не побит; при newRecord и при 0 строки нет — итог не выдаётся заранее, пока счёт крутится от нуля.
+   */
   best: number;
   stars: number;
   newRecord: boolean;
@@ -86,7 +93,7 @@ function enterFrame(f: Frame, from?: DOMRect): void {
     anim(res, [{ opacity: 0 }, { opacity: 1 }], { duration: 150, fill: 'backwards' });
     return;
   }
-  anim(panel, [{ transform: 'translateY(110vh)' }, { transform: 'none' }], { duration: 420, easing: CSS_EASE.back, fill: 'backwards' });
+  anim(panel, [{ translate: '0 110vh' }, { translate: '0 0' }], { duration: 420, easing: CSS_EASE.back, fill: 'backwards' });
   if (from && from.width > 0) {
     // FLIP: та же лента перелетает из баннера в заголовок панели (07 §12.2), 0.35 с ease-in-out
     const to = rib.getBoundingClientRect();
@@ -94,7 +101,7 @@ function enterFrame(f: Frame, from?: DOMRect): void {
     const dx = (from.left + from.width / 2 - (to.left + to.width / 2)) / k;
     const dy = (from.top + from.height / 2 - (to.top + to.height / 2)) / k;
     const s = from.width / Math.max(1, to.width);
-    anim(rib, [{ transform: `translate(${dx.toFixed(1)}px, ${dy.toFixed(1)}px) scale(${s.toFixed(3)})` }, { transform: 'none' }], {
+    anim(rib, [{ translate: `${dx.toFixed(1)}px ${dy.toFixed(1)}px`, scale: s.toFixed(3) }, { translate: '0 0', scale: '1' }], {
       duration: 350,
       easing: CSS_EASE.inout,
       fill: 'backwards',
@@ -104,9 +111,9 @@ function enterFrame(f: Frame, from?: DOMRect): void {
   anim(
     rib,
     [
-      { transform: 'translateY(-60vh) scale(.8)', opacity: 0 },
-      { transform: 'translateY(0) scale(1.06)', opacity: 1, offset: 0.7 },
-      { transform: 'none', opacity: 1 },
+      { translate: '0 -60vh', scale: '.8', opacity: 0 },
+      { translate: '0 0', scale: '1.06', opacity: 1, offset: 0.7 },
+      { translate: '0 0', scale: '1', opacity: 1 },
     ],
     { duration: 480, delay: 80, easing: CSS_EASE.out, fill: 'backwards' },
   );
@@ -156,8 +163,8 @@ export class WinView implements OverlayView {
       this.slots.push(slot);
     }
     this.scoreEl = h('div', { class: 'res-score num ts', 'data-testid': 'results-score', text: '0' });
-    // до бейджа показываем действующий рекорд; при новом рекорде старый неизвестен — строка пустая
-    const shownBest = this.r.newRecord ? 0 : Math.max(this.r.best, this.r.score);
+    // рекорд до этой победы (плейтест №2, Б6): при новом рекорде строку заменит бейдж, при первой победе (0) — пусто
+    const shownBest = this.r.newRecord ? 0 : Math.max(0, Math.floor(this.r.best));
     this.bestEl = h('div', { class: 'res-best', text: shownBest > 0 ? t('winBest', { score: fmt(shownBest) }) : '' });
     this.badge = h('div', { class: 'badge-best ts', 'data-testid': 'new-best', text: S.winNewBest, style: 'visibility:hidden' });
 
@@ -231,7 +238,7 @@ export class WinView implements OverlayView {
           this.ctx.sfx(STAR_SFX[i]!);
           if (!skipped && typeof navigator !== 'undefined' && matchMedia('(pointer: coarse)').matches) navigator.vibrate?.(15);
         } else if (!skipped && !motion.reduced) {
-          anim(slot, [{ transform: 'scale(1)' }, { transform: 'scale(0.9)' }, { transform: 'scale(1)' }], { duration: 150 });
+          anim(slot, [{ scale: '1' }, { scale: '.9' }, { scale: '1' }], { duration: 150 });
         }
       });
     });
@@ -275,6 +282,7 @@ export class WinView implements OverlayView {
     anim(
       full,
       [
+        // цель — <svg>: transform, а не отдельные свойства (см. шапку)
         { transform: `translateY(calc(-60 * var(--u))) scale(2.4) rotate(${-35 - rot}deg)`, opacity: 0, easing: CSS_EASE.out },
         { transform: 'scale(.88) rotate(4deg)', opacity: 1, offset: 0.45, easing: CSS_EASE.out },
         { transform: 'scale(1.14) rotate(-2deg)', offset: 0.65 },
@@ -292,22 +300,24 @@ export class WinView implements OverlayView {
     confetti(this.slots[1]!, 6);
     anim(
       this.panel,
-      [{ transform: 'none' }, { transform: 'translateY(calc(6 * var(--u)))' }, { transform: 'translateY(calc(-3 * var(--u)))' }, { transform: 'none' }],
+      [{ translate: '0 0' }, { translate: '0 calc(6 * var(--u))' }, { translate: '0 calc(-3 * var(--u))' }, { translate: '0 0' }],
       { duration: 180 },
     );
   }
 
   private showBadge(animate: boolean): void {
     this.badge.style.visibility = 'visible';
+    // стиль — сейчас: анимации бейджа и конфетти в нём, запущенные по ещё скрытому элементу, не уходят на композитор
+    void getComputedStyle(this.badge).visibility;
     this.bestEl.textContent = '';
     this.ctx.sfx('newRecord');
     if (animate && !motion.reduced) {
       const a = anim(
         this.badge,
         [
-          { transform: 'scale(2.2)', opacity: 0 },
-          { transform: 'scale(.9)', opacity: 1, offset: 0.7 },
-          { transform: 'scale(1)', opacity: 1 },
+          { scale: '2.2', opacity: 0 },
+          { scale: '.9', opacity: 1, offset: 0.7 },
+          { scale: '1', opacity: 1 },
         ],
         { duration: 300, easing: CSS_EASE.out },
       );
@@ -406,6 +416,8 @@ export interface LoseResult {
   tip?: string;
   /** Счёт попытки: «Счёт: 23 450». */
   score?: number;
+  /** Сколько свиней осталось: по нему (и по счёту) выбирается дразнилка — «Почти получилось!» только при одной. */
+  pigsLeft?: number;
 }
 
 export class LoseView implements OverlayView {
@@ -416,6 +428,7 @@ export class LoseView implements OverlayView {
   private readonly retry: HTMLButtonElement;
   private readonly menu: HTMLButtonElement;
   private tearTimer = 0;
+  private pulseTimer = 0;
   private tearSide = 0;
 
   constructor(
@@ -456,7 +469,7 @@ export class LoseView implements OverlayView {
       f.panel,
       levelCaption(ctx, r.levelId),
       this.pigBox,
-      tip ? null : h('div', { class: 'lose-taunt', text: TAUNTS[Math.floor(Math.random() * TAUNTS.length)]! }),
+      tip ? null : h('div', { class: 'lose-taunt', 'data-testid': 'lose-taunt', text: pickTaunt({ pigsLeft: r.pigsLeft, score: r.score }) }),
       score !== null ? h('div', { class: 'lose-score', 'data-testid': 'results-score' }, `${S.winScore}: `, h('span', { class: 'num', text: fmt(score) })) : null,
       tip ? h('div', { class: 'lose-tip', 'data-testid': 'lose-tip' }, h('b', { text: `${S.loseTipPrefix} ` }), tip) : null,
       h('div', { class: 'res-btns' }, this.menu, this.retry),
@@ -472,15 +485,16 @@ export class LoseView implements OverlayView {
       anim(
         pig.parentElement!,
         [
-          { transform: 'scale(0)', opacity: 0 },
-          { transform: 'scale(1.1)', opacity: 1, offset: 0.7 },
-          { transform: 'none', opacity: 1 },
+          { scale: '0', opacity: 0 },
+          { scale: '1.1', opacity: 1, offset: 0.7 },
+          { scale: '1', opacity: 1 },
         ],
         { duration: motion.reduced ? 120 : 350, delay: 250, easing: CSS_EASE.out, fill: 'backwards' },
       );
     popIn(this.menu, 550);
-    popIn(this.retry, 610);
-    window.setTimeout(() => this.retry.classList.add('pulse'), 900);
+    // «пульс» — после pop-in, не поверх него: две анимации масштаба на одной кнопке Chromium держит на главном потоке
+    const pop = popIn(this.retry, 610);
+    this.pulseTimer = window.setTimeout(() => void done(pop).then(() => this.retry.isConnected && this.retry.classList.add('pulse')), 900);
     if (!motion.reduced) this.tearTimer = window.setTimeout(() => this.tear(), 700);
   }
 
@@ -495,6 +509,7 @@ export class LoseView implements OverlayView {
     const a = anim(
       svg,
       [
+        // цель — <svg>: transform (см. шапку)
         { transform: 'translate(0,0) scale(.4)', opacity: 0 },
         { transform: `translate(calc(${side * 18} * var(--u)), calc(-6 * var(--u))) scale(1)`, opacity: 1, offset: 0.25 },
         { transform: `translate(calc(${side * 34} * var(--u)), calc(30 * var(--u))) scale(1)`, opacity: 1, offset: 0.7 },
@@ -508,6 +523,7 @@ export class LoseView implements OverlayView {
 
   leave(): Promise<void> {
     window.clearTimeout(this.tearTimer);
+    window.clearTimeout(this.pulseTimer);
     return leaveFrame(this.el);
   }
 
@@ -538,6 +554,7 @@ export class LoseView implements OverlayView {
 
   destroy(): void {
     window.clearTimeout(this.tearTimer);
+    window.clearTimeout(this.pulseTimer);
     this.f.unfit();
   }
 }

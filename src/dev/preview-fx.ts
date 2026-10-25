@@ -5,7 +5,9 @@
 //   sheet — контактный лист: строки — эффекты, столбцы — моменты времени (кадры анимации).
 //   bench — ~N частиц постоянно (?n=400), в HUD — время draw (запись команд и с растеризацией).
 //   raster — сравнение способов растеризации 400 мелких спрайтов (поворот/масштаб/альфа/пути).
+//   blast — замер взрыва: стоимость кадра (fx.draw + растр) и длительность остаточного дыма (window.__blast).
 //   sheet&atlas=1 — поверх листа показать страницы атласа спрайтов.
+//   sheet&set=blast — только взрывы, до 2.4 с (остаточный дым); sheet&set=score — скопления очков (разнос надписей).
 // Прочие параметры: ?dpr=2, ?viewh=16 (высота вида, м), ?t=2.7 — заморозить demo на моменте цикла.
 // Для скриптов: window.__fx (demo/bench), window.__bench (bench), window.__sheetDone (sheet).
 
@@ -26,7 +28,7 @@ const mode = params.get('mode') ?? 'demo';
 const dpr = Number(params.get('dpr') ?? window.devicePixelRatio ?? 1) || 1;
 const canvas = document.getElementById('view') as HTMLCanvasElement;
 const hud = document.getElementById('hud') as HTMLDivElement;
-const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
+const ctx = canvas.getContext('2d', mode === 'blast' ? { willReadFrequently: false } : undefined) as CanvasRenderingContext2D;
 
 function resize(): void {
   canvas.width = Math.round(window.innerWidth * dpr);
@@ -272,7 +274,8 @@ function runDemo(): void {
   let last = performance.now();
   const times: number[] = [];
   const frame = (now: number) => {
-    const dt = Math.min(0.05, (now - last) / 1000);
+    // первый кадр: метка rAF может быть раньше performance.now() — отрицательный dt давал NaN в тряске
+    const dt = Math.max(0, Math.min(0.05, (now - last) / 1000));
     last = now;
     if (freezeAt === null) step(dt);
     const W = canvas.width;
@@ -281,7 +284,7 @@ function runDemo(): void {
     // тряска камеры (01-gameplay §6.4)
     let sx = 0;
     let sy = 0;
-    if (shake.t < shake.dur) {
+    if (shake.dur > 0 && shake.t < shake.dur) {
       const a = shake.amp * (1 - shake.t / shake.dur) ** 2;
       const n = (t: number, k: number) => 0.6 * Math.sin(2 * Math.PI * 7.3 * t + k) + 0.4 * Math.sin(2 * Math.PI * 13.1 * t + 1.7 * k);
       sx = a * n(sceneTime, 0);
@@ -313,18 +316,34 @@ function runDemo(): void {
 // ── Контактный лист ──────────────────────────────────────────────────────
 
 function runSheet(): void {
-  const T = [0.03, 0.08, 0.15, 0.25, 0.4, 0.6, 0.85, 1.15];
+  const set = params.get('set') ?? 'all';
+  const T =
+    set === 'blast'
+      ? [0.05, 0.15, 0.3, 0.5, 0.75, 1.0, 1.3, 1.6, 1.9, 2.3]
+      : set === 'score'
+        ? [0.05, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2]
+        : [0.03, 0.08, 0.15, 0.25, 0.4, 0.6, 0.85, 1.15, 1.5, 1.9];
   interface Row {
     name: string;
     scale: number; // пикс./м при dpr 1
     oy: number; // мировая y начала эффекта (земля — y = 0)
     events: GameEvent[];
+    /** События позже нуля: [момент, события]. */
+    later?: Array<[number, GameEvent[]]>;
   }
   const blk = (material: Material, w: number, h: number, vx = 0, vy = 0): GameEvent[] => [
     { type: 'blockDestroyed', id: 1, material, shape: 'rect', x: 0, y: 1.2, w, h, angle: 0.2, vx, vy, points: 500 },
     { type: 'score', points: 500, x: 0, y: 1.2, kind: 'block' },
   ];
-  const rows: Row[] = [
+  const brk = (material: Material, x: number, y: number, points: number): GameEvent[] => [
+    { type: 'blockDestroyed', id: 1, material, shape: 'rect', x, y, w: 1, h: 0.5, angle: 0, vx: 0, vy: 0, points },
+    { type: 'score', points, x, y, kind: 'block' },
+  ];
+  const pig = (x: number, y: number, r = 0.6): GameEvent[] => [
+    { type: 'pigDestroyed', id: 1, pig: 'medium', x, y, radius: r, points: 5000 },
+    { type: 'score', points: 5000, x, y, kind: 'pig' },
+  ];
+  const allRows: Row[] = [
     { name: 'дерево 2×0.5', scale: 38, oy: 1.2, events: blk('wood', 2, 0.5, 3, 0) },
     { name: 'лёд 1×1', scale: 38, oy: 1.2, events: blk('ice', 1, 1) },
     { name: 'камень 2×0.5', scale: 38, oy: 1.2, events: blk('stone', 2, 0.5, -2, 2) },
@@ -372,6 +391,64 @@ function runSheet(): void {
       ],
     },
   ];
+  const blastRows: Row[] = [
+    { name: 'TNT (R 3) у земли', scale: 20, oy: 0.5, events: [{ type: 'tntDestroyed', id: 1, x: 0, y: 0.5, points: 500 }, { type: 'explosion', x: 0, y: 0.5, radius: 3, source: 'tnt' }] },
+    { name: 'Bomb (R 3.5) в воздухе', scale: 18, oy: 4, events: [{ type: 'explosion', x: 0, y: 4, radius: 3.5, source: 'bomb' }] },
+    { name: 'яйцо (R 2.5)', scale: 22, oy: 3, events: [{ type: 'explosion', x: 0, y: 3, radius: 2.5, source: 'egg' }] },
+    {
+      name: 'Bomb у земли + блоки',
+      scale: 18,
+      oy: 1.2,
+      events: [
+        { type: 'explosion', x: 0, y: 1.2, radius: 3.5, source: 'bomb' },
+        ...brk('wood', 1, 1, 500),
+        ...brk('stone', -1, 2, 500),
+        ...pig(0.5, 0.6),
+      ],
+    },
+  ];
+  const scoreRows: Row[] = [
+    {
+      name: 'взрыв: 2 свиньи, 4 блока, TNT',
+      scale: 30,
+      oy: 1,
+      events: [
+        ...pig(0, 0.6),
+        ...brk('stone', 0.4, 1.2, 1310),
+        ...brk('wood', -0.5, 0.8, 556),
+        ...brk('ice', 0.8, 0.4, 798),
+        { type: 'tntDestroyed', id: 9, x: -0.2, y: 0.3, points: 500 },
+        { type: 'score', points: 500, x: -0.2, y: 0.3, kind: 'tnt' },
+      ],
+      later: [[0.12, [...pig(0.3, 1.5, 0.45), ...brk('stone', -0.3, 1.9, 1151)]]],
+    },
+    {
+      name: 'блоки в одной точке по очереди',
+      scale: 30,
+      oy: 1,
+      events: brk('wood', 0, 1, 500),
+      later: [
+        [0.3, brk('wood', 0.1, 1, 520)],
+        [0.55, brk('stone', -0.1, 1.1, 640)],
+        [0.75, pig(0, 0.8)],
+      ],
+    },
+    {
+      name: 'свинья, затем блок рядом',
+      scale: 30,
+      oy: 1,
+      events: pig(0, 0.6),
+      later: [[0.2, brk('wood', 0.3, 1.8, 500)], [0.45, brk('ice', -0.2, 1.4, 500)]],
+    },
+    {
+      name: 'блок, затем свинья под ним',
+      scale: 30,
+      oy: 1,
+      events: brk('stone', 0, 2, 500),
+      later: [[0.15, pig(0.2, 0.6)], [0.3, pig(-0.6, 0.7, 0.45)]],
+    },
+  ];
+  const rows = set === 'blast' ? blastRows : set === 'score' ? scoreRows : allRows;
   const W = canvas.width;
   const H = canvas.height;
   const labelW = 150 * dpr;
@@ -384,11 +461,13 @@ function runSheet(): void {
     T.forEach((t, ci) => {
       const fx = new Fx();
       for (const e of row.events) fx.handle(e);
+      const later = [...(row.later ?? [])];
       const dt = 1 / 60;
       let tt = 0;
       while (tt + dt <= t + 1e-9) {
         fx.update(dt);
         tt += dt;
+        while (later.length && later[0][0] <= tt + 1e-9) for (const e of later.shift()![1]) fx.handle(e);
       }
       const x0 = labelW + ci * cw;
       const y0 = ri * ch;
@@ -450,7 +529,7 @@ function runBench(): void {
   let k = 0;
   let last = performance.now();
   const frame = (now: number) => {
-    const dt = Math.min(0.05, (now - last) / 1000);
+    const dt = Math.max(0, Math.min(0.05, (now - last) / 1000));
     last = now;
     const W = canvas.width;
     const H = canvas.height;
@@ -577,8 +656,203 @@ function runRaster(): void {
   hud.textContent = JSON.stringify(res);
 }
 
+// ── Взрыв: стоимость кадра и длительность дыма ───────────────────────────
+// ?mode=blast[&viewh=20][&runs=3] — сцена 1-8-подобного взрыва (Бомб у земли + TNT рядом + обломки + очки) на
+// фиксированном dt; Math.random подменён сидированным генератором, чтобы версии сравнивались на одних и тех же частицах.
+// Стоимость: fx.draw + drawFlash с принудительной растеризацией (getImageData), медиана по прогонам на каждом кадре.
+// Дым: отдельный «чистый» взрыв TNT R 3 без обломков — доля пикселей вокруг центра (±2.2R), отличающихся от фона,
+// по времени; «конец дыма» — когда доля падает ниже 15 % от пиковой. Итог — window.__blast.
+
+function seeded(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Минимум Fx, нужный замеру (чтобы сравнивать с другой версией модуля, см. ?ab=). */
+interface FxLike {
+  handle(e: GameEvent): void;
+  update(dt: number): void;
+  takeShake(): unknown;
+  draw(ctx: CanvasRenderingContext2D, v: ViewInfo): void;
+  drawFlash(ctx: CanvasRenderingContext2D, v: ViewInfo): void;
+  setGround(fn: (x: number) => number): void;
+  readonly particleCount: number;
+}
+type FxCtor = new () => FxLike;
+
+interface BlastResult {
+  maxMs: number;
+  p95Ms: number;
+  mean1sMs: number;
+  sumMs: number;
+  maxParticles: number;
+  smokeEnd: number;
+  coverPeak: number;
+  cover: Record<string, number>;
+  darkness: Record<string, number>;
+  frames: number[];
+}
+
+function blastBench(FxC: FxCtor, runs: number): BlastResult {
+  const viewH = Number(params.get('viewh') ?? 20);
+  const W = canvas.width;
+  const H = canvas.height;
+  const scale = H / viewH;
+  const dt = 1 / 60;
+  const DUR = 2.6;
+  const N = Math.round(DUR / dt);
+  const X0 = 10;
+  const mixed: Array<[number, GameEvent[]]> = [
+    [0, [
+      { type: 'explosion', x: X0, y: 1.2, radius: 3.5, source: 'bomb' },
+      { type: 'blockDestroyed', id: 1, material: 'wood', shape: 'rect', x: X0 + 1, y: 1, w: 2, h: 0.5, angle: 0.3, vx: 6, vy: 4, points: 500 },
+      { type: 'score', points: 500, x: X0 + 1, y: 1, kind: 'block' },
+      { type: 'blockDestroyed', id: 2, material: 'stone', shape: 'rect', x: X0 - 1, y: 2, w: 1, h: 1, angle: 0, vx: -4, vy: 6, points: 500 },
+      { type: 'score', points: 500, x: X0 - 1, y: 2, kind: 'block' },
+      { type: 'pigDestroyed', id: 3, pig: 'medium', x: X0 + 0.5, y: 0.6, radius: 0.6, points: 5000 },
+      { type: 'score', points: 5000, x: X0 + 0.5, y: 0.6, kind: 'pig' },
+    ]],
+    [8, [
+      { type: 'tntDestroyed', id: 4, x: X0 + 2.5, y: 0.5, points: 0 },
+      { type: 'explosion', x: X0 + 2.5, y: 0.5, radius: 3, source: 'tnt' },
+      { type: 'blockDestroyed', id: 5, material: 'ice', shape: 'rect', x: X0 + 3, y: 1.5, w: 2, h: 0.5, angle: 0, vx: 8, vy: 5, points: 500 },
+      { type: 'score', points: 500, x: X0 + 3, y: 1.5, kind: 'block' },
+      { type: 'pigDestroyed', id: 6, pig: 'small', x: X0 + 3.4, y: 0.5, radius: 0.45, points: 5000 },
+      { type: 'score', points: 5000, x: X0 + 3.4, y: 0.5, kind: 'pig' },
+    ]],
+  ];
+  const pure: Array<[number, GameEvent[]]> = [[0, [{ type: 'explosion', x: X0, y: 0.5, radius: 3, source: 'tnt' }]]];
+  const view: ViewInfo = { screenW: W, screenH: H, scale, dpr, camX: X0, camY: viewH / 2 - 1.2, time: 0 };
+  const bg = () => {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    drawSky(ctx, 0, 0, W, H);
+    drawGround(ctx, view, 0, W);
+  };
+  const realRandom = Math.random;
+  const play = (timeline: Array<[number, GameEvent[]]>, seed: number, onFrame: (fx: FxLike, i: number) => void) => {
+    Math.random = seeded(seed);
+    try {
+      const fx = new FxC();
+      fx.setGround(() => 0);
+      for (let i = 0; i < N; i++) {
+        for (const [f, evs] of timeline) if (f === i) for (const e of evs) fx.handle(e);
+        fx.update(dt);
+        fx.takeShake();
+        onFrame(fx, i);
+      }
+    } finally {
+      Math.random = realRandom;
+    }
+  };
+  // прогрев атласа (вне замера): тот же сценарий целиком
+  play(mixed, 1, (fx) => {
+    bg();
+    fx.draw(ctx, view);
+    fx.drawFlash(ctx, view);
+  });
+  const per: number[][] = Array.from({ length: N }, () => []);
+  const counts: number[] = new Array(N).fill(0);
+  for (let r = 0; r < runs; r++) {
+    play(mixed, 1, (fx, i) => {
+      bg();
+      ctx.getImageData(0, 0, 1, 1);
+      const t0 = performance.now();
+      fx.draw(ctx, view);
+      fx.drawFlash(ctx, view);
+      ctx.getImageData(0, 0, 1, 1);
+      per[i].push(performance.now() - t0);
+      counts[i] = fx.particleCount;
+    });
+  }
+  const med = per.map((a) => [...a].sort((x, y) => x - y)[a.length >> 1]);
+  // дым «чистого» взрыва: доля изменённых пикселей в окне вокруг центра
+  const R = 3;
+  const cx = W / 2;
+  const cy = H / 2 - (0.5 + R * 0.4 - view.camY) * scale;
+  const half = Math.round(2.2 * R * scale);
+  const bx = Math.max(0, Math.round(cx - half));
+  const by = Math.max(0, Math.round(cy - half));
+  const bw = Math.min(W - bx, 2 * half);
+  const bh = Math.min(H - by, 2 * half);
+  bg();
+  const ref = ctx.getImageData(bx, by, bw, bh).data;
+  const cover: number[] = [];
+  const dark: number[] = [];
+  play(pure, 2, (fx) => {
+    bg();
+    fx.draw(ctx, view);
+    fx.drawFlash(ctx, view);
+    const d = ctx.getImageData(bx, by, bw, bh).data;
+    let changed = 0;
+    let lum = 0;
+    for (let k = 0; k < d.length; k += 16) {
+      const diff = Math.abs(d[k] - ref[k]) + Math.abs(d[k + 1] - ref[k + 1]) + Math.abs(d[k + 2] - ref[k + 2]);
+      if (diff > 36) {
+        changed++;
+        lum += (ref[k] + ref[k + 1] + ref[k + 2] - d[k] - d[k + 1] - d[k + 2]) / 3;
+      }
+    }
+    const total = d.length / 16;
+    cover.push(changed / total);
+    dark.push(changed ? lum / changed : 0);
+  });
+  // пик дыма — после вспышки и огня (t ≥ 0.3 с); конец — последний кадр с долей ≥ 15 % пика и ≥ 3 % окна
+  const peak = Math.max(...cover.slice(Math.round(0.3 / dt)));
+  let end = 0;
+  for (let i = 0; i < N; i++) if (cover[i] >= Math.max(0.15 * peak, 0.03)) end = (i + 1) * dt;
+  const at = (s: number) => +cover[Math.min(N - 1, Math.round(s / dt) - 1)].toFixed(3);
+  const darkAt = (s: number) => +dark[Math.min(N - 1, Math.round(s / dt) - 1)].toFixed(1);
+  const sorted = [...med].sort((x, y) => x - y);
+  return {
+    maxMs: +Math.max(...med).toFixed(2),
+    p95Ms: +sorted[Math.floor(N * 0.95)].toFixed(2),
+    mean1sMs: +(med.slice(0, 60).reduce((a, b) => a + b, 0) / 60).toFixed(2),
+    sumMs: +med.reduce((a, b) => a + b, 0).toFixed(1),
+    maxParticles: Math.max(...counts),
+    smokeEnd: +end.toFixed(2),
+    coverPeak: +peak.toFixed(3),
+    cover: { '0.3': at(0.3), '0.6': at(0.6), '1.0': at(1.0), '1.4': at(1.4), '1.8': at(1.8), '2.2': at(2.2) },
+    darkness: { '0.6': darkAt(0.6), '1.0': darkAt(1.0), '1.4': darkAt(1.4) },
+    frames: med.map((v) => +v.toFixed(2)),
+  };
+}
+
+/**
+ * ?mode=blast — замер текущего Fx. ?ab=/src/…/Fx.ts — ещё и другой версии модуля, вперемежку (A, B, A, B…) в одной
+ * странице: шум машины одинаково ложится на обе. Итог — window.__blast = { cur, ab? }.
+ */
+async function runBlast(): Promise<void> {
+  const runs = Number(params.get('runs') ?? 3);
+  const abUrl = params.get('ab');
+  const Other: FxCtor | null = abUrl ? ((await import(/* @vite-ignore */ abUrl)) as { Fx: FxCtor }).Fx : null;
+  const rounds = Other ? Number(params.get('rounds') ?? 4) : 1;
+  const cur: BlastResult[] = [];
+  const ab: BlastResult[] = [];
+  for (let r = 0; r < rounds; r++) {
+    if (Other) ab.push(blastBench(Other, runs));
+    cur.push(blastBench(Fx as unknown as FxCtor, runs));
+  }
+  // по раундам — медиана каждой метрики
+  const agg = (l: BlastResult[]): BlastResult => {
+    const m = (f: (x: BlastResult) => number) => +[...l.map(f)].sort((a, b) => a - b)[l.length >> 1].toFixed(2);
+    return { ...l[0], maxMs: m((x) => x.maxMs), p95Ms: m((x) => x.p95Ms), mean1sMs: m((x) => x.mean1sMs), sumMs: m((x) => x.sumMs) };
+  };
+  const res = { W: canvas.width, H: canvas.height, cur: agg(cur), ab: Other ? agg(ab) : undefined };
+  w.__blast = res;
+  const c = res.cur;
+  hud.textContent = `blast  max=${c.maxMs} ms  p95=${c.p95Ms}  mean(1 с)=${c.mean1sMs}  частиц≤${c.maxParticles}  дым до ${c.smokeEnd} с` + (res.ab ? `   | ab: max=${res.ab.maxMs} p95=${res.ab.p95Ms} mean=${res.ab.mean1sMs} дым до ${res.ab.smokeEnd} с` : '');
+}
+
 document.fonts.load('400 40px "Luckiest Guy"').finally(() => {
   if (mode === 'raster') runRaster();
+  else if (mode === 'blast') void runBlast();
   else if (mode === 'sheet') runSheet();
   else if (mode === 'bench') runBench();
   else runDemo();

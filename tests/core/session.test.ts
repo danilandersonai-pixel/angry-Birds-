@@ -124,7 +124,10 @@ describe('автомат сессии', () => {
     const tKill = timeOf(log, (e) => e.type === 'pigDestroyed');
     const tBonus = timeOf(log, (e) => e.type === 'stateChanged' && e.to === 'bonus');
     expect(tBonus - tKill).toBeGreaterThanOrEqual(TIMING.VICTORY_MIN - 1e-9);
-    expect(tBonus).toBeGreaterThan(timeOf(log, (e) => e.type === 'birdRemoved')); // летящая птица доиграна
+    // летящая птица доиграна: при VICTORY_MAX 2.0 бонус может начаться на том же шаге, но после ухода птицы
+    expect(tBonus).toBeGreaterThanOrEqual(timeOf(log, (e) => e.type === 'birdRemoved'));
+    const iRemoved = events.findIndex((e) => e.type === 'birdRemoved');
+    expect(events.findIndex((e) => e.type === 'stateChanged' && e.to === 'bonus')).toBeGreaterThan(iRemoved);
     const bonuses = log.filter((x) => x.e.type === 'birdBonus');
     expect(bonuses).toHaveLength(2);
     bonuses.forEach((b, i) => expect(b.t - tBonus).toBeCloseTo(TIMING.CLEARED_BANNER + TIMING.BONUS_PRE + i * TIMING.BONUS_PER_BIRD, 6));
@@ -170,7 +173,7 @@ describe('автомат сессии', () => {
 
   it('гибель последней свиньи во время прицела: выстрел доигрывается, бонус за эту птицу теряется', () => {
     const s = readySession(rollingPigLevel());
-    s.launch(-3, 0.7); // толчок: свинья цела, скатывается к обрыву
+    s.launch(-2, 0.8); // толчок (16.8 м/с при V_MAX 21): свинья цела, скатывается к обрыву
     runUntil(s, () => s.state === 'ready', 15);
     expect(s.pigsLeft).toBe(1);
     const sl = s.slingshot();
@@ -190,7 +193,7 @@ describe('автомат сессии', () => {
 
   it('после гибели последней свиньи захват запрещён, отменённый прицел отдаёт птицу в бонус', () => {
     const s = readySession(rollingPigLevel());
-    s.launch(-3, 0.7);
+    s.launch(-2, 0.8);
     runUntil(s, () => s.state === 'ready', 15);
     s.beginAim();
     runUntil(s, () => s.pigsLeft === 0, 10);
@@ -295,7 +298,7 @@ describe('автомат сессии', () => {
 
   it('события impact отфильтрованы: vn ≥ 1.5, J ≥ 0.5, ≤ 6 за шаг, у блока — size', () => {
     const s = readySession(hutLevel());
-    s.launch(18, 1);
+    s.launch(32, 1); // V_MAX 21: под 18° Ред до башни на x = 24…28 не долетает
     const events = runFor(s, 3);
     const impacts = ofType(events, 'impact');
     expect(impacts.length).toBeGreaterThan(3);

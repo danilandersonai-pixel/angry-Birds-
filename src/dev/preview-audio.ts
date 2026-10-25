@@ -10,10 +10,13 @@ import { AudioEngine } from '../audio/AudioEngine';
 import { BAKE_NOISE_SEED, BAKE_RATE, bakeOne } from '../audio/bake';
 import { busOf, type SoundDef, type SoundGroup, SOUND_LIST, soundDef, trimGain } from '../audio/catalog';
 import { type CompParams, createMixGraph } from '../audio/graph';
-import { CAT_MIX } from '../audio/mix';
+import { createPlanState, type Listener, planFrame, type PlayCue } from '../audio/mapping';
+import {
+  type Cat, CAT_LIMIT, CAT_MIX, cooldownFor, MAX_VOICES, MAX_VOICES_MOBILE, mobileLimits, type PoolStats, VoicePool, type VoiceSlot,
+} from '../audio/mix';
 import { makeNoiseBank, makeTanhCurve, mulberry32, type NoiseBank } from '../audio/noise';
 import * as F from '../audio/sfx';
-import { setSynthRandom } from '../audio/synth';
+import { beginCollect, endCollect, setSynthRandom } from '../audio/synth';
 import { startTrack, type TrackId } from '../audio/tracks';
 
 const engine = new AudioEngine();
@@ -210,6 +213,14 @@ function worstCaseCues(): MixCue[] {
   return c;
 }
 
+/** Хвост обрушения, в котором гибнет последняя свинья (t = 0): разрушения, удары, обломки, «пуф» птицы. */
+function bannerTailCues(): MixCue[] {
+  return [
+    ['woodBreak', 0, 1, undefined, 0.2], ['pigPop:medium', 0.02], ['rubble', 0.05], ['stoneHit:1', 0.12, 0.6], ['woodHit:0', 0.3, 0.4],
+    ['ground:0', 0.45, 0.4], ['puff', 0.9, 0.8, undefined, -0.2],
+  ];
+}
+
 /** Полный список рендера: каждый звук каталога + варианты параметров + музыка 20 с + фоны тем + сцены микса. */
 export function renderList(): RenderItem[] {
   const items: RenderItem[] = [];
@@ -231,6 +242,13 @@ export function renderList(): RenderItem[] {
       ['pigHurt:medium', 2.8], ['woodBreak', 2.9], ['pigPop:medium', 3.0],
     ], { id: 'level', theme: 'beach' }),
     mixItem('mix_menu_ui', 'Кнопки поверх польки меню', 4, [['ui:click', 1.0], ['ui:whoosh', 1.6], ['ui:popIn', 2.4], ['ui:back', 3.2]], { id: 'menu', theme: 'meadow' }),
+    // Баннер победы: последняя свинья гибнет в обрушении, через 0.6 с — баннер. Было: взмах + звезда 3; стало: 'cleared'.
+    mixItem('mix_banner_old', 'Баннер победы (было): ui:whoosh + star:2 через 0.18 с над хвостом обрушения', 3, [
+      ...bannerTailCues(), ['ui:whoosh', 0.6], ['star:2', 0.78],
+    ], { id: 'level', theme: 'meadow' }),
+    mixItem('mix_banner_cleared', 'Баннер победы: «уровень зачищен» над хвостом обрушения', 3, [
+      ...bannerTailCues(), ['cleared', 0.6],
+    ], { id: 'level', theme: 'meadow' }),
     mixItem('mix_victory', 'Экран победы: джингл, звёзды, тики, рекорд', 6, [
       ['jingle:win', 0], ['star:0', 1.6], ['star:1', 2.05], ['star:2', 2.5],
       ...Array.from({ length: 26 }, (_, k): MixCue => ['tick', 2.75 + k * 0.046, 1, k / 25]),
@@ -502,6 +520,178 @@ async function renderAll(opts: RenderAllOpts = {}): Promise<SoundStats[]> {
   return out;
 }
 
+// ───────────────────────────── повтор записанной игры ─────────────────────────────
+
+/** Записанный поток событий ядра (scripts/render-audio.mjs --collapse/--replay): время сессии, с. */
+export interface ReplayLevel {
+  name: string;
+  events: ReadonlyArray<{ t: number; e: GameEvent }>;
+  listener?: Listener;
+  theme?: ThemeId;
+}
+
+export interface ReplayOpts {
+  /** Пул телефона (20 голосов, лимиты ×0.6). */
+  mobile?: boolean;
+  /** Отрезок записи, с: [от, до]. */
+  window?: readonly [number, number];
+}
+
+/** Окно 100 мс повтора: сколько голосов стартовало (по категориям), сколько звучало, отказы. */
+export interface ReplayWindow {
+  t: number;
+  starts: number;
+  /** Сколько голосов ударов/разрушений/взрывов/свиней звучало одновременно (максимум окна). */
+  sfxVoices: number;
+  byCat: Partial<Record<Cat, number>>;
+  keys: string[];
+  stolen: number;
+  limited: number;
+  cooldown: number;
+}
+
+export interface ReplayStats extends SoundStats {
+  pool: PoolStats;
+  windows: ReplayWindow[];
+}
+
+/**
+ * Повтор записанной игры ТЕМ ЖЕ путём, что в движке: события кадра → planFrame → пул голосов (лимиты, кулдауны,
+ * кража) → голоса (запечённые буферы с разбросом ±60 центов или живой рецепт) → шины графа, под фон темы уровня.
+ * Повторяет AudioEngine.playCue/exec без живого AudioContext — для замеров «каши» на массовых обрушениях.
+ */
+async function renderReplay(levels: readonly ReplayLevel[], opts: ReplayOpts = {}): Promise<ReplayStats[]> {
+  const out: ReplayStats[] = [];
+  for (const lv of levels) {
+    const [w0, w1] = opts.window ?? [0, Infinity];
+    const evs = lv.events.filter((r) => r.t >= w0 && r.t <= w1);
+    if (evs.length === 0) continue;
+    const tFirst = Math.max(0, evs[0]!.t - 0.3);
+    const dur = evs[evs.length - 1]!.t - tFirst + 2.5;
+    // буферы — те же, что запекает движок (все варианты)
+    const bufs = new Map<string, AudioBuffer[]>();
+    for (const d of SOUND_LIST) {
+      if (d.bake > 0) bufs.set(d.key, await Promise.all(Array.from({ length: d.bake }, (_, v) => bakedBuffer(d, v))));
+    }
+    const oc = new OfflineAudioContext(2, Math.ceil(SR * (dur + WARM_S)), SR);
+    const t0 = WARM_S + 0.01;
+    const rnd = mulberry32(777);
+    setSynthRandom(rnd);
+    const windows = new Map<number, ReplayWindow>();
+    const pool = new VoicePool(opts.mobile ? MAX_VOICES_MOBILE : MAX_VOICES, opts.mobile ? mobileLimits() : CAT_LIMIT);
+    try {
+      const g = graph(oc);
+      const nb = makeNoiseBank(oc, 2, 4242);
+      const tanh = makeTanhCurve(3);
+      startTrack(oc, nb, g.music, g.amb, 'level', lv.theme ?? 'meadow', { at: t0 - 0.5, fadeIn: 0.05, untilS: dur + 0.5, rnd });
+      const tags = new Map<string, VoiceSlot>();
+      const st = createPlanState();
+      const playCue = (q: PlayCue, now: number): void => {
+        const def = soundDef(q.key);
+        if (!def || !(q.gain * CAT_MIX[q.cat].gain >= 0.02)) return;
+        const slot = pool.acquire(q.key, q.cat, q.score * CAT_MIX[q.cat].prio * (def.weight ?? 1), cooldownFor(q.key, q.cat), now);
+        if (!slot) return;
+        const w = windows.get(Math.floor((now - t0 + tFirst) * 10));
+        if (w) {
+          w.starts++;
+          w.byCat[q.cat] = (w.byCat[q.cat] ?? 0) + 1;
+          w.keys.push(q.key);
+        }
+        const t = now + (q.cat === 'ui' || q.cat === 'reward' ? 0.005 : 0.01) + Math.max(0, q.delay);
+        const input = oc.createGain();
+        input.gain.value = q.gain * CAT_MIX[q.cat].gain * trimGain(def);
+        const p = oc.createStereoPanner();
+        p.pan.value = Math.max(-1, Math.min(1, q.pan));
+        input.connect(p).connect(busOf(g, def));
+        const send = q.send || def.send || 0;
+        if (send > 0) {
+          const sg = oc.createGain();
+          sg.gain.value = send;
+          input.connect(sg).connect(g.send);
+        }
+        let sources: AudioScheduledSourceNode[];
+        let end: number;
+        const bb = bufs.get(q.key);
+        if (bb && bb.length > 0) {
+          const src = oc.createBufferSource();
+          const buf = bb[Math.floor(rnd() * bb.length)]!;
+          src.buffer = buf;
+          src.playbackRate.value = q.rate * 2 ** ((rnd() * 120 - 60) / 1200);
+          src.connect(input);
+          src.start(t);
+          end = t + buf.duration / src.playbackRate.value;
+          sources = [src];
+        } else {
+          beginCollect();
+          try {
+            end = def.fn({ ctx: oc, out: input, nb, rnd, tanh }, t, q.param ?? def.param ?? 0);
+          } finally {
+            sources = endCollect();
+          }
+        }
+        slot.end = t + Math.max(0, end - t) * (def.holdFrac ?? 1);
+        slot.onStop = (n) => {
+          input.gain.setValueAtTime(q.gain * CAT_MIX[q.cat].gain * trimGain(def), n);
+          input.gain.setTargetAtTime(0, n, 0.005);
+          for (const s of sources) s.stop(n + 0.04);
+        };
+        if (q.tag) tags.set(q.tag, slot);
+      };
+      // события одного шага физики — одна пачка (в игре — один кадр)
+      const frames = new Map<number, GameEvent[]>();
+      for (const r of evs) {
+        const k = Math.round(r.t * 60);
+        const arr = frames.get(k) ?? [];
+        arr.push(r.e);
+        frames.set(k, arr);
+      }
+      for (let k = Math.floor(tFirst * 10); k <= Math.ceil((tFirst + dur) * 10); k++) {
+        windows.set(k, { t: k / 10, starts: 0, sfxVoices: 0, byCat: {}, keys: [], stolen: 0, limited: 0, cooldown: 0 });
+      }
+      for (const [k, batch] of [...frames].sort((a, b) => a[0] - b[0])) {
+        const now = t0 + k / 60 - tFirst;
+        const s0 = { ...pool.stats };
+        const cues = planFrame(batch.map((e) => ({ e, l: lv.listener })), st, {
+          now, rnd,
+          voices: (cat) => pool.count(now, cat),
+          hasTag: (tag) => (tags.get(tag)?.end ?? 0) > now,
+        });
+        for (const q of cues) {
+          if (q.op === 'play') playCue(q, now);
+          else if (q.op === 'stop') {
+            const slot = tags.get(q.tag);
+            if (slot) pool.release(slot, now);
+            tags.delete(q.tag);
+          } else if (q.op === 'duck') {
+            const dg = g.duck.gain;
+            dg.setTargetAtTime(0.5, now, 0.03);
+            dg.setTargetAtTime(1, now + 0.15, 0.25);
+          } else if (q.op === 'levelEnd') {
+            const def = soundDef(q.won ? 'jingle:win' : 'jingle:lose')!;
+            playCue({ op: 'play', key: def.key, cat: def.cat, gain: 1, pan: 0, delay: 0.1, rate: 1, send: 0, score: 1 }, now);
+          }
+        }
+        const w = windows.get(Math.floor(k / 6));
+        if (w) {
+          w.stolen += pool.stats.stolen - s0.stolen;
+          w.limited += pool.stats.limited - s0.limited;
+          w.cooldown += pool.stats.cooldown - s0.cooldown;
+          const sfx = (['impact', 'break', 'explosion', 'pigVox'] as const).reduce((n, c) => n + pool.count(now + 0.011, c), 0);
+          w.sfxVoices = Math.max(w.sfxVoices, sfx);
+        }
+      }
+    } finally {
+      setSynthRandom(Math.random);
+    }
+    const name = `replay_${lv.name}${opts.mobile ? '_mobile' : ''}`;
+    const it: RenderItem = { name, group: 'mix', label: `Повтор: ${lv.name}${opts.mobile ? ' (телефон)' : ''}`, dur, build: () => undefined };
+    const buf = cut(await oc.startRendering(), WARM_S);
+    wavs.set(name, encodeWav(buf));
+    out.push({ ...analyze(it, buf), pool: { ...pool.stats }, windows: [...windows.values()].filter((w) => w.starts > 0 || w.sfxVoices > 0) });
+  }
+  return out;
+}
+
 function wavBase64(name: string): string | null {
   const b = wavs.get(name);
   if (!b) return null;
@@ -514,11 +704,13 @@ function wavBase64(name: string): string | null {
 declare global {
   interface Window {
     __renderAll: (opts?: RenderAllOpts) => Promise<SoundStats[]>;
+    __renderReplay: (levels: readonly ReplayLevel[], opts?: ReplayOpts) => Promise<ReplayStats[]>;
     __wav: (name: string) => string | null;
     __engine: AudioEngine;
   }
 }
 window.__renderAll = renderAll;
+window.__renderReplay = renderReplay;
 window.__wav = wavBase64;
 window.__engine = engine;
 
@@ -641,6 +833,10 @@ const ev = (e: GameEvent): void => engine.handle(e, view);
   button(row, 'Бонус 3 птицы', () => {
     ev({ type: 'stateChanged', from: 'settling', to: 'bonus' });
     for (let i = 0; i < 3; i++) setTimeout(() => ev({ type: 'birdBonus', bird: 'red', x: -2 - i, y: 0.5, points: 10000 }), i * 700);
+  });
+  button(row, 'Последняя свинья → баннер «уровень зачищен» через 0.6 с', () => {
+    ev({ type: 'pigDestroyed', id: 98, pig: 'medium', x: getX(), y: 1, radius: 0.6, points: 5000 });
+    setTimeout(() => engine.play('cleared'), 600);
   });
   button(row, 'Победа (levelEnd)', () => ev({ type: 'levelEnd', won: true, score: 50000, stars: 3 }));
   button(row, 'Экран победы как в UI (ui: звёзды, тики без прогресса, рекорд)', () => {

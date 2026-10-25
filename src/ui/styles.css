@@ -766,18 +766,24 @@
 }
 @keyframes ld-hop {
   from {
-    transform: translateY(0) scale(1.06, 0.94);
+    translate: 0 0;
+    scale: 1.06 0.94;
+    rotate: 0deg;
   }
   25% {
-    transform: translateY(calc(-12 * var(--u))) scale(1, 1);
+    translate: 0 calc(-12 * var(--u));
+    scale: 1 1;
+    rotate: 0deg;
   }
   to {
-    transform: translateY(calc(-40 * var(--u))) rotate(-6deg);
+    translate: 0 calc(-40 * var(--u));
+    scale: 1 1;
+    rotate: -6deg;
   }
 }
 @keyframes ld-shadow {
   to {
-    transform: scale(0.6);
+    scale: 0.6;
     opacity: 0.6;
   }
 }
@@ -1057,22 +1063,25 @@
   opacity: 0.85;
   --stroke: 0.25em;
 }
+/* бесконечные анимации — на отдельных свойствах scale / rotate / translate: складываются со статическими translate и
+   rotate элементов (центрирование, наклон бейджа) и не затирают их. Чтобы они шли на композиторе, на элементе не должно
+   висеть закончившейся WAAPI-анимации того же свойства — её снимает anim() (плейтест №2, Б10) */
 @keyframes pulse {
   0%,
   100% {
-    transform: scale(1);
+    scale: 1;
   }
   50% {
-    transform: scale(1.06);
+    scale: 1.06;
   }
 }
 @keyframes ring {
   0% {
-    transform: scale(1);
+    scale: 1;
     opacity: 0.6;
   }
   100% {
-    transform: scale(1.35);
+    scale: 1.35;
     opacity: 0;
   }
 }
@@ -1478,6 +1487,10 @@
 }
 .hud-score {
   font-size: max(30px, calc(58 * var(--u)));
+  /* место под пятизначный счёт (3.1em ≈ «23 000»; «88 888» шире на 0.17em): блок с первого кадра такой ширины, какую
+     камера держит свободной от сооружения (UI.hudRect; прежняя формула GameCamera.hudBox — те же 3.1 × кегль);
+     текст прижат вправо — видимо ничего не меняется */
+  min-width: 3.1em;
   --stroke: 0.16em;
   --stroke-c: var(--ink-2);
   filter: drop-shadow(0 0.06em 0 rgba(0, 0, 0, 0.35));
@@ -1568,19 +1581,23 @@
   font-weight: 700;
   line-height: 1.25;
 }
-/* хвостик вниз — под говорящей птицей (07 §10.3) */
-.hint-box::after {
-  content: '';
+/* хвостик — только к точке на экране (showHint opts.at, обычно рогатка): hintTail.ts рисует его SVG поверх нижней
+   кромки; без точки хвоста нет — облачко с говорящей птицей внутри, а хвост в пустое небо читался как ошибка (Б9) */
+.hint-tail {
   position: absolute;
-  left: calc(26 * var(--u));
-  bottom: calc(-15 * var(--u));
-  width: calc(26 * var(--u));
-  height: calc(26 * var(--u));
-  background: #f2d9a0;
-  border-right: max(2px, calc(5 * var(--u))) solid #7a4a1c;
-  border-bottom: max(2px, calc(5 * var(--u))) solid #7a4a1c;
-  transform: rotate(45deg);
-  border-radius: 0 0 calc(4 * var(--u)) 0;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+.hint-tail-fill {
+  fill: #f2d9a0;
+}
+.hint-tail-edge {
+  fill: none;
+  stroke: #7a4a1c;
+  stroke-linejoin: round;
+  stroke-linecap: butt;
 }
 .hint-box .char {
   flex: none;
@@ -1754,7 +1771,9 @@
   background: repeating-conic-gradient(from 0deg, rgba(255, 236, 150, 0.2) 0deg 9deg, rgba(255, 236, 150, 0) 9deg 22.5deg);
   -webkit-mask-image: radial-gradient(closest-side, #000 18%, rgba(0, 0, 0, 0.6) 50%, transparent 100%);
   mask-image: radial-gradient(closest-side, #000 18%, rgba(0, 0, 0, 0.6) 50%, transparent 100%);
-  animation: spin 24s linear infinite;
+  /* поворот шагами по 0.5° (30 раз в секунду): на глаз так же плавно, а без GPU композитор перерисовывает большой
+     повёрнутый слой вдвое реже — когда сцена под окном итогов стоит (замер в отчёте UI, Б10) */
+  animation: spin 24s steps(720) infinite;
 }
 .res-glow {
   position: absolute;
@@ -1882,12 +1901,13 @@
 .badge-best.is-swing {
   animation: swing 0.833s ease-in-out infinite alternate;
 }
+/* качание бейджа вокруг его наклона −6° (rotate у .badge-best) на ±4° */
 @keyframes swing {
   from {
-    transform: rotate(-4deg);
+    rotate: -10deg;
   }
   to {
-    transform: rotate(4deg);
+    rotate: -2deg;
   }
 }
 .res-skip {
@@ -1917,10 +1937,14 @@
 }
 @keyframes hoho {
   from {
-    transform: translateY(0) scale(1, 1) rotate(-2deg);
+    translate: 0 0;
+    scale: 1 1;
+    rotate: -2deg;
   }
   to {
-    transform: translateY(calc(-9 * var(--u))) scale(1.03, 0.95) rotate(2deg);
+    translate: 0 calc(-9 * var(--u));
+    scale: 1.03 0.95;
+    rotate: 2deg;
   }
 }
 .tear {
@@ -2244,6 +2268,8 @@
   opacity: 0;
   animation: tap-wave 1.2s ease-out infinite;
 }
+/* рука — <svg class="ic">: у SVG композитор берёт только transform (отдельные scale/translate на SVG не ускоряются);
+   волна — псевдоэлемент HTML, ей подходят отдельные свойства */
 @keyframes tap-hand {
   0%,
   100% {
@@ -2259,7 +2285,7 @@
 @keyframes tap-wave {
   0%,
   25% {
-    transform: scale(0.3);
+    scale: 0.3;
     opacity: 0;
   }
   32% {
@@ -2267,7 +2293,7 @@
   }
   80%,
   100% {
-    transform: scale(1.5);
+    scale: 1.5;
     opacity: 0;
   }
 }

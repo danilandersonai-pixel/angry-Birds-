@@ -1,13 +1,18 @@
 // Предпросмотр интерфейса: мок-эпизоды (3 × 10 уровней), мок-прогресс и мок-звук, фон-заглушка на canvas.
 // Параметры URL:
-//   ?screen=loading|title|episodes|levels|game|home|ability|banner|bannerwin|pause|settings|confirm|win|win3|winmsg|lose|lose3 — сразу показать экран;
+//   ?screen=loading|title|episodes|levels|game|home|ability|banner|bannerwin|pause|settings|confirm|win|win3|winfirst|winmsg|lose|lose3
+//     — сразу показать экран; winfirst — первая победа на уровне (рекорда до неё нет — строки «Рекорд» нет);
 //     winmsg — победа в 1-10 без звёзд на эпизод 2 (сообщение под счётом); bannerwin — баннер, затем панель победы (FLIP ленты);
+//     game — облачко подсказки с хвостиком к птице на рогатке (&tail=0 — без точки, хвоста нет);
 //     home — игра с кнопкой «К рогатке» и подписью «Коснитесь, чтобы пропустить»; banner — лента «Уровень пройден!»;
 //     ability — подсказка способности Чака;
 //     settings/confirm — диалог настроек / подтверждение сброса; lose3 — третье поражение подряд (с советом);
 //   &ep=2 — эпизод для levels; &static=1 — анимации победы/поражения сразу в финале;
 //   &bg=css — запасной CSS-фон вместо canvas; &fresh=1 — «новый игрок» без прогресса;
-//   &motion=reduce|full — принудительно уменьшить/включить движение; &all=1 — открыть все уровни.
+//   &motion=reduce|full — принудительно уменьшить/включить движение; &all=1 — открыть все уровни;
+//   &live=1 — перерисовывать сцену на canvas каждый кадр (как игра под оверлеем: замеры композитинга);
+//   &pigs=N — сколько свиней осталось на экране поражения (дразнилка выбирается по нему), &score=N — счёт поражения;
+//   &hudrect=1 — обвести пунктиром ui.hudRect() (прямоугольник правого блока HUD для камеры).
 
 import type { BirdType, EpisodeDef, LevelDef, PigType, ThemeId } from '../core/types';
 import { renderBird } from '../render/sprites/birds';
@@ -161,6 +166,13 @@ function drawSceneInner(c: CanvasRenderingContext2D): void {
   put(sprites.king, bx + 60 * s, gy - 212 * s, 38 * s);
 }
 window.addEventListener('resize', drawScene);
+if (new URLSearchParams(location.search).get('live') === '1') {
+  const loop = (): void => {
+    drawScene();
+    requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
+}
 
 // ───────────── UI ─────────────
 const stage = document.getElementById('stage')!;
@@ -241,11 +253,14 @@ switch (screenParam) {
   case 'levels':
     ui.showLevels(params.get('ep') ?? '1');
     break;
-  case 'game':
+  case 'game': {
     gameWith(23450, 2);
-    if (current.hint) ui.showHint(current.hint);
-    else ui.showHint('Синие делятся на троих — отлично бьют стекло!', 60000, { bird: 'blues' });
+    // хвостик — к птице на рогатке (та же точка, что рисует drawSceneInner: x = 20 % ширины, 160/720 высоты над землёй)
+    const at = params.get('tail') === '0' ? undefined : { x: window.innerWidth * 0.2, y: window.innerHeight * (0.82 - 160 / 720) };
+    if (current.hint) ui.showHint(current.hint, 4000, { at });
+    else ui.showHint('Синие делятся на троих — отлично бьют стекло!', 60000, { bird: 'blues', at });
     break;
+  }
   case 'home':
     gameWith(0, 3);
     ui.setCameraHome(true);
@@ -277,7 +292,17 @@ switch (screenParam) {
     const score = three ? 61230 : 38450;
     const stars = three ? 3 : 2;
     const res = progress.saveResult(current.id, score, stars);
-    ui.showWin({ levelId: current.id, score, best: Math.max(rec?.best ?? 0, score), stars, newRecord: three ? true : res.newRecord, hasNext: true });
+    // best — рекорд до этой победы (как в GameScreen): строка «Рекорд: 50 468» до бейджа
+    ui.showWin({ levelId: current.id, score, best: rec?.best ?? 0, stars, newRecord: three ? true : res.newRecord, hasNext: true });
+    if (isStatic) window.setTimeout(() => ui.finishAnimations(), 30);
+    break;
+  }
+  case 'winfirst': {
+    // первая победа на 1-9: рекорда до неё нет — строки «Рекорд» нет, пока крутится счёт (плейтест №2, Б6)
+    current = levelById('1-9')!;
+    gameWith(34560, 0);
+    const res = progress.saveResult(current.id, 34560, 2);
+    ui.showWin({ levelId: current.id, score: 34560, best: res.prevBest, stars: 2, newRecord: res.newRecord, hasNext: true });
     if (isStatic) window.setTimeout(() => ui.finishAnimations(), 30);
     break;
   }
@@ -287,8 +312,8 @@ switch (screenParam) {
     for (let i = 1; i <= 9; i++) progress.saveResult(`1-${i}`, 20000, 1);
     current = levelById('1-10')!;
     gameWith(31200, 0);
-    progress.saveResult('1-10', 31200, 2);
-    ui.showWin({ levelId: '1-10', score: 31200, best: 31200, stars: 2, newRecord: false, hasNext: progress.isUnlocked('2-1', allLevels.map((l) => l.id)) });
+    const res = progress.saveResult('1-10', 31200, 2);
+    ui.showWin({ levelId: '1-10', score: 31200, best: res.prevBest, stars: 2, newRecord: res.newRecord, hasNext: progress.isUnlocked('2-1', allLevels.map((l) => l.id)) });
     if (isStatic) window.setTimeout(() => ui.finishAnimations(), 30);
     break;
   }
@@ -300,12 +325,29 @@ switch (screenParam) {
     break;
   }
   case 'lose':
-  case 'lose3':
-    gameWith(12340, 2);
+  case 'lose3': {
+    const pigs = Number(params.get('pigs') ?? 2);
+    const score = Number(params.get('score') ?? 12340);
+    gameWith(score, pigs);
     if (screenParam === 'lose3') for (let i = 0; i < 3; i++) progress.saveLoss(current.id);
-    ui.showLose({ levelId: current.id, score: 12340 });
+    ui.showLose({ levelId: current.id, score, pigsLeft: pigs });
     if (isStatic) window.setTimeout(() => ui.finishAnimations(), 30);
     break;
+  }
   default:
     ui.showTitle();
+}
+
+// обводка ui.hudRect(): то, что видит камера (правый блок HUD без анимаций, место под счёт до 99 999)
+if (params.get('hudrect') === '1') {
+  const box = document.createElement('div');
+  box.style.cssText = 'position:fixed;z-index:100;pointer-events:none;outline:2px dashed #ff2d55;outline-offset:0';
+  document.body.append(box);
+  const tick = (): void => {
+    const r = ui.hudRect();
+    box.style.display = r ? 'block' : 'none';
+    if (r) Object.assign(box.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
 }

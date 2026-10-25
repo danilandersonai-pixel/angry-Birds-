@@ -597,6 +597,54 @@ export function newBest(s: S, t: number): number {
   return end;
 }
 
+/**
+ * Металлофон: моды свободного бруска 1 : 2.756 : 5.404 (как у глокеншпиля) — звонче и короче колокольчика звёзд,
+ * поэтому «уровень зачищен» не путается со звёздами экрана итогов. tauMs — затухание основного тона.
+ */
+function glock(s: S, t: number, midi: number, gain: number, tauMs: number): number {
+  const f = midiHz(midi);
+  return max(
+    playModal(s.ctx, s.out, t, [
+      { f, a: 1, tau: tauMs },
+      { f: f * BAR[1]!, a: 0.28, tau: tauMs * 0.35 },
+      { f: f * BAR[2]!, a: 0.09, tau: tauMs * 0.15 },
+    ], gain, 1, 0.8),
+    // «тинк» молоточка
+    playTone(s.ctx, s.out, t, { wave: 'sine', f: f * 3.9, gain: 0.12 * gain, a: 0.3, tau: 5 }),
+  );
+}
+
+/** Мажорное трезвучие D: D5 · D6 F♯6 A6 · D7 — тональность джингла победы (music.ts, VICTORY). */
+const CLEARED_CHORD: ReadonlyArray<readonly [midi: number, gain: number]> = [[74, 0.1], [86, 0.16], [90, 0.13], [93, 0.13], [98, 0.11]];
+
+/**
+ * «Уровень зачищен» — баннер победы (≈ 0.8 с). Взмах ленты: шорох ткани (полоса розового шума взмывает
+ * 600 → 2800 Гц и оседает, трепет — АМ 24 Гц) и щелчок натянувшейся ленты на 215 мс; под него — восходящее
+ * арпеджио металлофона D6–F♯6–A6 и на щелчке звонкий аккорд D-мажора с искрами.
+ */
+export function cleared(s: S, t: number): number {
+  const { ctx, out, nb } = s;
+  let end = max(
+    playNoiseBurst(ctx, out, t, {
+      buf: nb.pink, gain: 0.75, env: { a: 45, d: 90, s: 0.55, r: 110 }, holdMs: 190,
+      filts: [{ type: 'bandpass', f: [[0, 600], [210, 2800], [380, 1300]], q: 1.3 }], am: { rate: 24, depth: 0.45 },
+    }),
+    // шелест кромки ленты
+    playNoiseBurst(ctx, out, t + 0.03, { buf: nb.white, gain: 0.12, env: { a: 60, d: 60, s: 0.5, r: 90 }, holdMs: 150, filts: [{ type: 'highpass', f: 6000 }] }),
+    // щелчок: лента натянулась
+    playNoiseBurst(ctx, out, t + 0.215, { buf: nb.white, gain: 0.4, a: 0.4, tau: 7, filts: [{ type: 'bandpass', f: 2200, q: 1.4 }] }),
+  );
+  [86, 90, 93].forEach((m, i) => {
+    end = max(end, glock(s, t + 0.07 + i * 0.055, m, 0.2, 80));
+  });
+  const tc = t + 0.235;
+  for (const [m, g] of CLEARED_CHORD) end = max(end, glock(s, tc, m, g, 120));
+  for (let j = 0; j < 6; j++) {
+    end = max(end, playModal(ctx, panned(ctx, out, R(s, -0.35, 0.35)), tc + 0.03 + 0.4 * s.rnd() ** 1.4, [{ f: R(s, 3500, 7000), a: 1, tau: 30 }], 0.06));
+  }
+  return end;
+}
+
 export type UiSound = 'click' | 'back' | 'toggleOn' | 'toggleOff' | 'popIn' | 'locked' | 'whoosh' | 'hover';
 export function ui(s: S, t: number, name: UiSound): number {
   const { ctx, out, nb } = s;

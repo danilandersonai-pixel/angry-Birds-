@@ -4,8 +4,9 @@ import type { GameEvent } from '../../src/core/events';
 import type { BirdType } from '../../src/core/types';
 import { soundDef } from '../../src/audio/catalog';
 import {
-  allPlannedKeys, createPlanState, type Cue, DEFAULT_GRUNT_PIGS, FUSE_MS, type FrameEvent, gruntPig, IdleGrunts, impactKey,
-  laughVoices, planFrame, type PlanEnv, type PlayCue, REWARD_KEYS, sizeRate, TICK_ROLL_S, TickProgress, UI_KEYS,
+  allPlannedKeys, CRACK_GAP_S, CRACKS_PER_FRAME, createPlanState, type Cue, DEFAULT_GRUNT_PIGS, DENSE_VOICES, densityGain, FUSE_MS,
+  type FrameEvent, gruntPig, IdleGrunts, impactKey, laughVoices, planFrame, type PlanEnv, type PlayCue, REWARD_KEYS, sizeRate,
+  TICK_ROLL_S, TickProgress, UI_KEYS,
 } from '../../src/audio/mapping';
 import { ABILITY } from '../../src/config/constants';
 
@@ -242,6 +243,47 @@ describe('planFrame: блоки, свиньи, конец уровня', () => {
   });
 });
 
+describe('planFrame: массовые обрушения без «каши»', () => {
+  const crack = (id: number, stage: number, material: 'wood' | 'ice' | 'stone' = 'wood', x = 10): GameEvent => ({ type: 'blockDamaged', id, material, x, y: 1, stage });
+  const broke = (id: number, material: 'wood' | 'ice' | 'stone' = 'wood'): GameEvent => ({
+    type: 'blockDestroyed', id, material, shape: 'rect', x: 10, y: 1, w: 2, h: 0.25, angle: 0, vx: 0, vy: 0, points: 500,
+  });
+  it('блок, разрушенный в том же кадре, не трещит — звучит только разрушение', () => {
+    expect(keys(run([crack(1, 3), broke(1)]))).toEqual(['woodBreak']);
+    // трещина другого блока остаётся
+    expect(keys(run([crack(1, 3), crack(2, 1), broke(1)]))).toEqual(['woodBreak', 'woodCrack:1']);
+  });
+  it(`трещина одного блока — не чаще раза в ${CRACK_GAP_S * 1000} мс; две стадии в одном кадре — одна, старшая`, () => {
+    const st = createPlanState();
+    expect(keys(run([crack(1, 1), crack(1, 2)], st, 0))).toEqual(['woodCrack:2']);
+    expect(keys(run([crack(1, 3)], st, 0.1))).toEqual([]);
+    expect(keys(run([crack(1, 3)], st, 0.15))).toEqual(['woodCrack:3']);
+    // разрушение забывает блок; новая сессия — тоже
+    run([broke(1)], st, 0.2);
+    expect(st.crackAt.has(1)).toBe(false);
+    expect(keys(run([crack(7, 1)], createPlanState(), 0))).toEqual(['woodCrack:1']);
+  });
+  it(`не больше ${CRACKS_PER_FRAME} трещин в кадр: старшие стадии и ближние к камере`, () => {
+    const c = keys(run([crack(1, 1), crack(2, 3, 'ice'), crack(3, 2, 'stone'), crack(4, 3, 'wood', 200), crack(5, 1)]));
+    expect(c).toEqual(['iceCrack:3', 'stoneCrack:2']);
+  });
+  it(`плотность: сверх ${DENSE_VOICES} звучащих ударов и трещин новые тише в √(N/n) раз, разрушения — нет`, () => {
+    expect(densityGain(0)).toBe(1);
+    expect(densityGain(DENSE_VOICES)).toBe(1);
+    expect(20 * Math.log10(densityGain(2 * DENSE_VOICES))).toBeCloseTo(-3.01, 1);
+    expect(20 * Math.log10(densityGain(4 * DENSE_VOICES))).toBeCloseTo(-6.02, 1);
+    const evs: GameEvent[] = [{ type: 'impact', x: 10, y: 1, impulse: 10, a: 'wood', b: 'ground' }, crack(1, 2), broke(2)];
+    const quiet = plays(run(evs, createPlanState(), 0, rnd0, () => 0));
+    const busy = plays(run(evs, createPlanState(), 0, rnd0, (c) => (c === 'impact' || c === 'break' ? 6 : 0)));
+    const g = (cs: PlayCue[], k: string): number => cs.find((q) => q.key.startsWith(k))!.gain;
+    expect(g(busy, 'woodHit')).toBeLessThan(g(quiet, 'woodHit') * 0.75);
+    expect(g(busy, 'woodCrack')).toBeLessThan(g(quiet, 'woodCrack') * 0.75);
+    expect(g(busy, 'woodBreak')).toBe(g(quiet, 'woodBreak'));
+    // важность удара для кражи голоса — по силе, а не по приглушённой громкости
+    expect(busy.find((q) => q.key.startsWith('woodHit'))!.score).toBe(quiet.find((q) => q.key.startsWith('woodHit'))!.score);
+  });
+});
+
 describe('каталог покрывает все ключи карты и UI', () => {
   it('каждый ключ, который может запросить planFrame, есть в каталоге', () => {
     for (const k of allPlannedKeys()) expect(soundDef(k), k).toBeDefined();
@@ -252,6 +294,14 @@ describe('каталог покрывает все ключи карты и UI',
     for (const n of ['click', 'back', 'pop', 'swoosh', 'star1', 'star2', 'star3', 'tick', 'win', 'lose', 'newRecord'] as const) expect(UI_KEYS[n]).toBeTruthy();
     expect(soundDef(UI_KEYS.win)!.bus).toBe('music');
     expect(soundDef(UI_KEYS.lose)!.bus).toBe('music');
+  });
+  it('«уровень зачищен»: ключ cleared — награда (шина ui, выключается вместе со звуками), ≈ 0.85 с', () => {
+    const d = soundDef('cleared')!;
+    expect(UI_KEYS.cleared).toBe('cleared');
+    expect(d.cat).toBe('reward');
+    expect(d.bus).toBeUndefined();
+    expect(d.expectMs).toBeGreaterThanOrEqual(700);
+    expect(d.expectMs).toBeLessThanOrEqual(1000);
   });
 });
 

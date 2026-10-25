@@ -6,6 +6,14 @@
 // Событие score{kind:'block'} не несёт материал — берём его из blockDestroyed в той же точке
 // (порядок событий любой). Бонус птицы: birdBonus даёт цвет птицы; дубль score{kind:'bonus'} гасится.
 // Разрушения блоков в радиусе 1.2 м за 0.25 с складываются в одно число (против «каши»).
+//
+// Разнос надписей (плейтест №2, Б5): все числа всплывают по одному закону riseAt(t), поэтому младшее число,
+// рождённое под старшим, догоняет его (подъём замедляется к концу) — проверка перекрытия только в момент рождения
+// пропускала наложения в полёте. Теперь новое число (свиньи, блока, TNT) ставится со сдвигом (вверх, в стороны,
+// немного вниз — по возрастанию «цены»), при котором его прямоугольник не пересекает ни одно видимое число на всей
+// общей оставшейся жизни. Разность высот двух чисел во времени монотонна (riseAt вогнута), поэтому достаточно
+// проверить её на концах общего интервала. Размер надписи в метрах берётся с учётом мин./макс. кегля последнего вида.
+// Бонусы птиц разносит GameScreen (ярусы над очередью) — для них прежнее правило: подъём при наложении в момент рождения.
 
 import type { BirdType, Material } from '../../core/types';
 import type { ViewInfo } from '../view';
@@ -25,8 +33,10 @@ export type ScoreKind = 'block' | 'pig' | 'bonus' | 'tnt';
 export interface Popup {
   x: number;
   y: number;
-  /** Сдвиг вверх, чтобы не налезать на соседние числа, м. */
+  /** Сдвиг по высоте, чтобы не налезать на соседние числа, м (обычно вверх; вниз — не больше половины надписи). */
   yOff: number;
+  /** Сдвиг вбок, чтобы не налезать на соседние числа, м. */
+  xOff: number;
   points: number;
   text: string;
   style: ScoreStyle;
@@ -60,6 +70,30 @@ const RISE_TIME = 0.9;
 /** Жёсткий предохранитель (лимитом частиц очки не вытесняются, но память не бесконечна). */
 const HARD_CAP = 160;
 
+/** Видимая часть жизни: до α ≈ 0.35 (дальше наложение почти не читается). */
+const visibleLife = (p: Popup): number => FADE_START + 0.65 * (p.life - FADE_START);
+/** Высота цифр с обводкой в долях кегля, пополам (Luckiest Guy: заглавные 0.72–0.75 em, обводка 0.18 em). */
+const HALF_H_EM = 0.45;
+/** Зазор между надписями в долях кегля. */
+const PAD_EM = 0.08;
+
+/**
+ * Сдвиги-кандидаты (dx, dy) в долях ширины / высоты надписи, по возрастанию цены: вверх до 4 высот — 1 за высоту,
+ * вниз до половины высоты — вдвое дороже, вбок до 1.5 ширины — 2 за ширину (ряд «лесенкой» дешевле высокой башни).
+ */
+const CANDIDATES: ReadonlyArray<readonly [number, number]> = (() => {
+  const out: Array<[number, number, number]> = [];
+  for (let iy = -2; iy <= 16; iy++) {
+    for (let ix = -6; ix <= 6; ix++) {
+      const dy = iy * 0.25;
+      const dx = ix * 0.25;
+      out.push([dx, dy, (dy >= 0 ? dy : -2 * dy) + 2 * Math.abs(dx) + (ix < 0 ? 0.01 : 0)]);
+    }
+  }
+  out.sort((a, b) => a[2] - b[2]);
+  return out.map(([dx, dy]) => [dx, dy] as const);
+})();
+
 const FONT_PX = 100; // шрифт рисуем в 100-px пространстве и масштабируем — градиенты кэшируются
 const FONT = `400 ${FONT_PX}px "Luckiest Guy", "Rubik", sans-serif`;
 
@@ -78,6 +112,10 @@ export class Popups {
   private readonly recentBonus: Recent[] = [];
   private readonly recentPigs: Recent[] = [];
   private readonly gradCache = new WeakMap<CanvasRenderingContext2D, Map<string, CanvasGradient>>();
+  /** Масштаб и пределы кегля последнего вида (пикс. устройства): размер надписи в метрах зависит от них. */
+  private pxPerM = 45;
+  private minPx = 14;
+  private maxPx = 99;
 
   /** Событие score. */
   addScore(points: number, x: number, y: number, kind: ScoreKind, now: number): void {
@@ -112,6 +150,9 @@ export class Popups {
       if (p.kind === 'pig' && p.pending && now - p.born <= MATCH_TIME && Math.hypot(p.x - x, p.y - y) <= MATCH_DIST) {
         p.y += radius + 0.3;
         p.pending = false;
+        p.xOff = 0;
+        p.yOff = 0;
+        this.place(p);
         return;
       }
     }
@@ -166,6 +207,11 @@ export class Popups {
     const dpr = view.dpr || 1;
     const minPx = 14 * dpr;
     const maxPx = view.screenH * 0.11;
+    if (s > 0) {
+      this.pxPerM = s;
+      this.minPx = minPx;
+      this.maxPx = maxPx;
+    }
     let grads = this.gradCache.get(ctx);
     if (!grads) {
       grads = new Map();
@@ -181,7 +227,7 @@ export class Popups {
       const t = p.t;
       const alpha = t < FADE_START ? 1 : clamp(1 - (t - FADE_START) / (p.life - FADE_START), 0, 1);
       if (alpha <= 0.003) continue;
-      const sx = (p.x - view.camX) * s + view.screenW / 2;
+      const sx = (p.x + p.xOff - view.camX) * s + view.screenW / 2;
       const sy = view.screenH / 2 - (p.y + p.yOff + riseAt(t) - view.camY) * s;
       const px = clamp(p.style.sizeM * s, minPx, Math.max(minPx, maxPx)) * popScale(t);
       const halfW = px * 0.36 * p.text.length + px;
@@ -215,6 +261,7 @@ export class Popups {
       x,
       y,
       yOff: 0,
+      xOff: 0,
       points,
       text,
       style,
@@ -224,12 +271,78 @@ export class Popups {
       born: now,
       pending,
     };
-    this.unstack(p);
+    if (kind === 'bonus') this.unstack(p);
+    else this.place(p);
     if (this.list.length >= HARD_CAP) this.list.shift();
     this.list.push(p);
   }
 
-  /** Поднять новое число, пока оно перекрывает живые. */
+  /** Кегль надписи в метрах при последнем виде (с учётом мин./макс. размера в пикселях). */
+  private sizeM(p: Popup): number {
+    const s = this.pxPerM;
+    return clamp(p.style.sizeM * s, this.minPx, Math.max(this.minPx, this.maxPx)) / s;
+  }
+
+  /**
+   * Поставить число p (сдвиги xOff/yOff) так, чтобы оно не пересекало видимые числа (кроме бонусов) на всей общей
+   * оставшейся жизни. Берётся самый «дешёвый» сдвиг без пересечений, иначе — с наименьшим пересечением.
+   */
+  private place(p: Popup): void {
+    const S = this.sizeM(p);
+    const hw = 0.5 * S * (textEm(p.text) + PAD_EM);
+    const hh = S * HALF_H_EM;
+    const life = visibleLife(p);
+    // препятствия: размеры и начальная/конечная разность высот на общем отрезке жизни
+    const obs: Array<{ x: number; hw: number; H: number; lo: number; hi: number }> = [];
+    for (const q of this.list) {
+      if (q === p || q.kind === 'bonus') continue;
+      const T = Math.min(life - p.t, visibleLife(q) - q.t);
+      if (T <= 0) continue;
+      const Sq = this.sizeM(q);
+      // y(p) − y(q) без сдвига-кандидата: в начале и в конце общего отрезка (монотонна по времени)
+      const base = p.y + p.yOff - (q.y + q.yOff);
+      const d0 = base + riseAt(p.t) - riseAt(q.t);
+      const d1 = base + riseAt(p.t + T) - riseAt(q.t + T);
+      obs.push({
+        x: q.x + q.xOff,
+        hw: 0.5 * Sq * (textEm(q.text) + PAD_EM),
+        H: hh + Sq * HALF_H_EM + 0.5 * PAD_EM * (S + Sq),
+        lo: Math.min(d0, d1),
+        hi: Math.max(d0, d1),
+      });
+    }
+    if (obs.length === 0) return;
+    const px = p.x + p.xOff;
+    let best = 0;
+    let bestBad = Infinity;
+    for (let c = 0; c < CANDIDATES.length; c++) {
+      const dx = CANDIDATES[c][0] * 2 * hw;
+      const dy = CANDIDATES[c][1] * 2 * hh;
+      let bad = 0;
+      for (const o of obs) {
+        const ox = hw + o.hw - Math.abs(px + dx - o.x);
+        if (ox <= 0) continue;
+        const lo = o.lo + dy;
+        const hi = o.hi + dy;
+        if (hi <= -o.H || lo >= o.H) continue;
+        // величина пересечения: перекрытие отрезка высот с (−H, H) плюс глубина по ширине
+        bad += Math.min(hi, o.H) - Math.max(lo, -o.H) + Math.min(ox, 2 * hw) * 0.1;
+      }
+      if (bad === 0) {
+        best = c;
+        bestBad = 0;
+        break;
+      }
+      if (bad < bestBad - 1e-9) {
+        bestBad = bad;
+        best = c;
+      }
+    }
+    p.xOff += CANDIDATES[best][0] * 2 * hw;
+    p.yOff += CANDIDATES[best][1] * 2 * hh;
+  }
+
+  /** Поднять новое число, пока оно перекрывает живые (бонусы птиц: прежнее правило). */
   private unstack(p: Popup): void {
     const w = boxW(p);
     const h = p.style.sizeM;
@@ -258,6 +371,7 @@ export class Popups {
       p.points = total;
       p.text = String(Math.round(total));
       if (p.t > 0.1) p.t = 0.1; // короткий «толчок» масштаба при добавлении
+      this.place(p); // число стало шире и сместилось — проверить соседей (сдвиг только при пересечении)
       // материал второго блока: если первый ещё не окрашен — возьмём этот
       if (p.pending) {
         const r = this.findRecent(this.recentBlocks, x, y, now);
@@ -288,6 +402,13 @@ export class Popups {
 
 /** Оценка ширины надписи, м (цифры Luckiest Guy ≈ 0.62 em). */
 const boxW = (p: Popup): number => 0.62 * p.style.sizeM * p.text.length;
+
+/** Ширина текста в долях кегля с обводкой (Luckiest Guy: цифры ≈ 0.61 em, «1» ≈ 0.39 em, обводка 0.18 em). */
+function textEm(text: string): number {
+  let w = 0.18;
+  for (let i = 0; i < text.length; i++) w += text.charCodeAt(i) === 49 ? 0.4 : 0.61;
+  return w;
+}
 
 function remember(list: Recent[], r: Recent): void {
   list.push(r);

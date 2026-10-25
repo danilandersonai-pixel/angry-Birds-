@@ -5,6 +5,7 @@ import type { GameEvent } from '../../core/events';
 import { Fx } from './Fx';
 import { drawTrail } from './trail';
 import { buildGround } from './ground';
+import { SPR_SMOKE_DARK, SPR_SMOKE_LIGHT } from './sprites';
 import type { ViewInfo } from '../view';
 
 const destroyed = (material: 'wood' | 'ice' | 'stone', x = 0, y = 1, w = 2, h = 0.5): GameEvent => ({
@@ -114,6 +115,39 @@ describe('Fx', () => {
     expect(fx.takeShake()?.amount).toBe(0.35);
   });
 
+  it('дым взрыва: плотный остаточный дым ≈ 1.2–1.6 с после огня, тёмное основание ниже светлого верха', () => {
+    type Pt = { kind: number; spr: number; age: number; life: number; y: number; alpha: number };
+    const fx = new Fx();
+    const smoke = () => ((fx as unknown as { pool: Pt[] }).pool.slice(0, fx.particleCount) as Pt[]).filter((p) => p.kind === 6 && p.age >= 0);
+    fx.handle({ type: 'explosion', x: 0, y: 3, radius: 3, source: 'tnt' });
+    run(fx, 0.35);
+    expect(smoke().length).toBe(9); // все клубы родились под огнём
+    run(fx, 0.65); // t = 1.0
+    const s1 = smoke();
+    const meanY = (spr: number) => {
+      const l = s1.filter((p) => p.spr === spr);
+      return l.reduce((a, p) => a + p.y, 0) / l.length;
+    };
+    expect(meanY(SPR_SMOKE_DARK)).toBeLessThan(meanY(SPR_SMOKE_LIGHT) - 1);
+    // плотные (≥ 0.85) и ещё не начали таять больше чем наполовину
+    for (const p of s1) expect(p.alpha).toBeGreaterThanOrEqual(0.85);
+    run(fx, 0.55); // t ≈ 1.55: огня давно нет, дым ещё весь здесь
+    expect(smoke().length).toBe(9);
+    expect(smoke().filter((p) => p.age / p.life < 0.75).length).toBeGreaterThanOrEqual(3); // основание ещё плотное
+    run(fx, 0.85); // t ≈ 2.4 — всё рассеялось (последние клубы к этому времени почти прозрачны)
+    expect(smoke().length).toBe(0);
+  });
+
+  it('дым взрыва на низком качестве — вдвое меньше клубов, но не пропадает', () => {
+    const fx = new Fx();
+    fx.setQuality('low');
+    fx.handle({ type: 'explosion', x: 0, y: 3, radius: 3, source: 'bomb' });
+    run(fx, 0.4);
+    const n = ((fx as unknown as { pool: Array<{ kind: number }> }).pool.slice(0, fx.particleCount)).filter((p) => p.kind === 6).length;
+    expect(n).toBeGreaterThanOrEqual(5);
+    expect(n).toBeLessThan(9);
+  });
+
   it('prewarm без DOM — no-op', () => {
     expect(new Fx().prewarm(60)).toBe(0);
   });
@@ -197,6 +231,66 @@ describe('всплывающие очки', () => {
     const l = peek(fx) as unknown as Array<{ y: number }>;
     expect(l[0].y).toBeCloseTo(1.9, 5);
     expect(l[1].y).toBeCloseTo(2.1, 5);
+  });
+
+  it('числа свиней, блоков и TNT не перекрываются на всей видимой жизни (младшее не догоняет старшее)', () => {
+    type P = { x: number; y: number; xOff: number; yOff: number; t: number; life: number; text: string; kind: string; style: { sizeM: number } };
+    const rise = (t: number) => 1.4 * (1 - (1 - Math.min(1, t / 0.9)) ** 2);
+    const visible = (p: P) => p.t < 0.65 + 0.65 * (p.life - 0.65);
+    const halfW = (p: P) => 0.5 * p.style.sizeM * ([...p.text].reduce((w, c) => w + (c === '1' ? 0.4 : 0.61), 0) + 0.26);
+    const halfH = (p: P) => 0.45 * p.style.sizeM;
+    const brk = (x: number, y: number, points: number, material: 'wood' | 'ice' | 'stone' = 'stone'): GameEvent[] => [
+      { type: 'blockDestroyed', id: 1, material, shape: 'rect', x, y, w: 1, h: 0.5, angle: 0, vx: 0, vy: 0, points },
+      { type: 'score', points, x, y, kind: 'block' },
+    ];
+    const pig = (x: number, y: number, r = 0.6): GameEvent[] => [
+      { type: 'pigDestroyed', id: 1, pig: 'medium', x, y, radius: r, points: 5000 },
+      { type: 'score', points: 5000, x, y, kind: 'pig' },
+    ];
+    // сценарии листа dev/preview-fx.html?mode=sheet&set=score (скопления, как на 3-10 у плейтеста)
+    const scenarios: Array<Array<[number, GameEvent[]]>> = [
+      [
+        [0, [...pig(0, 0.6), ...brk(0.4, 1.2, 1310), ...brk(-0.5, 0.8, 556, 'wood'), ...brk(0.8, 0.4, 798, 'ice'), { type: 'score', points: 500, x: -0.2, y: 0.3, kind: 'tnt' }]],
+        [0.12, [...pig(0.3, 1.5, 0.45), ...brk(-0.3, 1.9, 1151)]],
+      ],
+      [[0, brk(0, 1, 500, 'wood')], [0.3, brk(0.1, 1, 520, 'wood')], [0.55, brk(-0.1, 1.1, 640)], [0.75, pig(0, 0.8)]],
+      [[0, pig(0, 0.6)], [0.2, brk(0.3, 1.8, 500, 'wood')], [0.45, brk(-0.2, 1.4, 500, 'ice')]],
+      [[0, brk(0, 2, 500)], [0.15, pig(0.2, 0.6)], [0.3, pig(-0.6, 0.7, 0.45)]],
+      // score раньше pigDestroyed (подъём над свиньёй после постановки)
+      [[0, [{ type: 'score', points: 5000, x: 0, y: 1, kind: 'pig' }, ...brk(0, 2.2, 500)]], [0.05, [{ type: 'pigDestroyed', id: 2, pig: 'large', x: 0, y: 1, radius: 0.8, points: 5000 }]]],
+    ];
+    for (const [si, sc] of scenarios.entries()) {
+      const fx = new Fx();
+      const later = [...sc];
+      let worst = 0;
+      for (let t = 0; t < 1.4; t += 1 / 60) {
+        while (later.length && later[0][0] <= t + 1e-9) for (const e of later.shift()![1]) fx.handle(e);
+        const l = (peek(fx) as unknown as P[]).filter((p) => p.kind !== 'bonus' && visible(p));
+        for (let i = 0; i < l.length; i++) {
+          for (let j = i + 1; j < l.length; j++) {
+            const a = l[i];
+            const b = l[j];
+            const ox = halfW(a) + halfW(b) - Math.abs(a.x + a.xOff - b.x - b.xOff);
+            const oy = halfH(a) + halfH(b) - Math.abs(a.y + a.yOff + rise(a.t) - b.y - b.yOff - rise(b.t));
+            if (ox > 0 && oy > 0) worst = Math.max(worst, Math.min(ox, oy));
+          }
+        }
+        fx.update(1 / 60);
+      }
+      expect(worst, `сценарий ${si}`).toBeLessThan(0.02);
+    }
+  });
+
+  it('число не уезжает далеко от своего места: сдвиг не больше 1.5 ширины вбок и 4 высот вверх', () => {
+    const fx = new Fx();
+    for (let i = 0; i < 6; i++) fx.handle({ type: 'score', points: 500 + i, x: 0.1 * i, y: 1, kind: 'block' });
+    for (let i = 0; i < 3; i++) fx.handle({ type: 'score', points: 5000, x: 0.2 * i, y: 1, kind: 'pig' });
+    for (const p of peek(fx) as unknown as Array<{ xOff: number; yOff: number; text: string; style: { sizeM: number } }>) {
+      const S = p.style.sizeM;
+      expect(Math.abs(p.xOff)).toBeLessThanOrEqual(1.5 * S * (0.61 * p.text.length + 0.26) + 1e-6);
+      expect(p.yOff).toBeLessThanOrEqual(4 * 0.9 * S + 1e-6);
+      expect(p.yOff).toBeGreaterThanOrEqual(-0.5 * 0.9 * S - 1e-6);
+    }
   });
 
   it('живёт около секунды', () => {

@@ -111,17 +111,23 @@ export const WOOD = {
   nailLight: '#C9CDD6',
 } as const;
 
+// Лёд (Б12): тело насыщенно-голубое, обводка тёмно-синяя — силуэт читается на снегу, облаках и светлом небе;
+// прозрачность «стекла» сохранена (альфа тела 0.74–0.86), белые блики — поверх.
 export const ICE = {
-  light: '#EAFBFF',
-  base: '#A8E2F8',
-  dark: '#6CC0E8',
-  deep: '#3F9BD0',
-  outline: '#246A9E',
+  light: '#C9F1FF',
+  base: '#7CCDF4',
+  dark: '#3E9FDD',
+  deep: '#1E74B8',
+  outline: '#0E3A6A',
   crack: '#FFFFFF',
   crackLight: '#FFFFFF',
-  crackDark: '#2F7FB8',
+  crackDark: '#1C64A3',
   fresh: '#F4FDFF',
   dust: '#EAF8FF',
+  /** Мягкая внутренняя тень вдоль всей кромки — второй, «размытый» контур изнутри. */
+  edge: '#15528C',
+  /** Плотная «толща» стекла у кромки (полоса фаски). */
+  rim: '#57B4EA',
 } as const;
 
 export const STONE = {

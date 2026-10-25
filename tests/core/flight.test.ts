@@ -14,21 +14,32 @@ function landing(bird: BirdType, angle: number): { x: number; t: number } {
 }
 
 describe('полёт', () => {
-  it('максимальная дальность Red из оттянутого кармашка ≈ 37.7 м (±10 %), полёт ≈ 2.3 с', () => {
+  // V_MAX 21 (было 24 — 37.7 м, 2.3 с): дальность ×(21/24)² ≈ 0.77 — сооружения на 11…25 м, навес на полной силе
+  // долетает до дальнего края уровня (≈ 29 м), а не далеко за него.
+  it('V_MAX = 21: максимальная дальность Red из оттянутого кармашка ≈ 28.7 м (±10 %), полёт ≈ 2.0 с', () => {
+    expect(LAUNCH.V_MAX).toBe(21);
     let best = { x: 0, t: 0 };
     for (let a = 38; a <= 50; a += 1) {
       const r = landing('red', a);
       if (r.x > best.x) best = r;
     }
-    expect(best.x).toBeGreaterThan(37.7 * 0.9);
-    expect(best.x).toBeLessThan(37.7 * 1.1);
-    expect(best.t).toBeGreaterThan(2.0);
-    expect(best.t).toBeLessThan(2.6);
+    expect(best.x).toBeGreaterThan(28.7 * 0.9);
+    expect(best.x).toBeLessThan(28.7 * 1.1);
+    expect(best.t).toBeGreaterThan(1.8);
+    expect(best.t).toBeLessThan(2.25);
   });
 
-  it('тяжёлые птицы летят ближе (launchScale): Matilda 35.5, Bomb 34.0, Terence 29.1 м (±5 %)', () => {
+  it('навес на полной силе: 60° — 24.7 м за 2.45 с, 70° — 18.3 м за 2.65 с (±5 %)', () => {
+    for (const [a, x, t] of [[60, 24.7, 2.45], [70, 18.3, 2.65]] as const) {
+      const r = landing('red', a);
+      expect(Math.abs(r.x / x - 1)).toBeLessThan(0.05);
+      expect(Math.abs(r.t / t - 1)).toBeLessThan(0.05);
+    }
+  });
+
+  it('тяжёлые птицы летят ближе (launchScale): Matilda 26.9, Bomb 25.8, Terence 21.8 м (±5 %)', () => {
     const far = (bird: BirdType) => Math.max(...[42, 44, 46].map((a) => landing(bird, a).x));
-    for (const [bird, x] of [['matilda', 35.5], ['bomb', 34.0], ['terence', 29.1]] as const) {
+    for (const [bird, x] of [['matilda', 26.9], ['bomb', 25.8], ['terence', 21.8]] as const) {
       expect(Math.abs(far(bird) / x - 1)).toBeLessThan(0.05);
     }
   });

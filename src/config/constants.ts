@@ -69,8 +69,13 @@ export const COLLISION = {
 
 /** Рогатка и запуск (00 §1.2). */
 export const LAUNCH = {
-  /** Скорость при полном натяжении, м/с: v = V_MAX · launchScale · d/R_MAX. */
-  V_MAX: 24,
+  /**
+   * Скорость при полном натяжении, м/с: v = V_MAX · launchScale · d/R_MAX.
+   * Было 24 (00 §1.2): дальность Red 37.7 м — сооружения стояли на 16…34 м, камера отдалялась, персонажи мелкие.
+   * 21 — дальность Red на полной силе ≈ 29 м (масштаб (21/24)² ≈ 0.77), сооружения 11…25 м. Урон птиц
+   * компенсирует DAMAGE.BIRD_SPEED_COMP, скорости способностей заданы в долях V_MAX и пересчитываются сами.
+   */
+  V_MAX: 21,
   R_MAX: 2.0,
   /** Отпускание ближе — отмена выстрела. */
   R_CANCEL: 0.5,
@@ -167,10 +172,10 @@ export const ABILITY = {
   CHUCK: { SPEED_MUL: 1.5, MIN_K: 1.3, MAX_K: 1.6, BOOSTED_WOOD: 2.2 },
   /** Бомб — автоподрыв через FUSE с после первого контакта; последние WARN с — мигание (рендер). */
   BOMB: { FUSE: 2.5, WARN: 1.5 },
-  /** Матильда — яйцо вниз, сама вверх под UP_DEG. */
+  /** Матильда — яйцо вниз, сама вверх под UP_DEG; уходит через DESPAWN с (1.0, было 3 — камера не ждёт улетающую, integ-final Б4). */
   MATILDA: {
     EGG_RADIUS: 0.225, EGG_DENSITY: 8, EGG_FRICTION: 0.5, EGG_OFFSET_R: 0.7, EGG_VY_K: -0.7,
-    UP_DEG: 60, UP_MIN_K: 0.62, SPIN: 6, AFTER_DENSITY: 0.5, AFTER_MULT: 0.3, GRAVITY_AFTER: 0.6, DESPAWN: 3,
+    UP_DEG: 60, UP_MIN_K: 0.62, SPIN: 6, AFTER_DENSITY: 0.5, AFTER_MULT: 0.3, GRAVITY_AFTER: 0.6, DESPAWN: 1.0,
   },
   /** Хэл — бумеранг: дуга с угловой скоростью OMEGA до зеркального курса, поднятого на LIFT_DEG. */
   HAL: { OMEGA: 8, SPEED_MUL: 1.15, MIN_K: 0.9, LIFT_DEG: 10, SPIN: 22, SPIN_DECAY: 0.4 },
@@ -195,9 +200,22 @@ export const PIGS = {
 /** Демпфирование свиней — против вечного качения (03 §3.5). */
 export const PIG_PHYS = { ANGULAR_DAMPING: 3, LINEAR_DAMPING: 0.1 } as const;
 
+/** Скорость запуска, при которой откалибрована таблица урона птиц 00 §1.7 (там V_MAX = 24). */
+const DAMAGE_CALIB_V = 24;
+
 /** Модель урона (00 §1.7): dmg = mult · max(0, J − m·V0) при скорости сближения vn ≥ V_GATE. */
 export const DAMAGE = {
   V_GATE: 0.5,
+  BIRD_CALIB_V: DAMAGE_CALIB_V,
+  /**
+   * Компенсация урона ПТИЦ после снижения V_MAX 24 → 21: импульс удара птицы (и оценка пробития) ×k до вычета порога
+   * m·V0 — птица на скорости v бьёт, как на v·k при старой V_MAX, и таблица 00 §1.7 на полной силе сохраняется.
+   * k = BIRD_CALIB_V / V_MAX = 24/21 ≈ 1.143. Подобрано прогоном таблицы 00 §1.7 (скорости ×21/24) при k = 1.00…1.25:
+   * минимум отклонений на 1.14–1.15 (rms 3.3 %, max 9.2 % — как у ядра при V_MAX 24), за ±10 % ни одной строки;
+   * без компенсации урон прямых ударов −14…−24 %. Множитель по энергии (k² к итоговому урону) хуже: +10 % на прямых ударах,
+   * −39 % на слабых (порог m·V0) и до +100 % на пробитиях. Урон от падений блоков, о рельеф и от взрывов не меняется.
+   */
+  BIRD_SPEED_COMP: DAMAGE_CALIB_V / LAUNCH.V_MAX,
   PIG_V0: 3.0,
   /** Удар свиньи о рельеф. */
   PIG_STATIC_MULT: 0.7,
@@ -256,8 +274,11 @@ export const TIMING = {
   BIRD_HOP_TIME: 0.45,
   BIRD_HOP_HEIGHT: 1.2,
   QUEUE_SHIFT_TIME: 0.3,
-  /** После ухода птицы: камера задерживается до LINGER_MAX (раньше — при покое CALM_HOLD), затем возвращается к рогатке. */
-  LINGER_MAX: 0.6,
+  /**
+   * После ухода птицы: камера задерживается до LINGER_MAX (раньше — при покое CALM_HOLD), затем возвращается к рогатке.
+   * 1.6 (было 0.6): разрушение досматривается — GameScreen держит камеру, пока оно идёт (integ-final Б3).
+   */
+  LINGER_MAX: 1.6,
   CALM_HOLD: 0.5,
   /** Поражение: покой LOSE_HOLD или таймаут LOSE_TIMEOUT после входа в settling. */
   LOSE_HOLD: 0.6,
@@ -265,9 +286,13 @@ export const TIMING = {
   /** Победа: от гибели последней свиньи не меньше VICTORY_MIN, затем покой VICTORY_HOLD или VICTORY_MAX. */
   VICTORY_MIN: 1.2,
   VICTORY_HOLD: 0.4,
-  VICTORY_MAX: 3.5,
-  /** Бонус: баннер, пауза, по птице раз в BONUS_PER_BIRD, хвост BONUS_POST (без птиц — BONUS_NONE после баннера). */
-  CLEARED_BANNER: 1.2,
+  /** 2.0 (было 3.5): финал победы без тапа ≈ 3.4 с вместо 5.4 с (integ-final Б3). */
+  VICTORY_MAX: 2.0,
+  /**
+   * Бонус: баннер, пауза, по птице раз в BONUS_PER_BIRD, хвост BONUS_POST (без птиц — BONUS_NONE после баннера).
+   * CLEARED_BANNER 0.4 (было 1.2): баннер GameScreen показывает раньше, ещё в VICTORY_DELAY (integ-final Б3).
+   */
+  CLEARED_BANNER: 0.4,
   BONUS_PRE: 0.3,
   BONUS_PER_BIRD: 0.45,
   BONUS_POST: 0.5,

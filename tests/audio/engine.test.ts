@@ -277,6 +277,32 @@ describe('переключатели и джинглы', () => {
   });
 });
 
+describe('«уровень зачищен» (баннер победы)', () => {
+  it("play('cleared') звучит; повтор раньше 1.5 с — нет; ui('cleared') — тот же звук; без звуков — тишина", async () => {
+    const { e, c } = await unlocked();
+    expect(e.play('cleared')).toBe(true);
+    expect(e.play('cleared')).toBe(false);
+    c.currentTime += 1.6;
+    const before = e.stats().pool.played;
+    e.ui('cleared');
+    expect(e.stats().pool.played).toBe(before + 1);
+    c.currentTime += 2;
+    e.setSfx(false);
+    expect(e.play('cleared')).toBe(false);
+    e.setSfx(true);
+    e.setMusic(false); // это не джингл — от музыки не зависит
+    expect(e.play('cleared')).toBe(true);
+  });
+  it('на телефоне звучит и поверх обрушения (голоса наград — своя категория)', async () => {
+    asPhone();
+    const { e } = await unlocked();
+    const view = { camX: 10, viewW: 20 };
+    for (let k = 0; k < 30; k++) e.handle({ type: 'impact', x: 10, y: 0, impulse: 2 + k / 2, a: (['wood', 'ice', 'stone'] as const)[k % 3], b: 'ground' }, view);
+    await flush();
+    expect(e.play('cleared')).toBe(true);
+  });
+});
+
 describe('телефон: лимиты 05-audio §6.1 и экран победы', () => {
   it('мобильный пул: 20 голосов; удары до 5', async () => {
     asPhone();

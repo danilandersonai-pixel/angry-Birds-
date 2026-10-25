@@ -15,14 +15,16 @@
 //     setPaused(p: boolean): void;               // музыка/фон ×0.5, фитили гаснут, разовые звуки доигрывают
 //     handle(e: GameEvent, listener?: { camX: number; viewW: number }): void;   // события кадра — пачкой
 //     ui(name: 'click' | 'back' | 'pop' | 'swoosh' | 'star1' | 'star2' | 'star3' | 'tick' | 'win' | 'lose' | 'newRecord'
-//          | 'hover' | 'toggleOn' | 'toggleOff' | 'locked' | 'popIn' | 'whoosh' | 'starEmpty' | 'scoreDone',  // расширения
+//          | 'hover' | 'toggleOn' | 'toggleOff' | 'locked' | 'popIn' | 'whoosh' | 'starEmpty' | 'scoreDone'  // расширения
+//          | 'cleared',                          // «уровень зачищен» (баннер победы) = play('cleared')
 //        arg?: number): void;                    // arg — прогресс 0..1 для 'tick' (без него — по времени прокрутки)
 //     readonly ready: boolean;                   // контекст создан и запущен
 //     // ── расширения ──
 //     reward(kind: 'star0' | 'star1' | 'star2' | 'starEmpty' | 'scoreDone' | 'newBest'): void;
 //     scoreTick(progress: number): void;         // тик счётчика 1800 → 3000 Гц, не чаще раза в 45 мс
 //     resetSession(): void;                      // новая игровая сессия (рестарт/выход): фитили гаснут, память с нуля
-//     play(key: string, opts?: PlayOpts): boolean;  // любой ключ каталога (предпросмотр)
+//     play(key: string, opts?: PlayOpts): boolean;  // любой ключ каталога (предпросмотр, особые случаи):
+//         // play('cleared') — «уровень зачищен», ≈ 0.85 с: взмах ленты + аккорд металлофона (баннер победы)
 //     stats(): AudioStats;
 //     readonly context: AudioContext | null;
 //     dispose(): void;                           // навсегда: контекст закрыт, жесты больше ничего не создают
@@ -39,7 +41,8 @@
 // Граф: голоса → sfx/ui → (send → реверб) → master → компрессор → мягкий клиппер → выход;
 // музыка/фон/джинглы → duck → master. Задержка графа — 6 мс (упреждение компрессора).
 // События кадра копятся и разбираются одной пачкой (microtask): отбор ударов, лимит голосов (32, моб. 20),
-// кулдауны одинаковых звуков (удары 30 мс, остальное 35–2000 мс), громкость по силе удара и удалённости от камеры.
+// кулдауны одинаковых звуков (удары 30 мс, остальное 35–2000 мс), громкость по силе удара и удалённости от камеры;
+// на обрушениях — ≤ 2 трещин в кадр (не чаще 150 мс на блок), сверх 6 звучащих ударов/трещин новые тише (mapping.ts).
 // Большинство SFX запекаются в буферы после разблокировки; до готовности звучит живой синтез того же рецепта.
 
 import type { GameEvent, SessionState } from '../core/events';

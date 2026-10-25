@@ -28,19 +28,25 @@
 //   showTitle(): void; showEpisodes(): void; showLevels(episodeId: string): void
 //   showHud(level: LevelDef): void                               // экран игры; раскрывает шторку от рогатки
 //   updateHud(s: { score: number; best: number; birdsLeft: number; pigsLeft: number }): void  // можно каждый кадр
-//   showHint(text: string, ms = 4000, opts?: { bird?: BirdType }): void   // облачко под плашкой уровня; говорит opts.bird
-//   hideHint(): void                                             //   (по умолчанию первая птица уровня); касания не ловит — прятать по aimStart
+//   showHint(text: string, ms = 4000, opts?: { bird?: BirdType; at?: { x: number; y: number } }): void
+//                                       // облачко под плашкой уровня; говорит opts.bird (по умолчанию первая птица уровня);
+//                                       // хвостик — только с opts.at (точка в CSS px окна, например рогатка): тянется к ней
+//   hideHint(): void                                             // касания не ловит — прятать по aimStart
 //   showBanner(text: string, ms = 1500, opts?: { kind?: 'win'|'lose'|'info'; badge?: string }): void  // ms ≤ 0 — до hideBanner()
 //   hideBanner(): void
 //   showPause(): void; hidePause(): void                         // программно, без onPause/onResume
-//   showWin(r: { levelId; score; best; stars; newRecord; hasNext }): void   // прогресс уже записан приложением
-//   showLose(r: { levelId: string; failStreak?: number; tip?: string; score?: number }): void
-//                                       // failStreak по умолчанию — progress.failStreak; score — «Счёт: 23 450»
+//   showWin(r: { levelId; score; best; stars; newRecord; hasNext }): void   // прогресс уже записан приложением;
+//                                       // best — рекорд ДО этой победы (prevBest): строка «Рекорд» видна, только если он есть и не побит
+//   showLose(r: { levelId: string; failStreak?: number; tip?: string; score?: number; pigsLeft?: number }): void
+//                                       // failStreak по умолчанию — progress.failStreak; score — «Счёт: 23 450»;
+//                                       // pigsLeft и score выбирают дразнилку («Почти получилось!» — только при одной свинье)
 //   (showWin/showLose: если висит баннер, его лента перелетает в заголовок панели — FLIP 0.35 с)
 //   hideOverlays(): void                                         // пауза, результаты, баннер, подсказка
 //   setMotion(reduced: boolean | null): void                     // null — по настройке «Анимации» / системе
 //   // расширения:
 //   setSkipHint(on: boolean): void; setCameraHome(on: boolean): void
+//   hudRect(): DOMRect | null           // правый блок HUD (рекорд, счёт, свиньи) в CSS px окна, без transform-анимаций;
+//                                       // место под пятизначный счёт зарезервировано; null — HUD нет (камера держит сооружение под ним)
 //   abilityHint(bird: BirdType): boolean; hideAbilityHint(): void  // подсказка способности (не показывается, если progress.hasSeen('ability:<bird>'))
 //   toast(text: string, ms = 2500, key = text): void   // тот же key заменяет показанный/ожидающий; ждут ≤ 2
 //   openSettings(): void
@@ -48,8 +54,8 @@
 //   readonly letterbox: boolean  (при смене UI шлёт window 'resize'); hideAll(): void; destroy(): void
 // }
 // Порядок победы в приложении: const { newRecord, prevBest } = progress.saveResult(id, score, stars);
-//   ui.showWin({ levelId: id, score, best: Math.max(prevBest, score), stars, newRecord, hasNext: progress.isUnlocked(nextId, order) }).
-// Поражение: progress.saveLoss(id); ui.showLose({ levelId: id }) — после 3 поражений подряд показывается совет.
+//   ui.showWin({ levelId: id, score, best: prevBest, stars, newRecord, hasNext: progress.isUnlocked(nextId, order) }).
+// Поражение: progress.saveLoss(id); ui.showLose({ levelId: id, score, pigsLeft }) — после 3 поражений подряд показывается совет.
 // ──────────────────────────────────────────────────────────────────────────────
 
 import './styles.css';
@@ -60,6 +66,7 @@ import { artScale, characterCanvas } from './art';
 import type { LevelLoc, OverlayView, ScreenId, UIDeps, UISound, UiCtx, View } from './ctx';
 import { button, centerOf, focusEl, focusables, h, ribbon } from './dom';
 import { loadFonts } from './fonts';
+import { hintTail } from './hintTail';
 import { DEFS_SVG, icon } from './icons';
 import { Iris } from './iris';
 import { LETTERBOX_H, LETTERBOX_W, U_MENU_MAX, applyLayout, computeUiScale, letterboxScale, needsRotate } from './layout';
@@ -135,6 +142,10 @@ export class UI {
   private irisMode: 'iris' | 'fade' = 'iris';
   private safetyTimer = 0;
   private hintEl: HTMLElement | null = null;
+  /** Размер окна, для которого нарисован хвостик подсказки (после resize он указывал бы мимо). */
+  private hintTailAt = '';
+  /** Размер окна последнего relayout (hudRect досчитывает раскладку, если resize до UI ещё не дошёл). */
+  private layoutAt = '';
   private hintTimer = 0;
   private abilityEl: HTMLElement | null = null;
   private abilityTimer = 0;
@@ -148,6 +159,8 @@ export class UI {
   private readonly unlocker: AudioUnlocker;
   private playAnyway = false;
   private rotateOn = false;
+  /** Пауза открыта оверлеем «Поверните устройство», а не игроком: снимается сама, когда оверлей уходит (Б8). */
+  private autoPaused = false;
   private storageWarned = false;
   private menuBg: 'transparent' | 'css' = 'transparent';
   private resumeToken = 0;
@@ -320,10 +333,12 @@ export class UI {
   }
 
   /**
-   * Облачко-подсказка под плашкой уровня (07 §10.3). Говорит opts.bird (по умолчанию — первая птица уровня).
+   * Облачко-подсказка под плашкой уровня (07 §10.3). Говорит opts.bird (по умолчанию — первая птица уровня): она
+   * нарисована в облачке. Хвостик — только если задана opts.at (точка в CSS px окна, например рогатка с птицей):
+   * он тянется к ней; без точки хвостика нет — он указывал бы в пустое небо (плейтест №2, Б9).
    * Касания не перехватывает: приложение прячет её по захвату птицы (aimStart → hideHint()).
    */
-  showHint(text: string, durationMs = 4000, opts: { bird?: BirdType } = {}): void {
+  showHint(text: string, durationMs = 4000, opts: { bird?: BirdType; at?: { x: number; y: number } } = {}): void {
     this.hideHint(true);
     // под паузой/результатами подсказка не нужна (и слой подсказок выше оверлеев — она легла бы поверх панели)
     if (this.overlay) return;
@@ -332,6 +347,8 @@ export class UI {
     const el = h('div', { class: 'hint', role: 'note', 'data-testid': 'hint', 'data-bird': bird }, box);
     this.L.toasts.append(el);
     this.hintEl = el;
+    // хвостик считается по раскладке до pop-in (масштаб анимации не мешает замеру)
+    if (opts.at && hintTail(box, opts.at)) this.hintTailAt = `${window.innerWidth}x${window.innerHeight}`;
     popIn(box);
     this.announce(text);
     this.hintTimer = window.setTimeout(() => this.hideHint(), Math.max(800, durationMs));
@@ -430,8 +447,11 @@ export class UI {
     this.openOverlay(new WinView(this.ctx, r, { ribbonFrom }));
   }
 
-  /** Поражение (07 §13): score — «Счёт: 23 450»; совет — после трёх поражений подряд (или r.tip). */
-  showLose(r: { levelId: string; failStreak?: number; tip?: string; score?: number }): void {
+  /**
+   * Поражение (07 §13): score — «Счёт: 23 450»; совет — после трёх поражений подряд (или r.tip).
+   * pigsLeft и score выбирают дразнилку: «Почти получилось!» — только при одной оставшейся свинье и счёте больше 0.
+   */
+  showLose(r: { levelId: string; failStreak?: number; tip?: string; score?: number; pigsLeft?: number }): void {
     if (this._screen !== 'game') return;
     const ribbonFrom = this.takeBanner();
     this.closeOverlay(true);
@@ -441,7 +461,7 @@ export class UI {
     this.hud?.setDim(true);
     const streak = r.failStreak ?? this.deps.progress.failStreak(r.levelId);
     const tip = r.tip ?? (streak >= TIP_AFTER_FAILS ? LOSE_TIPS[(streak - TIP_AFTER_FAILS) % LOSE_TIPS.length] : undefined);
-    this.openOverlay(new LoseView(this.ctx, { levelId: r.levelId, tip, score: r.score }, { ribbonFrom }));
+    this.openOverlay(new LoseView(this.ctx, { levelId: r.levelId, tip, score: r.score, pigsLeft: r.pigsLeft }, { ribbonFrom }));
   }
 
   /** Забрать ленту баннера для перелёта в панель: вернуть её место на экране; лента исчезает сразу, пилюля — фейдом. */
@@ -483,6 +503,21 @@ export class UI {
   /** Кнопка «К рогатке» слева (рогатка вне кадра дольше 0.5 с). Нужен deps.onCameraHome. */
   setCameraHome(on: boolean): void {
     this.hud?.setHome(on);
+  }
+
+  /**
+   * Прямоугольник правого блока HUD (рекорд, счёт, свиньи) в CSS px окна — чтобы камера держала верх сооружения
+   * под ним, не повторяя формулы styles.css. Считается по раскладке: въезд HUD и «пульс» счёта не сдвигают его,
+   * а ширина с первого кадра зарезервирована под пятизначный счёт (3.1 кегля счёта). Готов сразу после showHud(level);
+   * если окно уже сменило размер, а relayout ещё не прошёл (порядок обработчиков resize), масштаб HUD (--u)
+   * пересчитывается здесь же — без остальных побочных действий relayout (поворот, пауза).
+   * В «Играть так» (летербокс) HUD лежит в полосе над игрой — пересечение с холстом пустое.
+   * null — не экран игры или HUD ещё не разложен.
+   */
+  hudRect(): DOMRect | null {
+    if (this._screen !== 'game' || !this.hud) return null;
+    if (this.layoutAt !== `${window.innerWidth}x${window.innerHeight}`) applyLayout(this.root);
+    return this.hud.rightRect();
   }
 
   /**
@@ -967,6 +1002,7 @@ export class UI {
     const v = this.overlay;
     if (!v) return;
     this.overlay = null;
+    this.autoPaused = false;
     delete this.root.dataset.overlay;
     this.hud?.setDim(false);
     v.el.setAttribute('inert', '');
@@ -1175,6 +1211,7 @@ export class UI {
   };
 
   private readonly relayout = (): void => {
+    this.layoutAt = `${window.innerWidth}x${window.innerHeight}`;
     const lb = this.root.hasAttribute('data-letterbox');
     if (lb) this.root.style.setProperty('--lb-k', letterboxScale(window.innerWidth, window.innerHeight).toFixed(4));
     const L = applyLayout(this.root);
@@ -1194,6 +1231,8 @@ export class UI {
     // во всё окно (placeModalLayers), поэтому тоже по высоте окна
     this.root.dataset.low = L.h <= LOW_H ? '1' : '0';
     this.overlay?.relayout?.();
+    // хвостик подсказки указывал на точку старой раскладки — после смены размера окна убираем
+    if (this.hintEl && this.hintTailAt !== `${window.innerWidth}x${window.innerHeight}`) this.hintEl.querySelector('.hint-tail')?.remove();
     const rot = needsRotate(window.innerWidth, window.innerHeight, L.coarse);
     if (rot !== this.rotateOn) {
       this.rotateOn = rot;
@@ -1215,6 +1254,18 @@ export class UI {
     }
     if (!this.busy) this.pauseIfRotated();
     if (show) focusEl(this.L.rotate.querySelector<HTMLElement>('button'));
+    else this.resumeIfAutoPaused();
+  }
+
+  /**
+   * Оверлей «Поверните устройство» ушёл («Играть так» или поворот в ландшафт): пауза, которую открыл он сам, снимается —
+   * игрок не остаётся в паузе (плейтест №2, Б8). Паузу игрока, вкладки и окна с диалогом не трогаем.
+   */
+  private resumeIfAutoPaused(): void {
+    if (!this.autoPaused) return;
+    this.autoPaused = false;
+    if (this.overlay?.kind !== 'pause' || this.dialogs.length > 0 || this.busy || this._screen !== 'game') return;
+    this.resumeByUser();
   }
 
   /**
@@ -1238,6 +1289,7 @@ export class UI {
     if (this.root.dataset.rotate !== '1' || this._screen !== 'game' || this.overlay) return;
     this.showPause();
     this.deps.onPause();
+    this.autoPaused = this.overlay !== null;
   }
 
   private readonly onVisibility = (): void => {

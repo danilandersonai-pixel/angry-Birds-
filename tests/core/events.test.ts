@@ -23,7 +23,7 @@ function hutScenario(): GameEvent[] {
   s.release(); // слабое натяжение — отмена
   events.push(...s.drainEvents());
   shoot(s, 150, 1, events); // назад — промах
-  s.launch(18, 1);
+  s.launch(28, 1); // V_MAX 21: под 18° (как при 24) Синие до башни на x = 24…28 не долетают
   runFor(s, 0.4, events);
   s.activateAbility();
   runUntil(s, () => s.state === 'ready' || s.state === 'won' || s.state === 'lost', 20, events);

@@ -11,8 +11,9 @@
 //   иначе нужен fragile (pig-free-space), расстояние между свиньями (pig-close);
 // - шары: только со стопорами ≤ 0.1 м или в «лунке» (ball-no-stoppers, ball-slope);
 // - стройность столбов ≤ 8, высота ≤ 17.5 м, отношение масс ≤ 10 (slender, too-tall, mass-ratio);
-// - досягаемость: каждая свинья внутри огибающей хотя бы одной птицы уровня (g 15, V_MAX 24, R_MAX 2, старт из
-//   оттянутого кармашка), зона целей 16…34 м (unreachable, reach-graze, zone);
+// - досягаемость: каждая свинья внутри огибающей хотя бы одной птицы уровня (g, V_MAX, R_MAX — из constants, старт из
+//   оттянутого кармашка), зона целей 16…34 м при V 24 / g 15, масштаб (V/24)² — при V 21 это 12.25…26.0 м
+//   (unreachable, reach-graze, zone);
 // - рогатка: основание = slingshot − (0, 2.7) лежит на поверхности рельефа ±0.05 м, ровная площадка очереди птиц
 //   (slingshot-terrain, queue-not-flat, queue-bounds);
 // - границы и рельеф (out-of-bounds, bounds-right, bounds-top, terrain-invalid, terrain-gap, terrain-slope, terrain-almost-flat);
@@ -30,6 +31,12 @@ import { BIRD_R, PIG_R, U, blockArea, blockMaxPoints, blockPolygon, catalogKind,
 // ─────────────────────────────────────────────────────────────────────────────
 // Пороги (06 §4, 00 §1, §4)
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Масштаб дальности V_MAX²/|g| относительно V 24 / g 15, под который 06 §2.3 разметил зону целей 16…34 м:
+ * при другой V_MAX все x масштабируются на (V/24)² (06 §2, «Если поднимут V_MAX»). При V 21 — 0.766.
+ */
+export const RANGE_K = (LAUNCH.V_MAX * LAUNCH.V_MAX) / Math.abs(WORLD.GRAVITY) / ((24 * 24) / 15);
 
 export const LINT = {
   /** Допуск касания встык: зазор/перекрытие ≤ 0.02 м (06 S1–S2). */
@@ -55,9 +62,9 @@ export const LINT = {
   MAX_SLENDER: 8,
   MAX_HEIGHT: 17.5,
   MAX_MASS_RATIO: 10,
-  /** Зона целей по x от основания рогатки (00 §4) и прибавка с холма на 1 м высоты (00 §1.2). */
-  ZONE_MIN: 16,
-  ZONE_MAX: 34,
+  /** Зона целей по x от основания рогатки (00 §4: 16…34 при V 24, ×RANGE_K) и прибавка с холма на 1 м высоты (00 §1.2). */
+  ZONE_MIN: 16 * RANGE_K,
+  ZONE_MAX: 34 * RANGE_K,
   ZONE_HILL_K: 0.9,
   /** Ориентиры числа блоков (верхняя граница) по эпизодам и для боссов (00 §4). */
   BLOCKS_MAX: { '1': 30, '2': 45, '3': 60, boss: 80 } as Record<string, number>,
@@ -406,6 +413,13 @@ export function reachHeight(bird: BirdType, anchor: Vec, x: number): number {
   const b = tab[Math.min(i + 1, tab.length - 1)];
   if (!Number.isFinite(a) || !Number.isFinite(b)) return anchor.y + (u < 0.5 ? a : b);
   return anchor.y + a + (b - a) * u;
+}
+
+/** Высшая точка огибающей птицы над миром (апекс навесного выстрела на полной силе): 19.6 м при V 24, 15.1 м при V 21. */
+export function envelopeApex(bird: BirdType, anchor: Vec): number {
+  let top = -Infinity;
+  for (const h of envelopeTable(BIRDS[bird].launchScale)) top = Math.max(top, h);
+  return anchor.y + top;
 }
 
 /** Ломаная огибающей для отрисовки. */
@@ -1198,7 +1212,7 @@ export function lintLevel(lv: LevelDef, opts: LintOptions = {}): LintResult {
       const dx = C.c.x - base.x;
       const zmax = LINT.ZONE_MAX + LINT.ZONE_HILL_K * hs;
       if (dx < LINT.ZONE_MIN - 1e-6 || dx > zmax + 1e-6) {
-        add('warning', 'zone', `${b.ref}: x − основание = ${f2(dx)} м вне зоны целей ${LINT.ZONE_MIN}…${f2(zmax)} (00 §4)`, b.target, C.c);
+        add('warning', 'zone', `${b.ref}: x − основание = ${f2(dx)} м вне зоны целей ${f2(LINT.ZONE_MIN)}…${f2(zmax)} (00 §4)`, b.target, C.c);
       }
     }
   }
@@ -1215,7 +1229,8 @@ export function lintLevel(lv: LevelDef, opts: LintOptions = {}): LintResult {
     if (base && (base.x - 1 < bounds.minX || base.x > bounds.maxX)) add('error', 'out-of-bounds', `рогатка (x = ${f2(base.x)}) за границами уровня`, S, base);
     const right = Math.max(-Infinity, ...dyn.map((b) => b.maxX));
     if (Number.isFinite(right) && bounds.maxX - right < 8) add('warning', 'bounds-right', `bounds.maxX = ${bounds.maxX} ближе 8 м к правому краю контента (${f2(right)}); обычно край + 12 (06 §2.3)`, L, v(bounds.maxX, 0));
-    if (sling && bounds.maxY < sling.y + 15.6) add('warning', 'bounds-top', `bounds.maxY = ${bounds.maxY} ниже апекса огибающей (≈ ${f2(sling.y + 15.6)})`, L);
+    const apex = sling ? envelopeApex('red', sling) : -Infinity;
+    if (bounds.maxY < apex) add('warning', 'bounds-top', `bounds.maxY = ${bounds.maxY} ниже апекса огибающей Red (≈ ${f2(apex)})`, L);
     // дыры в рельефе в пределах bounds
     const gaps: Array<[number, number]> = [];
     for (let x = bounds.minX; x <= bounds.maxX + 1e-9; x += 0.5) {

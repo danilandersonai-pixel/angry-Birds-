@@ -358,6 +358,125 @@ try {
     ok((await scr(p)) === 'levels', `«Назад» на паузе → уровни (${await scr(p)})`);
     await p.close();
   }
+
+  // 15. Плейтест №2, Б6: строка «Рекорд» — рекорд ДО победы; при первой победе её нет (итог не выдаётся заранее)
+  {
+    const p = await page('screen=winfirst');
+    await p.waitForTimeout(300);
+    const mid = await p.evaluate(() => document.querySelector('.res-best')?.textContent ?? null);
+    ok(mid === '', `первая победа: строки «Рекорд» нет, пока крутится счёт («${mid}»)`);
+    await p.close();
+    const q = await page('screen=win&static=1');
+    const best = await q.evaluate(() => document.querySelector('.res-best')?.textContent ?? '');
+    ok(/50\s468/.test(best), `повтор без рекорда: «${best}» — прежний рекорд, а не текущий счёт`);
+    await q.close();
+  }
+
+  // 16. Б7: дразнилка по исходу — «Почти получилось!» только при одной свинье и счёте больше 0
+  {
+    const taunts = async (q) => {
+      const out = [];
+      for (let i = 0; i < 4; i++) {
+        const p = await page(q);
+        out.push(await p.evaluate(() => document.querySelector('[data-testid=lose-taunt]')?.textContent ?? ''));
+        await p.close();
+      }
+      return out;
+    };
+    const zero = await taunts('screen=lose&static=1&pigs=3&score=0');
+    ok(zero.every((x) => x && x !== 'Почти получилось!'), `счёт 0, три свиньи: ${[...new Set(zero)].join(' / ')}`);
+    const two = await taunts('screen=lose&static=1&pigs=2&score=15000');
+    ok(two.every((x) => x && x !== 'Почти получилось!'), `две свиньи: ${[...new Set(two)].join(' / ')}`);
+    const one = await taunts('screen=lose&static=1&pigs=1&score=23450');
+    ok(one.every((x) => x === 'Почти получилось!' || x === 'Осталась всего одна свинья!'), `одна свинья: ${[...new Set(one)].join(' / ')}`);
+  }
+
+  // 17. UI.hudRect(): правый блок HUD по раскладке — для камеры; ширина не растёт со счётом (место под 5 цифр)
+  {
+    const p = await page('screen=home', { viewport: { width: 1600, height: 900 } });
+    await p.waitForTimeout(800);
+    const r = await p.evaluate(async () => {
+      const ui = window.__ui;
+      const a = ui.hudRect();
+      const dom = document.querySelector('[data-testid=hud-right]').getBoundingClientRect();
+      ui.updateHud({ score: 23450, best: 50468, birdsLeft: 2, pigsLeft: 2 });
+      await new Promise((res) => setTimeout(res, 900));
+      const b = ui.hudRect();
+      return { a: a && [a.left, a.top, a.width, a.height], dom: [dom.left, dom.top, dom.width, dom.height], b: b && [b.left, b.top, b.width, b.height] };
+    });
+    ok(!!r.a && r.a.every((v, i) => Math.abs(v - r.dom[i]) < 1.5), `hudRect совпадает с .hud-right (${JSON.stringify(r.a)} ~ ${JSON.stringify(r.dom.map(Math.round))})`);
+    ok(!!r.b && Math.abs(r.b[2] - r.a[2]) < 1.5 && Math.abs(r.b[3] - r.a[3]) < 1.5, `hudRect не меняется от счёта 0 → 23 450 (${r.a?.[2]}×${r.a?.[3]} → ${r.b?.[2]}×${r.b?.[3]})`);
+    ok(r.a && r.a[0] + r.a[2] <= 1600 && r.a[1] >= 0 && r.a[1] + r.a[3] < 450, 'hudRect — в правом верхнем углу окна');
+    // во время въезда HUD (transform-анимация) прямоугольник тот же — считается по раскладке
+    const moving = await p.evaluate(() => {
+      const el = document.querySelector('[data-testid=hud-right]');
+      const a = el.animate([{ translate: '0 -60px' }, { translate: '0 0' }], { duration: 1000 });
+      const r = window.__ui.hudRect();
+      const dom = el.getBoundingClientRect();
+      a.cancel();
+      return { r: r.top, dom: dom.top };
+    });
+    ok(Math.abs(moving.r - r.a[1]) < 1.5 && moving.dom < moving.r - 10, `hudRect без transform-анимаций (top ${moving.r.toFixed(0)}, DOM ${moving.dom.toFixed(0)})`);
+    await p.close();
+    const t = await page('screen=title');
+    ok((await t.evaluate(() => window.__ui.hudRect())) === null, 'hudRect вне игры — null');
+    await t.close();
+  }
+
+  // 18. Б9: хвостик подсказки — только к точке (рогатка): тянется вниз-влево; без точки хвоста нет
+  {
+    const p = await page('screen=game', { viewport: { width: 1600, height: 900 } });
+    const g = await p.evaluate(() => {
+      const box = document.querySelector('.hint-box').getBoundingClientRect();
+      const tail = document.querySelector('.hint-tail polyline');
+      if (!tail) return null;
+      const pts = tail.getAttribute('points').split(' ').map((q) => q.split(',').map(Number));
+      return { tip: pts[1], base: (pts[0][0] + pts[2][0]) / 2, box: [box.width, box.height] };
+    });
+    ok(!!g && g.tip[1] > g.box[1] && g.tip[0] < g.base - 1, `хвостик к рогатке: кончик ниже облачка и левее середины основания (${JSON.stringify(g)})`);
+    await p.close();
+    const q = await page('screen=game&tail=0');
+    ok((await q.locator('.hint-tail').count()) === 0 && (await q.locator('[data-testid=hint]').count()) === 1, 'без точки — облачко без хвостика');
+    await q.close();
+  }
+
+  // 19. Б8: пауза, которую открыл оверлей «Поверните устройство», снимается сама («Играть так» или поворот обратно);
+  //     пауза игрока остаётся
+  {
+    const phone = { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true };
+    const p = await page('screen=game', phone);
+    ok(await p.locator('[data-testid=pause]').isVisible(), 'портрет в игре → пауза под оверлеем');
+    await p.click('[data-testid=rotate-anyway]', { force: true });
+    await p.waitForTimeout(700);
+    ok((await p.locator('[data-testid=pause]').count()) === 0, '«Играть так» → автопауза снята, игра идёт');
+    await p.close();
+    const q = await page('screen=game', phone);
+    await q.setViewportSize({ width: 844, height: 390 });
+    await q.waitForTimeout(700);
+    ok((await q.locator('[data-testid=pause]').count()) === 0, 'поворот в ландшафт → автопауза снята');
+    await q.close();
+    const r = await page('screen=game', { viewport: { width: 844, height: 390 }, hasTouch: true, isMobile: true });
+    await r.click('[data-testid=hud-pause]', { force: true });
+    await r.waitForTimeout(400);
+    await r.setViewportSize({ width: 390, height: 844 });
+    await r.waitForTimeout(400);
+    await r.setViewportSize({ width: 844, height: 390 });
+    await r.waitForTimeout(700);
+    ok(await r.locator('[data-testid=pause]').isVisible(), 'пауза игрока после поворота туда-обратно остаётся');
+    await r.close();
+  }
+
+  // 20. Б10: на окне итогов не висят закончившиеся анимации (иначе «пульс» и «качание» не идут на композиторе)
+  {
+    const p = await page('screen=win3');
+    await p.waitForTimeout(4200);
+    const st = await p.evaluate(() => {
+      const all = document.getAnimations();
+      return { finished: all.filter((a) => a.playState === 'finished').length, running: all.filter((a) => a.playState === 'running').length };
+    });
+    ok(st.finished === 0 && st.running >= 3, `после подсчёта: закончившихся анимаций ${st.finished}, идут ${st.running} (лучи, пульс, качание)`);
+    await p.close();
+  }
 } finally {
   await browser.close();
   await server.close();

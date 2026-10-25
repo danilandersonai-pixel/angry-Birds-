@@ -54,18 +54,22 @@ export interface PlanState {
   bucket: TokenBucket;
   /** Типы свиней, замеченные на уровне (для хрюканья «от скуки»): из pigsLaugh.pigs и pigDamaged. */
   pigKinds: Set<PigType>;
+  /** id блока → время последней трещины (не чаще раза в CRACK_GAP_S на блок). */
+  crackAt: Map<number, number>;
 }
 
 /** Новое состояние карты (и сброс при новой сессии: рестарт, выход в меню, смена уровня). */
 export function createPlanState(): PlanState {
-  return { lastPower: 0, bonusIdx: 0, pigVoxAt: new Map(), fuses: new Set(), bucket: new TokenBucket(6, 40), pigKinds: new Set() };
+  return {
+    lastPower: 0, bonusIdx: 0, pigVoxAt: new Map(), fuses: new Set(), bucket: new TokenBucket(6, 40), pigKinds: new Set(), crackAt: new Map(),
+  };
 }
 
 export interface PlanEnv {
   /** Текущее время аудио, с. */
   now: number;
   rnd: () => number;
-  /** Сколько голосов категории звучит сейчас (для «громкой/тихой» гибели свиньи). */
+  /** Сколько голосов категории звучит сейчас (для «громкой/тихой» гибели свиньи и плотности ударов/трещин). */
   voices?: (cat: Cat) => number;
   /**
    * Звучит ли ещё голос с меткой (фитиль). Фитиль, который доиграл, был остановлен паузой
@@ -86,6 +90,23 @@ export const HAL_ARC_MS = 1000;
 /** Не чаще раза в 300 мс «уф» одной и той же свиньи. */
 export const PIG_VOX_GAP_S = 0.3;
 
+// ── Массовые обрушения (без «каши»): записи 30 уровней, scripts/render-audio.mjs --collapse ──
+// Из 549 трещин 76 шли в одном кадре с разрушением того же блока, 144 — за ≤ 150 мс до него, 112 — вслед за другой
+// трещиной того же блока; три четверти трещин звучат вместе с ударом. Трещины занимали голоса категории break
+// (score 1.5 против 1.3 у разрушения доски) — на телефоне по лимиту терялась пятая часть звуков разрушения.
+/** Трещина одного блока — не чаще раза в 150 мс: стадии 1→2→3 подряд звучат одной трещиной. */
+export const CRACK_GAP_S = 0.15;
+/** Трещин в кадр — не больше двух (старшие стадии, ближние к камере); блок, разрушенный в том же кадре, не трещит. */
+export const CRACKS_PER_FRAME = 2;
+/**
+ * Плотность: пока звучит больше DENSE_VOICES ударов и трещин/разрушений, новые удары и трещины тише в √(N/n) раз
+ * (12 голосов — −3 дБ, 24 — −6 дБ). Разрушения, взрывы, голоса птиц и свиней не приглушаются — они остаются над фоном.
+ */
+export const DENSE_VOICES = 6;
+export function densityGain(sounding: number): number {
+  return sounding <= DENSE_VOICES ? 1 : Math.sqrt(DENSE_VOICES / sounding);
+}
+
 const MATERIALS: ReadonlySet<ImpactSurface> = new Set<ImpactSurface>(['wood', 'ice', 'stone']);
 
 /** Ключ звука удара для поверхности (или null — птица/яйцо не звучат как поверхность). */
@@ -98,6 +119,14 @@ export function impactKey(surf: ImpactSurface, I: number): { key: string; k: num
 }
 
 export const fuseTag = (id: number): string => `fuse:${id}`;
+
+interface CrackItem {
+  id: number;
+  key: string;
+  stage: number;
+  gain: number;
+  pan: number;
+}
 
 interface ImpactItem extends ImpactReq {
   l: Listener | undefined;
@@ -124,8 +153,13 @@ export function laughVoices(pigs: ReadonlyArray<PigType> | undefined, rnd: () =>
 export function planFrame(batch: ReadonlyArray<FrameEvent>, st: PlanState, env: PlanEnv): Cue[] {
   const out: Cue[] = [];
   const impacts: ImpactItem[] = [];
+  const cracks: CrackItem[] = [];
+  /** Блоки, разрушенные в этом кадре: их трещины не звучат (разрушение их перекрывает). */
+  const gone = new Set<number>();
   let destroyed = 0;
   let loudPops = 0;
+  /** Сколько ударов и трещин/разрушений звучит (плюс запланированные в этом кадре) — для densityGain. */
+  let sounding = (env.voices?.('impact') ?? 0) + (env.voices?.('break') ?? 0);
 
   const play = (key: string, cat: Cat, gain: number, pan = 0, extra: Partial<PlayCue> = {}): void => {
     if (!(gain > 0)) return;
@@ -226,17 +260,20 @@ export function planFrame(batch: ReadonlyArray<FrameEvent>, st: PlanState, env: 
       case 'blockDamaged': {
         const s = sp(e.x);
         const stage = Math.max(1, Math.min(3, Math.round(e.stage)));
-        play(`${e.material}Crack:${stage}`, 'break', s.gain, s.pan);
+        cracks.push({ id: e.id, key: `${e.material}Crack:${stage}`, stage, gain: s.gain, pan: s.pan });
         break;
       }
       case 'blockDestroyed': {
         destroyed++;
+        gone.add(e.id);
+        st.crackAt.delete(e.id);
         const s = sp(e.x);
         const size = Math.sqrt(Math.max(0.01, e.w * e.h));
         const key = e.material === 'wood' ? 'woodBreak' : e.material === 'ice' ? 'iceShatter' : 'stoneBreak';
         // крупный блок — ниже и громче
         const rate = Math.min(1.2, Math.max(0.8, size ** -0.25));
         play(key, 'break', s.gain * Math.min(1.2, 0.6 + 0.4 * size), s.pan, { rate, send: 0.12 });
+        sounding++;
         break;
       }
       case 'pigDamaged': {
@@ -300,12 +337,28 @@ export function planFrame(batch: ReadonlyArray<FrameEvent>, st: PlanState, env: 
     }
   }
 
+  // ── трещины кадра: без разрушенных в этом кадре блоков, не чаще CRACK_GAP_S на блок, ≤ CRACKS_PER_FRAME ──
+  const fresh = cracks.filter((c) => {
+    if (gone.has(c.id)) return false;
+    const last = st.crackAt.get(c.id);
+    return last === undefined || env.now - last >= CRACK_GAP_S - 1e-6;
+  });
+  fresh.sort((a, b) => b.stage * b.gain - a.stage * a.gain);
+  const heard = new Set<number>();
+  for (const c of fresh) {
+    if (heard.size >= CRACKS_PER_FRAME) break;
+    if (heard.has(c.id)) continue; // две стадии одного блока в одном кадре — одна (старшая) трещина
+    heard.add(c.id);
+    st.crackAt.set(c.id, env.now);
+    play(c.key, 'break', c.gain * densityGain(++sounding), c.pan);
+  }
+
   // ── удары кадра: ≤ 4 самых сильных (≤ 2 на ключ) через «ведро», остальное — в обломки ──
   const { play: chosen, overflow } = selectImpacts(impacts);
   for (const r of chosen) {
     if (!st.bucket.take(env.now)) break;
     const s = r.l ? spatial(r.x, r.l.camX, r.l.viewW) : { gain: 1, pan: 0 };
-    play(r.key, 'impact', impactVolume(r.intensity) * s.gain, s.pan, { score: r.intensity, rate: r.rate });
+    play(r.key, 'impact', impactVolume(r.intensity) * s.gain * densityGain(++sounding), s.pan, { score: r.intensity, rate: r.rate });
   }
   if (overflow > 1.5 || destroyed >= 3) {
     play('rubble', 'break', Math.min(1, Math.max(overflow, destroyed) / 6), 0, { delay: 0.02 });
@@ -315,11 +368,12 @@ export function planFrame(batch: ReadonlyArray<FrameEvent>, st: PlanState, env: 
 
 /**
  * Имена UI-звуков: контракт спецификации ('click'…'newRecord') + расширения из 05-audio/07-ui-ux
- * ('hover', 'toggleOn', 'toggleOff', 'locked', 'popIn', 'whoosh', 'starEmpty', 'scoreDone').
+ * ('hover', 'toggleOn', 'toggleOff', 'locked', 'popIn', 'whoosh', 'starEmpty', 'scoreDone')
+ * + 'cleared' — «уровень зачищен» на баннере победы (то же, что play('cleared')).
  */
 export type UiSoundName =
   | 'click' | 'back' | 'pop' | 'swoosh' | 'star1' | 'star2' | 'star3' | 'tick' | 'win' | 'lose' | 'newRecord'
-  | 'hover' | 'toggleOn' | 'toggleOff' | 'locked' | 'popIn' | 'whoosh' | 'starEmpty' | 'scoreDone';
+  | 'hover' | 'toggleOn' | 'toggleOff' | 'locked' | 'popIn' | 'whoosh' | 'starEmpty' | 'scoreDone' | 'cleared';
 
 /** Награды экрана победы (07-ui-ux §12.5): звёзды по индексу, пустая звезда, конец счёта, рекорд. */
 export type RewardKind = 'star0' | 'star1' | 'star2' | 'starEmpty' | 'scoreDone' | 'newBest';
@@ -345,6 +399,7 @@ export const UI_KEYS: Readonly<Record<UiSoundName, string>> = {
   whoosh: 'ui:whoosh',
   starEmpty: 'starEmpty',
   scoreDone: 'scoreDone',
+  cleared: 'cleared',
 };
 
 export const REWARD_KEYS: Readonly<Record<RewardKind, string>> = {

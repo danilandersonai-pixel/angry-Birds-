@@ -1,5 +1,8 @@
 // Анимации UI (07 §3.4, §4.8): easing, pop-in/out, тряска, таймлайн на rAF.
-// Анимируем только transform и opacity. При reduced motion всё укорачивается и без перелётов.
+// Анимируем только то, что считает композитор: opacity и сдвиг/масштаб/поворот. У HTML-элементов — отдельными
+// свойствами translate / scale / rotate: они складываются со статическими translate/rotate (центрирование, наклон)
+// и не затирают их. У SVG-элементов — только transform: отдельные свойства на SVG Chromium не уводит на композитор.
+// При reduced motion всё укорачивается и без перелётов.
 
 export const motion = { reduced: false };
 
@@ -19,16 +22,29 @@ export const ease = {
   outBack: (t: number, s = 1.70158) => 1 + (s + 1) * (t - 1) ** 3 + s * (t - 1) ** 2,
 } as const;
 
-/** Безопасный вызов Element.animate (в старых движках его может не быть). */
+/**
+ * Безопасный вызов Element.animate (в старых движках его может не быть).
+ * Закончившаяся анимация без fill: 'forwards' сразу отменяется: иначе она висит на элементе, и следующая анимация
+ * того же элемента (например, бесконечный CSS-«пульс» кнопки после pop-in) не уходит на композитор (Chromium:
+ * «target has incompatible animations») — пересчёт стиля на главном потоке и перерастр слоя каждый кадр (Б10).
+ */
 export function anim(el: Element, frames: Keyframe[], opts: KeyframeAnimationOptions): Animation | null {
   if (typeof (el as HTMLElement).animate !== 'function') return null;
-  return el.animate(frames, opts);
+  const a = el.animate(frames, opts);
+  if (opts.fill !== 'forwards' && opts.fill !== 'both')
+    a.finished.then(
+      () => {
+        if (a.playState === 'finished') a.cancel();
+      },
+      () => undefined,
+    );
+  return a;
 }
 
 /** Pop-in с перелётом: scale 0.3 → 1.08 → 0.97 → 1 за 0.36 с. */
 export function popIn(el: Element, delayMs = 0, dur = 360): Animation | null {
   if (motion.reduced)
-    return anim(el, [{ opacity: 0, transform: 'scale(0.96)' }, { opacity: 1, transform: 'none' }], {
+    return anim(el, [{ opacity: 0, scale: '.96' }, { opacity: 1, scale: '1' }], {
       duration: 150,
       delay: delayMs,
       easing: CSS_EASE.out,
@@ -37,17 +53,17 @@ export function popIn(el: Element, delayMs = 0, dur = 360): Animation | null {
   return anim(
     el,
     [
-      { opacity: 0, transform: 'scale(0.3)', easing: CSS_EASE.out },
-      { opacity: 1, transform: 'scale(1.08)', offset: 0.6, easing: 'ease-in-out' },
-      { transform: 'scale(0.97)', offset: 0.8, easing: 'ease-in-out' },
-      { opacity: 1, transform: 'none' },
+      { opacity: 0, scale: '.3', easing: CSS_EASE.out },
+      { opacity: 1, scale: '1.08', offset: 0.6, easing: 'ease-in-out' },
+      { scale: '.97', offset: 0.8, easing: 'ease-in-out' },
+      { opacity: 1, scale: '1' },
     ],
     { duration: dur, delay: delayMs, fill: 'backwards' },
   );
 }
 
 export function popOut(el: Element, dur = 160): Animation | null {
-  return anim(el, [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'scale(0.9)' }], {
+  return anim(el, [{ opacity: 1, scale: '1' }, { opacity: 0, scale: '.9' }], {
     duration: motion.reduced ? 120 : dur,
     easing: CSS_EASE.in,
     fill: 'forwards',
@@ -59,7 +75,7 @@ export function shake(el: Element): Animation | null {
   if (motion.reduced) return null;
   return anim(
     el,
-    [0, -10, 9, -6, 4, 0].map((x) => ({ transform: `translateX(calc(${x} * var(--u)))` })),
+    [0, -10, 9, -6, 4, 0].map((x) => ({ translate: `calc(${x} * var(--u)) 0` })),
     { duration: 360, easing: 'ease-out' },
   );
 }

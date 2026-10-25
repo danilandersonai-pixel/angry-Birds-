@@ -10,11 +10,18 @@
 //   по умолчанию DIR = $AUDIO_OUT или <tmp>/ab-audio-render
 // Результат: DIR/*.wav, DIR/png/*.png, DIR/sheets/<группа>.png, DIR/report.json, DIR/report.md.
 // Код возврата 1 — если есть клиппинг (пик ≥ −1 dBFS), NaN/Inf или звук обрезан.
+//
+// Повтор настоящей игры (баланс разрушений, «каша» на массовых обрушениях):
+//   node scripts/render-audio.mjs --collapse 1-8,3-10 [--mobile] [--save-events FILE]
+//     ядро без браузера (vite SSR) перебором выбирает для каждого уровня самые разрушительные выстрелы,
+//     записывает события и проигрывает их через карту событий, пул голосов и граф движка под фон темы;
+//   node scripts/render-audio.mjs --replay FILE [--mobile] — то же по сохранённой записи.
+//   В отчёте по каждому окну 100 мс: сколько голосов стартовало, сколько звучало, кражи и отказы.
 import { createServer } from 'vite';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -30,6 +37,11 @@ const arg = (name, def) => {
 const OUT = path.resolve(arg('--out', process.env.AUDIO_OUT ?? path.join(os.tmpdir(), 'ab-audio-render')));
 const ONLY = arg('--only', undefined);
 const IMAGES = !argv.includes('--no-images');
+const COLLAPSE = arg('--collapse', undefined);
+const REPLAY_FILE = arg('--replay', undefined);
+const SAVE_EVENTS = arg('--save-events', undefined);
+const MOBILE = argv.includes('--mobile');
+const REPLAY = Boolean(COLLAPSE || REPLAY_FILE);
 mkdirSync(OUT, { recursive: true });
 mkdirSync(path.join(OUT, 'png'), { recursive: true });
 mkdirSync(path.join(OUT, 'sheets'), { recursive: true });
@@ -42,6 +54,82 @@ const server = await createServer({
   logLevel: 'error',
 });
 await server.listen();
+
+/**
+ * Запись массовых обрушений: для каждого уровня до трёх выстрелов, каждый — лучший по разрушениям из перебора
+ * угла 4…60° (шаг 4°), силы 1 / 0.85 и момента способности; затем события лучшей серии с временем сессии.
+ * Слушатель — центр сооружения и кадр 40 м: камера в игре держит сооружение в кадре (громкость по удалённости ≈ 1).
+ */
+async function captureCollapses(ids) {
+  const { createSession } = await server.ssrLoadModule('/src/core/index.ts');
+  const { findLevel } = await server.ssrLoadModule('/src/levels/index.ts');
+  const play = (lvl, shots, record) => {
+    const s = createSession(lvl, { seed: 7 });
+    const recs = [];
+    let destroyed = 0;
+    let pigs = 0;
+    const run = (maxS, until, onStep) => {
+      const ts = s.time;
+      while (s.time - ts < maxS && !until()) {
+        s.step();
+        onStep?.();
+        for (const e of s.drainEvents()) {
+          if (e.type === 'blockDestroyed') destroyed++;
+          if (e.type === 'pigDestroyed') pigs++;
+          if (record) recs.push({ t: +s.time.toFixed(4), e });
+        }
+      }
+    };
+    const idle = () => s.state === 'ready' || s.state === 'won' || s.state === 'lost';
+    for (const sh of shots) {
+      run(8, idle);
+      if (s.state !== 'ready') break;
+      s.launch(sh.a, sh.p);
+      const tl = s.time;
+      run(20, idle, () => {
+        if (sh.abAt !== null && s.state === 'flying' && s.time - tl >= sh.abAt && s.time - tl < sh.abAt + 1 / 60) s.activateAbility();
+      });
+    }
+    return { recs, destroyed, pigs, state: s.state };
+  };
+  const out = [];
+  for (const id of ids) {
+    const lvl = findLevel(id);
+    if (!lvl) {
+      console.log(`[collapse] нет уровня ${id}`);
+      continue;
+    }
+    const shots = [];
+    for (let k = 0; k < Math.min(3, lvl.birds.length); k++) {
+      const b = lvl.birds[k];
+      const abs = b === 'red' || b === 'terence' || b === 'bomb' ? [null] : [0.7, 1.0];
+      let best = null;
+      for (let a = 4; a <= 60; a += 4) {
+        for (const p of [1, 0.85]) {
+          for (const abAt of abs) {
+            const r = play(lvl, [...shots, { a, p, abAt }], false);
+            const score = r.destroyed + 4 * r.pigs;
+            if (!best || score > best.score) best = { sh: { a, p, abAt }, score, state: r.state };
+          }
+        }
+      }
+      shots.push(best.sh);
+      if (best.state !== 'ready') break;
+    }
+    const r = play(lvl, shots, true);
+    const xs = [...(lvl.blocks ?? []), ...lvl.pigs].map((o) => o.x);
+    const camX = xs.length ? (Math.min(...xs) + Math.max(...xs)) / 2 : 15;
+    console.log(`[collapse] ${id}: выстрелы ${JSON.stringify(shots)} · разрушено блоков ${r.destroyed}, свиней ${r.pigs} · ${r.state} · событий ${r.recs.length}`);
+    out.push({ name: id, theme: lvl.theme, listener: { camX, viewW: 40 }, events: r.recs });
+  }
+  return out;
+}
+
+let replayLevels = null;
+if (COLLAPSE) replayLevels = await captureCollapses(COLLAPSE.split(','));
+else if (REPLAY_FILE) replayLevels = JSON.parse(readFileSync(REPLAY_FILE, 'utf8'));
+if (replayLevels && SAVE_EVENTS) writeFileSync(SAVE_EVENTS, JSON.stringify(replayLevels));
+
 const url = `http://127.0.0.1:${server.httpServer.address().port}/dev/preview-audio.html`;
 const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
 let game, raw;
@@ -54,8 +142,13 @@ try {
   });
   await page.goto(url, { waitUntil: 'load' });
   await page.waitForFunction(() => typeof window.__renderAll === 'function');
-  game = await page.evaluate((only) => window.__renderAll({ chain: 'game', only }), ONLY);
-  raw = await page.evaluate((only) => window.__renderAll({ chain: 'raw', wav: false, only }), ONLY);
+  if (REPLAY) {
+    game = await page.evaluate(([lv, mobile]) => window.__renderReplay(lv, { mobile }), [replayLevels, MOBILE]);
+    raw = [];
+  } else {
+    game = await page.evaluate((only) => window.__renderAll({ chain: 'game', only }), ONLY);
+    raw = await page.evaluate((only) => window.__renderAll({ chain: 'raw', wav: false, only }), ONLY);
+  }
   for (const s of game) {
     const b64 = await page.evaluate((n) => window.__wav(n), s.name);
     writeFileSync(path.join(OUT, `${s.name}.wav`), Buffer.from(b64, 'base64'));
@@ -92,7 +185,7 @@ for (const s of game) {
   if (s.nonFinite > 0) flags.push('NaN');
   if ((ff.truePeak ?? s.peakDb) >= -1 || s.peakDb >= -1) flags.push('PEAK');
   if (s.tailDb > -60 && s.group !== 'music' && s.group !== 'mix') flags.push('TAIL');
-  if (s.firstAbs > 1e-4) flags.push('CLICK0');
+  if (s.firstAbs > 1e-4 && !REPLAY) flags.push('CLICK0'); // в повторе фон темы звучит с первого сэмпла
   if (s.expectMs && (s.lenMs < s.expectMs * 0.7 || s.lenMs > s.expectMs * 1.4)) flags.push('LEN');
   if (s.group !== 'music' && s.mMaxLufs < -40) flags.push('QUIET');
   rows.push({ ...s, rawPeakDb: r?.peakDb ?? null, rawLenMs: r?.lenMs ?? null, ...ff, flags });
@@ -153,6 +246,21 @@ console.log('\nM max LUFS по группам (мин … медиана … м�
 for (const [g, v] of byGroup) {
   const a = [...v].sort((x, y) => x - y);
   console.log(`  ${g.padEnd(10)} ${a[0].toFixed(1)} … ${a[Math.floor(a.length / 2)].toFixed(1)} … ${a[a.length - 1].toFixed(1)}  (n=${a.length})`);
+}
+if (REPLAY) {
+  // Плотность: голоса, стартовавшие в окне 100 мс (95-й перцентиль и максимум), одновременно звучащие удары/разрушения
+  console.log(`\nПлотность повтора (окна 100 мс${MOBILE ? ', телефон' : ''}): старты p95 / макс · звучит sfx макс · окон ≥ 8 стартов · кража / отказ лимита / кулдаун`);
+  for (const s of rows) {
+    const st = s.windows.map((w) => w.starts).sort((a, b) => a - b);
+    const p95 = st[Math.min(st.length - 1, Math.floor(st.length * 0.95))] ?? 0;
+    const dense = s.windows.filter((w) => w.starts >= 8);
+    console.log(`  ${s.name.padEnd(22)} ${String(p95).padStart(2)} / ${String(st[st.length - 1] ?? 0).padStart(2)} · ${String(Math.max(0, ...s.windows.map((w) => w.sfxVoices))).padStart(2)} · ${String(dense.length).padStart(2)} · ${s.pool.stolen} / ${s.pool.limited} / ${s.pool.cooldown} · пик ${s.peakDb.toFixed(1)} dBFS, M max ${s.mMaxLufs.toFixed(1)} LUFS`);
+    for (const w of dense) {
+      const cnt = {};
+      for (const k of w.keys) cnt[k.replace(/:.*/, '')] = (cnt[k.replace(/:.*/, '')] ?? 0) + 1;
+      console.log(`      ${w.t.toFixed(1)} с: ${w.starts} стартов, звучит ${w.sfxVoices} — ${Object.entries(cnt).map(([k, n]) => `${k}×${n}`).join(' ')}`);
+    }
+  }
 }
 const hard = rows.filter((s) => s.flags.some((f) => f === 'PEAK' || f === 'NaN' || f === 'TAIL'));
 const soft = rows.filter((s) => s.flags.length > 0 && !hard.includes(s));

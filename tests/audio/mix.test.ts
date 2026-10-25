@@ -1,7 +1,8 @@
 // Логика микшера без Web Audio: пул голосов (кулдаун, лимиты, кража), ведро токенов, отбор ударов, пространство.
 import { describe, expect, it } from 'vitest';
+import { CRACK_WEIGHT, soundDef } from '../../src/audio/catalog';
 import {
-  CAT_LIMIT, CAT_MIX, cooldownFor, impactIntensity, impactVolume, MAX_VOICES, MAX_VOICES_MOBILE, mobileLimits,
+  CAT_LIMIT, CAT_MIX, cooldownFor, cooldownKey, impactIntensity, impactVolume, MAX_VOICES, MAX_VOICES_MOBILE, mobileLimits,
   selectImpacts, spatial, tierOf, TokenBucket, VoicePool,
 } from '../../src/audio/mix';
 
@@ -17,6 +18,34 @@ describe('VoicePool: кулдауны', () => {
     const p = new VoicePool();
     expect(p.acquire('woodHit:1', 'impact', 1, 45, 0)).not.toBeNull();
     expect(p.acquire('iceHit:1', 'impact', 1, 45, 0)).not.toBeNull();
+  });
+  it('стадии трещины одного материала и удары о землю делят кулдаун; разные материалы — нет', () => {
+    expect(cooldownKey('woodCrack:2')).toBe('woodCrack');
+    expect(cooldownKey('ground:1')).toBe('ground');
+    expect(cooldownKey('woodHit:2')).toBe('woodHit:2');
+    expect(cooldownKey('pigPop:king')).toBe('pigPop:king');
+    expect(cooldownKey('rubble')).toBe('rubble');
+    const p = new VoicePool();
+    expect(p.acquire('woodCrack:1', 'break', 1, 50, 0)).not.toBeNull();
+    expect(p.acquire('woodCrack:3', 'break', 1, 50, 0.02)).toBeNull();
+    expect(p.acquire('iceCrack:3', 'break', 1, 50, 0.02)).not.toBeNull();
+    expect(p.acquire('woodCrack:3', 'break', 1, 50, 0.05)).not.toBeNull();
+    expect(p.acquire('ground:0', 'impact', 1, 50, 0)).not.toBeNull();
+    expect(p.acquire('ground:1', 'impact', 1, 50, 0.01)).toBeNull();
+  });
+  it('разрушение вытесняет трещину из полной категории break (вес трещины ниже), а не наоборот', () => {
+    expect(soundDef('woodCrack:3')!.weight).toBe(CRACK_WEIGHT);
+    const p = new VoicePool(MAX_VOICES_MOBILE, mobileLimits());
+    const crackScore = 1 * CAT_MIX.break.prio * CRACK_WEIGHT; // трещина в кадре, громкость 1
+    for (let i = 0; i < p.limits.break; i++) expect(p.acquire(`c${i}`, 'break', crackScore, 0, 0)).not.toBeNull();
+    // доска 2 × 0.25 м: громкость 0.6 + 0.4·√0.5 ≈ 0.88 (mapping.ts, blockDestroyed)
+    const boardScore = (0.6 + 0.4 * Math.sqrt(0.5)) * CAT_MIX.break.prio;
+    expect(p.acquire('woodBreak', 'break', boardScore, 0, 0.01)).not.toBeNull();
+    expect(p.stats.stolen).toBe(1);
+    // а новая трещина не вытесняет разрушение
+    const q = new VoicePool(MAX_VOICES_MOBILE, mobileLimits());
+    for (let i = 0; i < q.limits.break; i++) q.acquire(`b${i}`, 'break', boardScore, 0, 0);
+    expect(q.acquire('woodCrack:3', 'break', crackScore, 0, 0.01)).toBeNull();
   });
   it('кулдауны по префиксу ключа из 05-audio §6.1', () => {
     expect(cooldownFor('woodHit:2', 'impact')).toBe(30);

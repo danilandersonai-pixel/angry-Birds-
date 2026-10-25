@@ -36,7 +36,10 @@ export interface SoundDef {
    * у экспоненциального хвоста −40 дБ наступает на 2/3 пути до −60 дБ; тише хвост доигрывает вне лимита.
    */
   holdFrac?: number;
-  /** Вес при краже голоса (score × weight, по умолчанию 1): тик счёта уступает звёздам, рекорд важнее звёзд. */
+  /**
+   * Вес при краже голоса (score × weight, по умолчанию 1): тик счёта уступает звёздам, рекорд важнее звёзд,
+   * трещина уступает разрушению (иначе на обрушении трещины занимали все голоса break, и разрушения терялись).
+   */
   weight?: number;
   fn: (s: F.S, t: number, param: number) => number;
 }
@@ -54,6 +57,8 @@ const LAUNCH_MS: Record<BirdType, number> = { red: 485, blues: 252, chuck: 403, 
 const TIER_I = [0.15, 0.5, 0.9] as const;
 /** Колокольчики держат голос до −40 дБ (2/3 длины до −60 дБ). */
 const BELL_HOLD = 2 / 3;
+/** Вес трещины при краже: 1.5 × 0.6 = 0.9 < разрушения доски 0.88 × 1.5 = 1.3 (mapping.ts, blockDestroyed). */
+export const CRACK_WEIGHT = 0.6;
 const TIER_RU = ['лёгкий', 'средний', 'сильный'] as const;
 
 /**
@@ -63,7 +68,7 @@ const TIER_RU = ['лёгкий', 'средний', 'сильный'] as const;
  * с игровым сидом (среднее по вариантам), живые — рецептом. Цели класса, LUFS:
  *   взрывы −13 · крик при запуске −13 (Синие −14.5, Теренс −14) · способности −15 · разрушения −16 · смех/гибель свиней −17
  *   реплика выбора −19 · «уф» −20 · трещины, удары (сильные) −20…−21 · лёд −17 · земля −21 · захват рогатки −27
- *   звёзды −13/−12/−11 · бонус −14 · джинглы −14/−16 · UI −21…−22.
+ *   звёзды −13/−12/−11 · «уровень зачищен» −13 · бонус −14 · джинглы −14/−16 · UI −21…−22.
  * Кнопки меню (RMS в окне 100 мс) на 5–7 дБ громче медианы польки (−25 dBFS), hover — около неё.
  * Переход на замер запечённого пути (32 против 48 кГц, свои сиды): Синие −1, лёд-звон +1, обломки +1.3,
  * трещины льда +0.6…0.8, земля сильная +0.8, «пуф» +0.9, Теренс +0.5…0.7, отмена +0.5; трещины камня
@@ -77,7 +82,7 @@ export const LOUDNESS_TRIM_DB: Readonly<Record<string, number>> = {
   'ab:bombSwell': -2, 'fuse': -4, 'iceHit:0': -3.5, 'iceHit:1': -3.5, 'iceHit:2': -3.5, 'ground:0': -2,
   'ground:1': -0.7, 'iceCrack:1': 0.8, 'iceCrack:2': 0.7, 'iceCrack:3': 0.6, 'woodBreak': 2, 'iceShatter': 0, 'rubble': 1.3,
   'boom:tnt': 1.5, 'boom:bomb': 1.5, 'boom:egg': 2,
-  'helmet': -4.5, 'star:0': -1, 'star:1': -1.5, 'star:2': -2.5, 'bonus': -2.5, 'scoreDone': -3,
+  'helmet': -4.5, 'star:0': -1, 'star:1': -1.5, 'star:2': -2.5, 'bonus': -2.5, 'scoreDone': -3, 'cleared': 1.5,
   'jingle:win': 2, 'jingle:lose': 2,
   // UI: +2 дБ к первой калибровке (сцена mix_menu_ui); полька при этом стала на 5 дБ тише (TRACK_GAIN.menu)
   'ui:click': 3.5, 'ui:back': 2, 'ui:toggleOn': 0, 'ui:toggleOff': 0, 'ui:popIn': 0, 'ui:locked': -2, 'ui:whoosh': 1, 'ui:hover': 16.5,
@@ -128,7 +133,7 @@ const defs0: DefIn[] = [
   ...(['wood', 'ice', 'stone'] as const).flatMap((m) =>
     [1, 2, 3].map((st): DefIn => ({
       key: `${m}Crack:${st}`, group: 'material', label: `${m === 'wood' ? 'Дерево' : m === 'ice' ? 'Лёд' : 'Камень'}: трещина ${st}`,
-      cat: 'break', dur: 0.5, bake: 2, prio: 0, expectMs: m === 'wood' ? 253 : m === 'ice' ? 266 : 380,
+      cat: 'break', dur: 0.5, bake: 2, prio: 0, expectMs: m === 'wood' ? 253 : m === 'ice' ? 266 : 380, weight: CRACK_WEIGHT,
       fn: (s, t) => (m === 'wood' ? F.woodCrack(s, t, st) : m === 'ice' ? F.iceCrack(s, t, st) : F.stoneCrack(s, t, st)),
     })),
   ),
@@ -164,6 +169,8 @@ const defs0: DefIn[] = [
   { key: 'tick', group: 'reward', label: 'Тик счётчика', cat: 'reward', dur: 0.12, bake: 0, prio: 2, param: 0.5, weight: 0.5, fn: (s, t, p) => F.scoreTick(s, t, p) },
   { key: 'scoreDone', group: 'reward', label: 'Счёт закончен', cat: 'reward', dur: 3.5, bake: 0, prio: 2, holdFrac: BELL_HOLD, fn: (s, t) => F.scoreDone(s, t) },
   { key: 'newBest', group: 'reward', label: 'Новый рекорд', cat: 'reward', dur: 5.5, bake: 0, prio: 2, holdFrac: BELL_HOLD, weight: 1.2, fn: (s, t) => F.newBest(s, t) },
+  // баннер победы сразу после последней свиньи (джингл — позже, на levelEnd у окна итогов)
+  { key: 'cleared', group: 'reward', label: 'Уровень зачищен', cat: 'reward', dur: 1.6, bake: 0, prio: 2, expectMs: 850, weight: 1.2, fn: (s, t) => F.cleared(s, t) },
   { key: 'jingle:win', group: 'reward', label: 'Джингл победы', cat: 'jingle', bus: 'music', dur: 3.2, bake: 0, prio: 2, expectMs: 2932, fn: (s, t) => playJingle(s.ctx, s.nb, s.out, VICTORY, t, 0.6) },
   { key: 'jingle:lose', group: 'reward', label: 'Джингл поражения', cat: 'jingle', bus: 'music', dur: 2.8, bake: 0, prio: 2, expectMs: 2396, fn: (s, t) => playJingle(s.ctx, s.nb, s.out, DEFEAT, t, 0.8) },
 

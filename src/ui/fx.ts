@@ -1,4 +1,5 @@
 // Частицы UI (07 §12.4): вспышка, ударная волна, искры, конфетти. DOM-узлы удаляются по окончании анимации.
+// Движение — отдельными свойствами translate / rotate / scale (частицы — HTML-элементы; SVG внутри искры не анимируется).
 
 import { CSS_EASE, anim, motion } from './anim';
 import { h } from './dom';
@@ -27,7 +28,7 @@ export function starBoom(parent: HTMLElement, sparks = 10): void {
   spawn(
     parent,
     ring,
-    anim(ring, [{ transform: 'scale(1)', opacity: 0.9 }, { transform: 'scale(2.6)', opacity: 0 }], {
+    anim(ring, [{ scale: '1', opacity: 0.9 }, { scale: '2.6', opacity: 0 }], {
       duration: 380,
       easing: CSS_EASE.out,
       fill: 'forwards',
@@ -48,9 +49,9 @@ export function starBoom(parent: HTMLElement, sparks = 10): void {
       anim(
         s,
         [
-          { transform: `translate(0,0) rotate(0) scale(${size})`, opacity: 1 },
-          { transform: `translate(calc(${dx * 0.75} * var(--u)), calc(${dy * 0.75} * var(--u))) rotate(110deg) scale(${size * 0.7})`, opacity: 1, offset: 0.6 },
-          { transform: `translate(calc(${dx} * var(--u)), calc(${dy} * var(--u))) rotate(180deg) scale(${size * 0.2})`, opacity: 0 },
+          { translate: '0 0', rotate: '0deg', scale: `${size}`, opacity: 1 },
+          { translate: `calc(${dx * 0.75} * var(--u)) calc(${dy * 0.75} * var(--u))`, rotate: '110deg', scale: `${size * 0.7}`, opacity: 1, offset: 0.6 },
+          { translate: `calc(${dx} * var(--u)) calc(${dy} * var(--u))`, rotate: '180deg', scale: `${size * 0.2}`, opacity: 0 },
         ],
         { duration: dur, easing: CSS_EASE.out, fill: 'forwards' },
       ),
@@ -76,9 +77,9 @@ export function confetti(parent: HTMLElement, n: number, spread = 1): void {
       anim(
         c,
         [
-          { transform: 'translate(0,0) rotate(0)', opacity: 1 },
-          { transform: `translate(calc(${x1} * var(--u)), calc(${y1} * var(--u))) rotate(${r * 0.4}deg)`, opacity: 1, offset: 0.35, easing: 'ease-in' },
-          { transform: `translate(calc(${x2} * var(--u)), calc(${y2} * var(--u))) rotate(${r}deg)`, opacity: 0 },
+          { translate: '0 0', rotate: '0deg', opacity: 1 },
+          { translate: `calc(${x1} * var(--u)) calc(${y1} * var(--u))`, rotate: `${r * 0.4}deg`, opacity: 1, offset: 0.35, easing: 'ease-in' },
+          { translate: `calc(${x2} * var(--u)) calc(${y2} * var(--u))`, rotate: `${r}deg`, opacity: 0 },
         ],
         { duration: 900 + Math.random() * 400, easing: CSS_EASE.out, fill: 'forwards' },
       ),

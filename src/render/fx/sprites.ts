@@ -336,10 +336,11 @@ export function puffSprite(color: string): number {
 /** Огненный шар взрыва (ядро светлое, край оранжевый). */
 export const SPR_FIRE = def(1, 1, 256, (ctx) => {
   const g = ctx.createRadialGradient(-0.15, -0.15, 0.02, 0, 0, 0.5);
+  // край мягче прежнего (0.92 → 0.86): на переходе в дым шар с частичной альфой не обводится видимым кругом
   g.addColorStop(0, '#FFF6C0');
   g.addColorStop(0.38, '#FFD04A');
-  g.addColorStop(0.78, '#FF9124');
-  g.addColorStop(0.92, 'rgba(255,110,26,0.9)');
+  g.addColorStop(0.74, '#FF9124');
+  g.addColorStop(0.86, 'rgba(255,110,26,0.78)');
   g.addColorStop(1, 'rgba(255,110,26,0)');
   ctx.fillStyle = g;
   ctx.beginPath();
@@ -347,10 +348,67 @@ export const SPR_FIRE = def(1, 1, 256, (ctx) => {
   ctx.fill();
 });
 
-/** Дым взрыва (серо-сиреневый, объём светом сверху-слева). */
-export const SPR_SMOKE = def(1, 1, 256, paintPuff('#C4BEC6', '#9C96A2', '#78727E', 0.95, 0.1));
-/** Тёмный дым (остаётся после взрыва). */
-export const SPR_SMOKE_DARK = def(1, 1, 256, paintPuff('#9A949C', '#76707A', '#5E5862', 0.9, 0.16));
+// ── Мягкий дым (плейтест №2, Б5) ─────────────────────────────────────────
+// Прежние клубы — круги с почти жёстким краем (спад на последних 10–16 % радиуса): полупрозрачные круги, лёжа
+// друг на друге, давали видимые «линзы» пересечений. Мягкий клуб: плотное ядро до половины радиуса и плавный спад
+// альфы к краю (≈ гауссиана), цвет — вертикальный градиент (свет сверху, тень снизу) с бликом сверху-слева.
+// Наложение таких клубов читается как один объёмный клуб AB2, а не как стопка кругов.
+
+/** Профиль альфы мягкого клуба: [доля радиуса, альфа]. */
+const SOFT_ALPHA: ReadonlyArray<readonly [number, number]> = [
+  [0, 1],
+  [0.48, 1],
+  [0.6, 0.95],
+  [0.7, 0.84],
+  [0.79, 0.63],
+  [0.87, 0.38],
+  [0.94, 0.14],
+  [1, 0],
+];
+
+function paintSoftPuff(top: string, mid: string, bottom: string, hi: string, hiAlpha: number) {
+  return (ctx: Ctx) => {
+    // 1) маска альфы: мягкий круг
+    const a = ctx.createRadialGradient(0, 0, 0, 0, 0, 0.5);
+    for (const [o, al] of SOFT_ALPHA) a.addColorStop(o, `rgba(255,255,255,${al})`);
+    ctx.fillStyle = a;
+    ctx.fillRect(-0.5, -0.5, 1, 1);
+    // 2) цвет по маске (source-in сохраняет альфу маски; bake() ограничил область ячейкой спрайта)
+    ctx.globalCompositeOperation = 'source-in';
+    const g = ctx.createLinearGradient(0, -0.5, 0, 0.5);
+    g.addColorStop(0, top);
+    g.addColorStop(0.5, mid);
+    g.addColorStop(1, bottom);
+    ctx.fillStyle = g;
+    ctx.fillRect(-0.5, -0.5, 1, 1);
+    // 3) блик сверху-слева — только там, где есть дым
+    ctx.globalCompositeOperation = 'source-atop';
+    const h = ctx.createRadialGradient(-0.13, -0.17, 0, -0.13, -0.17, 0.3);
+    h.addColorStop(0, rgba(hi, hiAlpha));
+    h.addColorStop(1, rgba(hi, 0));
+    ctx.fillStyle = h;
+    ctx.fillRect(-0.5, -0.5, 1, 1);
+    ctx.globalCompositeOperation = 'source-over';
+  };
+}
+
+/** Дым взрыва: тёплый угольно-серый (в него переходят огненные шары), мягкий край, свет сверху. */
+export const SPR_SMOKE = def(1, 1, 256, paintSoftPuff('#A99D97', '#7B706B', '#544A47', '#D6CBC4', 0.5));
+/** Тёмный дым — основание облака взрыва (остаётся дольше всех). */
+export const SPR_SMOKE_DARK = def(1, 1, 256, paintSoftPuff('#8A8388', '#625C62', '#433F45', '#B5AEB4', 0.45));
+/** Светлый дым — верх облака взрыва (рассеивается первым). */
+export const SPR_SMOKE_LIGHT = def(1, 1, 256, paintSoftPuff('#D2CDD1', '#ABA5AC', '#807A84', '#F4F1F4', 0.6));
+
+const softPuffIds = new Map<string, number>();
+/** Мягкое облачко заданного цвета (пыль взрыва у земли): без жёсткого края, тень снизу. */
+export function softPuffSprite(color: string): number {
+  let id = softPuffIds.get(color);
+  if (id === undefined) {
+    id = def(1, 1, 256, paintSoftPuff(mixHex(color, '#FFFFFF', 0.3), color, mixHex(color, '#000000', 0.25), '#FFFFFF', 0.35));
+    softPuffIds.set(color, id);
+  }
+  return id;
+}
 
 // ── Кэш: спрайты упакованы в страницы-атласы ─────────────────────────────
 // Все частицы берутся из 1–2 общих текстур: подряд идущие drawImage не меняют источник,
@@ -391,21 +449,105 @@ class AtlasPage {
   }
 }
 
+/** Ступень размера ci для отрисовки размером px (на единицу спрайта): P = ⌈2^(ci/2)⌉ ≥ px, не мельче 4 px. */
+export function sizeStep(px: number): number {
+  const ci = Math.ceil(2 * Math.log2(px > 4 ? px : 4));
+  return ci < MIN_CI ? MIN_CI : ci;
+}
+
+/** Размер P (пикселей на единицу спрайта) ступени ci. */
+export function stepPx(ci: number): number {
+  return Math.ceil(2 ** (ci / 2));
+}
+
+/** Самая мелкая ступень размера (P = 4 px). */
+export const MIN_SIZE_STEP = MIN_CI;
+
 export class FxSprites {
+  // ключ — id · 32 + ci (fxWarm до перехода на bakedSteps() читает это поле напрямую — формат не менять)
   private readonly cache = new Map<number, BakedSprite>();
   private readonly pages: AtlasPage[] = [];
+  /**
+   * Наибольшая ступень, запрошенная отрисовкой (get / bakeStep), по id — опора fillSteps (сам он её не двигает).
+   * Плотный массив, а не Map: get() вызывается на каждую частицу в кадре.
+   */
+  private readonly demandTop: number[] = [];
 
   /** Спрайт id, запечённый под отрисовку размером px пикселей (на единицу спрайта). */
   get(id: number, px: number): BakedSprite {
+    return this.step(id, sizeStep(px), true);
+  }
+
+  /**
+   * Спрайт id на ступени размера ci (ограничивается снизу 4 px и сверху maxP спрайта); запекает, если ещё нет.
+   * Для прогрева: допечь ступени заранее, чтобы в игре не менялась страница атласа.
+   */
+  bakeStep(id: number, ci: number): BakedSprite {
+    return this.step(id, ci, true);
+  }
+
+  /** Наибольшая ступень размера спрайта id (по его maxP); −1 — нет такого спрайта. */
+  maxStep(id: number): number {
     const d = defs[id];
-    let ci = Math.ceil(2 * Math.log2(px > 4 ? px : 4));
-    if (ci < MIN_CI) ci = MIN_CI;
+    return d ? Math.floor(2 * Math.log2(d.maxP)) : -1;
+  }
+
+  /** Запечена ли ступень ci спрайта id (без запекания). */
+  hasStep(id: number, ci: number): boolean {
+    return this.cache.has(id * 32 + ci);
+  }
+
+  /** Запечённые ступени: id спрайта → ступени размера ci по возрастанию (P = ⌈2^(ci/2)⌉). Новая карта на каждый вызов. */
+  bakedSteps(): Map<number, number[]> {
+    const out = new Map<number, number[]>();
+    for (const key of this.cache.keys()) {
+      const id = Math.floor(key / 32);
+      const ci = key % 32;
+      const l = out.get(id);
+      if (l) l.push(ci);
+      else out.set(id, [ci]);
+    }
+    for (const l of out.values()) l.sort((a, b) => a - b);
+    return out;
+  }
+
+  /**
+   * Число описанных спрайтов: id идут подряд с 0 до defCount − 1. Растёт, когда эффекты впервые просят облачко
+   * нового цвета (puffSprite / softPuffSprite), — прогрев вызывать после проигрыша пробных событий.
+   */
+  get defCount(): number {
+    return defs.length;
+  }
+
+  /**
+   * Прогрев ступеней (то, что делал fxWarm через приватное поле): каждому спрайту, который уже рисовался (get /
+   * bakeStep), — все ступени от самой мелкой до наибольшей запрошенной + above; всем остальным описанным спрайтам —
+   * ступени до smallMax (по умолчанию 10, P ≤ 32 px). Сам на «запрошенные» ступени не влияет: повторный вызов
+   * без новых отрисовок ничего не печёт. Возвращает, сколько спрайтов запечено этим вызовом.
+   */
+  fillSteps(opts: { above?: number; smallMax?: number } = {}): number {
+    const above = opts.above ?? 2;
+    const smallMax = opts.smallMax ?? 10;
+    const before = this.cache.size;
+    for (let id = 0; id < defs.length; id++) {
+      const top = this.demandTop[id];
+      const hi = Math.min(this.maxStep(id), Math.max(top !== undefined ? top + above : 0, smallMax));
+      for (let ci = MIN_CI; ci <= hi; ci++) this.step(id, ci, false);
+    }
+    return this.cache.size - before;
+  }
+
+  private step(id: number, ci: number, demand: boolean): BakedSprite {
+    const d = defs[id];
+    if (!d) throw new RangeError(`нет спрайта эффекта с id ${id}`);
     const maxCi = Math.floor(2 * Math.log2(d.maxP));
     if (ci > maxCi) ci = maxCi;
+    if (ci < MIN_CI) ci = MIN_CI;
+    if (demand && !(this.demandTop[id] >= ci)) this.demandTop[id] = ci;
     const key = id * 32 + ci;
     let s = this.cache.get(key);
     if (!s) {
-      s = this.bake(d, Math.ceil(2 ** (ci / 2)));
+      s = this.bake(d, stepPx(ci));
       this.cache.set(key, s);
     }
     return s;
@@ -429,6 +571,7 @@ export class FxSprites {
   clear(): void {
     this.cache.clear();
     this.pages.length = 0;
+    this.demandTop.length = 0;
   }
 
   private bake(d: SpriteDef, P: number): BakedSprite {
