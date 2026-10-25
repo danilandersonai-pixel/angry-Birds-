@@ -1,8 +1,9 @@
-// HUD уровня (07 §10): пауза и рестарт слева сверху, рекорд и счёт справа, счётчик свиней, плашка уровня.
+// HUD уровня (07 §10): пауза и рестарт слева сверху, рекорд и счёт справа, счётчик свиней, плашка уровня,
+// кнопка «К рогатке» с числом птиц (слева по центру) и подпись «Коснитесь, чтобы пропустить» (внизу).
 
 import type { LevelDef } from '../../core/types';
 import { characterCanvas } from '../art';
-import { anim, motion } from '../anim';
+import { anim, motion, popIn, popOut } from '../anim';
 import type { UiCtx, View } from '../ctx';
 import { button, focusEl, h } from '../dom';
 import { S, fmt, t } from '../strings';
@@ -26,12 +27,19 @@ export class HudView implements View {
   private readonly pigsEl: HTMLElement;
   private readonly pigsNum: HTMLElement;
   private readonly levelEl: HTMLElement;
+  private readonly homeWrap: HTMLElement | null = null;
+  private readonly homeBadge: HTMLElement | null = null;
+  private readonly homeBtn: HTMLButtonElement | null = null;
+  private readonly skipEl: HTMLElement;
+  private homeOn = false;
   private target = 0;
   private shown = 0;
   private lastTxt = '';
   private raf = 0;
   private last = 0;
   private levelTimer = 0;
+  /** Что уже отрисовано в статичной части (рекорд, свиньи, птицы): updateHud зовут каждый кадр — без изменений DOM не трогаем. */
+  private drawn = { best: -1, pigs: -1, birds: -1 };
   state: HudState = { score: 0, best: 0, birdsLeft: 0, pigsLeft: 0 };
 
   constructor(
@@ -39,6 +47,7 @@ export class HudView implements View {
     readonly level: LevelDef,
     onPause: () => void,
     onRestart: () => void,
+    onHome?: () => void,
   ) {
     this.key = level.id;
     this.pauseBtn = button({ color: 'blue', size: 's', icon: 'pause', label: S.hudPause, testid: 'hud-pause', onClick: onPause });
@@ -57,12 +66,24 @@ export class HudView implements View {
       h('span', { class: 'num ts', text: level.id }),
       h('span', { class: 'nm ts', text: level.name }),
     );
+    if (onHome) {
+      const home = button({ color: 'blue', size: 's', icon: 'sling', label: S.hudToSling, testid: 'hud-home', onClick: onHome });
+      home.addEventListener('pointerdown', (e) => e.stopPropagation());
+      this.homeBadge = h('span', { class: 'home-badge num ts', 'aria-hidden': 'true', text: '0' });
+      home.append(this.homeBadge);
+      this.homeWrap = h('div', { class: 'hud-home is-hidden' }, home);
+      this.homeBtn = home;
+      home.tabIndex = -1;
+    }
+    this.skipEl = h('div', { class: 'hud-skip ts is-hidden', 'aria-hidden': 'true', 'data-testid': 'hud-skip', text: S.hudSkip });
     this.el = h(
       'div',
       { class: 'hud', role: 'region', 'aria-label': `${level.id} ${level.name}` },
       h('div', { class: 'hud-left' }, this.pauseBtn, this.restartBtn),
       this.levelEl,
       h('div', { class: 'hud-right' }, this.bestEl, this.scoreEl, this.pigsEl),
+      this.homeWrap,
+      this.skipEl,
     );
     const rec = ctx.deps.progress.record(level.id);
     this.state.best = rec?.best ?? 0;
@@ -99,6 +120,27 @@ export class HudView implements View {
   setDim(on: boolean): void {
     this.el.classList.toggle('is-dim', on);
     if (on) this.hideLevelLabel();
+  }
+
+  /** Кнопка «К рогатке» (07 §10.1): pop-in при появлении. */
+  setHome(on: boolean): void {
+    const w = this.homeWrap;
+    if (!w || on === this.homeOn) return;
+    this.homeOn = on;
+    if (this.homeBtn) this.homeBtn.tabIndex = on ? 0 : -1;
+    if (on) {
+      w.classList.remove('is-hidden');
+      popIn(w);
+    } else {
+      const a = popOut(w);
+      if (a) a.finished.then(() => !this.homeOn && w.classList.add('is-hidden'), () => undefined);
+      else w.classList.add('is-hidden');
+    }
+  }
+
+  /** Подпись «Коснитесь, чтобы пропустить» (интро). */
+  setSkip(on: boolean): void {
+    this.skipEl.classList.toggle('is-hidden', !on);
   }
 
   hideLevelLabel(): void {
@@ -153,19 +195,29 @@ export class HudView implements View {
   }
 
   private renderStatic(): void {
-    const best = this.state.best;
-    this.bestEl.style.visibility = best > 0 ? 'visible' : 'hidden';
-    const bt = fmt(best);
-    if (this.bestNum.textContent !== bt) this.bestNum.textContent = bt;
-    const pigs = String(Math.max(0, this.state.pigsLeft));
-    if (this.pigsNum.textContent !== pigs) {
-      this.pigsNum.textContent = pigs;
+    if (this.lastTxt === '') this.renderScore();
+    const best = Math.max(0, Math.floor(this.state.best));
+    const pigs = Math.max(0, this.state.pigsLeft);
+    const birds = Math.max(0, this.state.birdsLeft);
+    const d = this.drawn;
+    if (best === d.best && pigs === d.pigs && birds === d.birds) return; // кадр без изменений — DOM не трогаем
+    if (best !== d.best) {
+      this.bestEl.style.visibility = best > 0 ? 'visible' : 'hidden';
+      this.bestNum.textContent = fmt(best);
+    }
+    if (pigs !== d.pigs) {
+      this.pigsNum.textContent = String(pigs);
       this.pigsEl.setAttribute('aria-label', t('hudPigs', { n: pigs }));
-      if (!motion.reduced && this.lastTxt !== '')
+      this.pigsEl.classList.toggle('is-zero', pigs <= 0);
+      if (d.pigs >= 0 && !motion.reduced)
         anim(this.pigsEl, [{ transform: 'scale(1)' }, { transform: 'scale(1.18)' }, { transform: 'scale(1)' }], { duration: 220 });
     }
-    this.pigsEl.classList.toggle('is-zero', this.state.pigsLeft <= 0);
-    if (this.lastTxt === '') this.renderScore();
+    if (birds !== d.birds && this.homeBadge) {
+      this.homeBadge.textContent = String(birds);
+      this.homeBadge.classList.toggle('is-empty', birds <= 0);
+      this.homeBtn?.setAttribute('aria-label', `${S.hudToSling}. ${t('hudBirds', { n: birds })}`);
+    }
+    this.drawn = { best, pigs, birds };
   }
 
   destroy(): void {

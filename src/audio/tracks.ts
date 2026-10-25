@@ -1,6 +1,8 @@
-// Музыкальные треки движка: 'menu' — полька, 'level' — тихий эмбиент + «постель» фона темы
-// (ветер и птички луга, прибой и чайки пляжа, вьюга снега). Плавный вход/выход для кроссфейда.
-// Живой режим — lookahead-секвенсор с таймерами; офлайн-режим (untilS) — всё планируется сразу.
+// Музыкальные треки движка: 'menu' — полька; 'level' — только «постель» фона темы
+// (ветер и птички луга, прибой и чайки пляжа, вьюга снега): в уровне музыки нет (00-summary №14, №32;
+// 05-audio §0.9) — звук разрушений главная награда. Тихий луп «Тихая лужайка» — P2, за флагом LEVEL_MUSIC.
+// Плавный вход/выход для кроссфейда. Живой режим — lookahead-секвенсор с таймерами;
+// офлайн-режим (untilS) — всё планируется сразу.
 
 import type { ThemeId } from '../core/types';
 import * as M from './music';
@@ -10,12 +12,20 @@ import { beginCollect, endCollect } from './synth';
 
 export type TrackId = 'menu' | 'level';
 
-/** Уровень трека на шине music: эмбиент уровня тише польки (не маскирует разрушения). */
-export const TRACK_GAIN: Readonly<Record<TrackId, number>> = { menu: 0.8, level: 0.35 };
+/**
+ * Уровень трека на шине music. Полька 0.45 (−5 дБ к прежним 0.8): медиана RMS 100 мс ≈ −25 dBFS на выходе,
+ * кнопки меню (≈ −20 dBFS) звучат над ней на ~5 дБ. Луп уровня (P2) тише польки — не маскирует разрушения.
+ */
+export const TRACK_GAIN: Readonly<Record<TrackId, number>> = { menu: 0.45, level: 0.35 };
+
+/** P2: тихий музыкальный луп в уровне поверх фона темы (00-summary §3.2). По умолчанию выключен. */
+export const LEVEL_MUSIC = false;
 
 export interface TrackHandle {
   readonly id: TrackId;
   readonly theme: ThemeId;
+  /** Звучит ли музыка (оркестр и секвенсор); false — только фон темы. */
+  readonly music: boolean;
   /** Плавно погасить за fadeS и освободить узлы. */
   stop(fadeS: number): void;
 }
@@ -29,6 +39,8 @@ export interface TrackOpts {
   untilS?: number;
   timers?: M.Timers;
   rnd?: () => number;
+  /** Для 'level': играть ли музыкальный луп поверх фона (по умолчанию LEVEL_MUSIC). */
+  levelMusic?: boolean;
 }
 
 const realTimers: M.Timers = {
@@ -57,16 +69,25 @@ export function startTrack(
     return g;
   };
 
-  const song = M.SONGS[id];
-  const mg = fadeGain(musicDest, TRACK_GAIN[id]);
-  const band = M.createBand(ctx, nb, mg, song.stepS, at);
-  const seq = new M.Sequencer(ctx, song, (e, t, st) => {
-    M.playEv(band, e, t, st);
-  }, timers);
-  if (opts.untilS !== undefined) {
-    seq.reset(at);
-    seq.scheduleUntil(at + opts.untilS);
-  } else seq.start(at);
+  // Оркестр и секвенсор создаются только там, где музыка звучит: в уровне (без P2-лупа) — ни узлов, ни таймеров.
+  const withMusic = id === 'menu' || (opts.levelMusic ?? LEVEL_MUSIC);
+  let mg: GainNode | null = null;
+  let band: M.Band | null = null;
+  let seq: M.Sequencer | null = null;
+  if (withMusic) {
+    const song = M.SONGS[id];
+    mg = fadeGain(musicDest, TRACK_GAIN[id]);
+    const b = M.createBand(ctx, nb, mg, song.stepS, at);
+    band = b;
+    const sq = new M.Sequencer(ctx, song, (e, t, st) => {
+      M.playEv(b, e, t, st);
+    }, timers);
+    seq = sq;
+    if (opts.untilS !== undefined) {
+      sq.reset(at);
+      sq.scheduleUntil(at + opts.untilS);
+    } else sq.start(at);
+  }
 
   // Фон темы уровня: одна длинная «постель» + редкие события (трели, чайки).
   let ag: GainNode | null = null;
@@ -105,6 +126,7 @@ export function startTrack(
   return {
     id,
     theme,
+    music: withMusic,
     stop(fadeS: number): void {
       if (stopped) return;
       stopped = true;
@@ -126,10 +148,10 @@ export function startTrack(
       }
       // Секвенсор играет до конца фейда (иначе кроссфейд оборвётся), потом всё освобождаем.
       timers.set(() => {
-        seq.stop();
-        band.dispose(ctx.currentTime + 0.05);
+        seq?.stop();
+        band?.dispose(ctx.currentTime + 0.05);
         timers.set(() => {
-          mg.disconnect();
+          mg?.disconnect();
           ag?.disconnect();
         }, 300);
       }, f * 1000 + 50);

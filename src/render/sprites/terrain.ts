@@ -1,12 +1,14 @@
 // Рельеф уровня в мировых координатах: грунт с кромкой (трава / песок / снег), скалы, помосты.
-// Геометрия (Path2D, цепочки верхних рёбер, травинки, шапки) строится ОДИН раз на TerrainDef и кэшируется;
-// каждый кадр — несколько fill/stroke в мировой трансформации. Текстуры — бесшовные тайлы, привязанные к миру.
-// Здесь же — общие цветовые и шумовые хелперы фона (background.ts импортирует их отсюда).
+// Геометрия (Path2D: контур, кромка, фестоны, травинки, снежные шапки) строится ОДИН раз на TerrainDef и тему;
+// кромка нарезана на куски ≈ 6 м вдоль цепочки верхних рёбер — каждый кадр рисуются только видимые куски.
+// Текстуры — бесшовные тайлы, привязанные к миру (createPattern + setTransform в метрах).
+// При неподвижном зуме рельеф рисуется из кэша пиксельно выровненных тайлов 256×256 (blit 1:1),
+// пока зум меняется — векторно. Здесь же — общие цветовые и шумовые хелперы фона (background.ts импортирует их).
 
 import type { TerrainDef, ThemeId } from '../../core/types';
 import { Rng } from '../../core/rng';
 import { createCanvas, ctx2d, type AnyCanvas, type Ctx2D } from '../canvas';
-import { applyWorldTransform, type ViewInfo } from '../view';
+import type { ViewInfo } from '../view';
 
 // ───────────────────────── общие хелперы ─────────────────────────
 
@@ -388,6 +390,37 @@ interface Chain {
   en: P2[];
 }
 
+/** Кусок кромки (≈ PIECE_M м вдоль цепочки) — каждый кадр рисуются только куски, попавшие в вид. */
+interface Piece {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  /** Цепочка верхних рёбер (с нахлёстом PIECE_OV на соседей). */
+  chain: Path2D;
+  /** Тело кромки: от поверхности (с запасом наружу) до фестончатого нижнего края. */
+  band: Path2D;
+  highlight: Path2D;
+  /** Травинки (два прохода) или снежная шапка. */
+  bladesBack: Path2D | null;
+  bladesFront: Path2D | null;
+  capFill: Path2D | null;
+  capLine: Path2D | null;
+}
+
+/** Объединение видимых кусков (кэшируется, пока набор кусков не меняется). */
+interface Vis {
+  key: string;
+  chain: Path2D;
+  /** Тело кромки: от поверхности (с запасом наружу) до фестончатого нижнего края. */
+  band: Path2D;
+  highlight: Path2D;
+  bladesBack: Path2D | null;
+  bladesFront: Path2D | null;
+  capFill: Path2D | null;
+  capLine: Path2D | null;
+}
+
 interface Geo {
   path: Path2D;
   minX: number;
@@ -397,17 +430,11 @@ interface Geo {
   chains: Chain[];
   /** Самая низкая верхняя поверхность — от неё считается затемнение грунта вглубь. */
   surfaceY: number;
-  chainPath: Path2D;
   /** Отдельные рёбра по сторонам (для теней скал). */
   shadeEdges: Path2D;
   edgeT: number;
-  scallops: Path2D;
-  highlight: Path2D;
-  /** Травинки (два прохода) или снежные шапки. */
-  bladesBack: Path2D | null;
-  bladesFront: Path2D | null;
-  capFill: Path2D | null;
-  capLine: Path2D | null;
+  pieces: Piece[];
+  vis: Vis | null;
   cracks: Path2D | null;
   /** Помост: швы, стыки, скобы. */
   deck: DeckGeo | null;
@@ -517,7 +544,7 @@ function walkChain(
   step: () => number,
   start: number,
   cb: (x: number, y: number, nx: number, ny: number, tx: number, ty: number) => void,
-): void {
+): number {
   let carry = start;
   for (let i = 0; i < ch.en.length; i++) {
     const a = ch.pts[i];
@@ -533,6 +560,113 @@ function walkChain(
     }
     carry = s - len;
   }
+  return carry;
+}
+
+/** Длина дуги цепочки до каждой вершины. */
+function chainCum(ch: Chain): number[] {
+  const cum = [0];
+  for (let i = 0; i < ch.en.length; i++) cum.push(cum[i] + Math.hypot(ch.pts[i + 1][0] - ch.pts[i][0], ch.pts[i + 1][1] - ch.pts[i][1]));
+  return cum;
+}
+
+/** Часть цепочки по длине дуги [s0, s1] (концы — на рёбрах, нормали рёбер сохраняются). */
+function subChain(ch: Chain, cum: number[], s0: number, s1: number): Chain {
+  const pts: P2[] = [];
+  const en: P2[] = [];
+  for (let i = 0; i < ch.en.length; i++) {
+    const a = cum[i];
+    const b = cum[i + 1];
+    if (b <= s0 || a >= s1 || b - a < 1e-9) continue;
+    const t0 = Math.max(0, (s0 - a) / (b - a));
+    const t1 = Math.min(1, (s1 - a) / (b - a));
+    const p = ch.pts[i];
+    const q = ch.pts[i + 1];
+    if (!pts.length) pts.push([lerp(p[0], q[0], t0), lerp(p[1], q[1], t0)]);
+    pts.push([lerp(p[0], q[0], t1), lerp(p[1], q[1], t1)]);
+    en.push(ch.en[i]);
+  }
+  return { pts, en };
+}
+
+/** Границы кусков по длине дуги; разрезы отодвинуты от вершин (там сдвинутые линии кусков расходились бы). */
+function pieceCuts(cum: number[], total: number): number[] {
+  const n = Math.max(1, Math.round(total / PIECE_M));
+  const cuts = [0];
+  for (let k = 1; k < n; k++) {
+    let c = (k / n) * total;
+    for (let i = 1; i < cum.length - 1; i++) {
+      const v = cum[i];
+      if (Math.abs(c - v) < 0.3) {
+        const lo = Math.min(cum[i + 1], v + 0.3);
+        const hi = Math.max(cum[i - 1], v - 0.3);
+        c = c >= v && lo - v >= 0.3 ? lo : v - hi >= 0.3 ? hi : c;
+      }
+    }
+    if (c > cuts[cuts.length - 1] + 0.5 && c < total - 0.5) cuts.push(c);
+  }
+  cuts.push(total);
+  return cuts;
+}
+
+/** Внешний (бугристый) контур снежной шапки вдоль цепочки; s0 — длина дуги начала куска в исходной цепочке. */
+function capOutline(ch: Chain, s0: number, bumpH: (s: number) => number): P2[] {
+  const outer: P2[] = [];
+  let acc = s0;
+  for (let i = 0; i < ch.en.length; i++) {
+    const a = ch.pts[i];
+    const b = ch.pts[i + 1];
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (len < 1e-6) continue;
+    const tx = (b[0] - a[0]) / len;
+    const ty = (b[1] - a[1]) / len;
+    const [vnx, vny] = vertexNormal(ch, i);
+    const h0 = bumpH(acc);
+    outer.push([a[0] + vnx * h0, a[1] + vny * h0]);
+    const n = Math.max(1, Math.ceil(len / 0.04));
+    for (let k = 1; k < n; k++) {
+      const s = (k / n) * len;
+      const h = bumpH(acc + s);
+      outer.push([a[0] + tx * s + ch.en[i][0] * h, a[1] + ty * s + ch.en[i][1] * h]);
+    }
+    acc += len;
+  }
+  const [enx, eny] = vertexNormal(ch, ch.pts.length - 1);
+  const he = bumpH(acc);
+  const pe = ch.pts[ch.pts.length - 1];
+  outer.push([pe[0] + enx * he, pe[1] + eny * he]);
+  return outer;
+}
+
+/** Нижний (фестончатый) край кромки на участке [s0, s1] цепочки: точка поверхности − нормаль · depth(s). */
+function bandLower(ch: Chain, cum: number[], s0: number, s1: number, depth: (s: number) => number): P2[] {
+  const out: P2[] = [];
+  const STEP = 0.03;
+  for (let i = 0; i < ch.en.length; i++) {
+    const a = cum[i];
+    const b = cum[i + 1];
+    if (b <= s0 || a >= s1 || b - a < 1e-9) continue;
+    const p = ch.pts[i];
+    const q = ch.pts[i + 1];
+    const [nx, ny] = ch.en[i];
+    const u0 = Math.max(a, s0);
+    const u1 = Math.min(b, s1);
+    // внутренняя вершина: точка по средней нормали с «митрой»
+    if (u0 === a && i > 0) {
+      const [vx, vy, m] = vertexNormal(ch, i);
+      const d = depth(a) * m;
+      out.push([p[0] - vx * d, p[1] - vy * d]);
+    }
+    const n = Math.max(1, Math.ceil((u1 - u0) / STEP));
+    for (let k = u0 === a && i > 0 ? 1 : 0; k <= n; k++) {
+      const u = u0 + ((u1 - u0) * k) / n;
+      if (u === b && i < ch.en.length - 1) break; // вершину добавит следующее ребро
+      const t = (u - a) / (b - a);
+      const d = depth(u);
+      out.push([lerp(p[0], q[0], t) - nx * d, lerp(p[1], q[1], t) - ny * d]);
+    }
+  }
+  return out;
 }
 
 function polyPath(pts: ReadonlyArray<readonly [number, number]>, close: boolean, into?: Path2D): Path2D {
@@ -547,7 +681,16 @@ function edgeThickness(edge: GroundPalette['edge']): number {
   return edge === 'snow' ? 0.4 : edge === 'sand' ? 0.3 : 0.34;
 }
 
+/** Длина куска кромки вдоль цепочки, м, и нахлёст линий между соседними кусками. */
+const PIECE_M = 6;
+const PIECE_OV = 0.05;
+/** Запас габарита куска: травинки/шапка наружу, кромка и «гребешки» внутрь. */
+const PIECE_PAD = 0.8;
+
 const geoCache = new WeakMap<TerrainDef, Map<ThemeId, Geo>>();
+
+/** Отладка: колбэк после каждой фазы отрисовки грунта (замер растеризации в предпросмотре). */
+export const TERRAIN_PROBE: { phase: ((label: string) => void) | null } = { phase: null };
 
 function getGeo(t: TerrainDef, theme: ThemeId): Geo {
   let m = geoCache.get(t);
@@ -584,9 +727,6 @@ function buildGeo(t: TerrainDef, theme: ThemeId): Geo {
   for (const ch of chains) for (const p of ch.pts) surfaceY = Math.min(surfaceY, p[1]);
   if (!chains.length) surfaceY = maxY;
 
-  const chainPath = new Path2D();
-  for (const ch of chains) polyPath(ch.pts, false, chainPath);
-
   // кромка зависит от вида рельефа
   const kind = t.kind;
   const edgeKind: GroundPalette['edge'] | 'moss' | 'none' =
@@ -600,96 +740,114 @@ function buildGeo(t: TerrainDef, theme: ThemeId): Geo {
             ? 'moss'
             : 'none';
   const T = kind === 'ground' ? edgeThickness(P.ground.edge) : edgeKind === 'snow' ? 0.26 : edgeKind === 'moss' ? 0.14 : 0;
+  const blades = edgeKind === 'grass' || edgeKind === 'moss';
+  const bladeSc = edgeKind === 'moss' ? 0.6 : 1;
+  const capSc = kind === 'ground' ? 1 : 0.8;
 
-  // фестончатый нижний край кромки
-  const scallops = new Path2D();
-  const highlight = new Path2D();
-  if (T > 0) {
-    for (const ch of chains) {
-      let k = 0;
-      walkChain(ch, () => lerp(0.17, 0.26, r()), 0.05, (x, y, nx, ny) => {
-        const rad = (k++ % 2 ? 0.085 : 0.115) * (T / 0.34) * lerp(0.85, 1.15, r());
-        const d = T - rad * 0.35;
-        scallops.moveTo(x - nx * d + rad, y - ny * d);
-        scallops.arc(x - nx * d, y - ny * d, rad, 0, TAU);
-      });
-      polyPath(offsetChain(ch, Math.min(0.075, T * 0.3)), false, highlight);
-    }
-  }
-
-  // травинки / шапки поверх обводки
-  let bladesBack: Path2D | null = null;
-  let bladesFront: Path2D | null = null;
-  let capFill: Path2D | null = null;
-  let capLine: Path2D | null = null;
-  if (edgeKind === 'grass' || edgeKind === 'moss') {
-    bladesBack = new Path2D();
-    bladesFront = new Path2D();
-    const sc = edgeKind === 'moss' ? 0.6 : 1;
-    for (const ch of chains) {
-      walkChain(ch, () => lerp(0.06, 0.16, r()) * (r() < 0.12 ? 3 : 1), 0.04, (x, y, nx, ny, tx, ty) => {
-        const back = r() < 0.5;
-        const h = lerp(0.08, back ? 0.2 : 0.15, r()) * sc;
-        const lean = (r() - 0.45) * 0.09 * sc;
-        const bw = lerp(0.03, 0.045, r()) * sc;
-        const P2 = back ? bladesBack! : bladesFront!;
-        const bx = x - nx * 0.03;
-        const by = y - ny * 0.03;
-        P2.moveTo(bx - tx * bw, by - ty * bw);
-        P2.quadraticCurveTo(bx + nx * h * 0.6 - tx * bw * 0.2, by + ny * h * 0.6 - ty * bw * 0.2, bx + nx * h + tx * lean, by + ny * h + ty * lean);
-        P2.quadraticCurveTo(bx + nx * h * 0.5 + tx * bw * 0.6, by + ny * h * 0.5 + ty * bw * 0.6, bx + tx * bw, by + ty * bw);
-        P2.closePath();
-      });
-    }
-  } else if (edgeKind === 'snow') {
-    // снежная «подушка»: бугристый внешний контур (обводится) + заливка до кромки
-    capFill = new Path2D();
-    capLine = new Path2D();
-    const sc = kind === 'ground' ? 1 : 0.8;
-    for (const ch of chains) {
-      // бугры вдоль цепочки
-      let total = 0;
-      for (let i = 0; i < ch.en.length; i++) total += Math.hypot(ch.pts[i + 1][0] - ch.pts[i][0], ch.pts[i + 1][1] - ch.pts[i][1]);
-      const bumps: Array<[number, number, number]> = [];
+  // кромка режется на куски вдоль цепочек: каждый кадр рисуются только видимые
+  const pieces: Piece[] = [];
+  for (const ch of chains) {
+    const cum = chainCum(ch);
+    const total = cum[cum.length - 1];
+    if (total < 1e-6) continue;
+    // бугры снежной шапки — на всю цепочку сразу (непрерывны через границы кусков)
+    const bumps: Array<[number, number, number]> = [];
+    if (edgeKind === 'snow') {
       for (let s = lerp(0.1, 0.3, r()); s < total - 0.05; s += lerp(0.32, 0.62, r())) {
-        bumps.push([s, lerp(0.12, 0.22, r()) * sc, lerp(0.45, 0.7, r())]);
+        bumps.push([s, lerp(0.12, 0.22, r()) * capSc, lerp(0.45, 0.7, r())]);
       }
-      const bumpH = (s: number): number => {
-        let h = 0;
-        for (const [c, rad, k] of bumps) {
-          const u = (s - c) / rad;
-          if (u > -1 && u < 1) h = Math.max(h, rad * k * Math.sqrt(1 - u * u));
-        }
-        // к концам цепочки шапка сходит на нет
-        return h * smooth(clamp(Math.min(s, total - s) / 0.25, 0, 1)) + 0.012;
+    }
+    const bumpH = (s: number): number => {
+      let h = 0;
+      for (const [c, rad, k] of bumps) {
+        const u = (s - c) / rad;
+        if (u > -1 && u < 1) h = Math.max(h, rad * k * Math.sqrt(1 - u * u));
+      }
+      // к концам цепочки шапка сходит на нет
+      return h * smooth(clamp(Math.min(s, total - s) / 0.25, 0, 1)) + 0.012;
+    };
+    // фестоны нижнего края кромки: круги (s, r) вдоль всей цепочки; глубина края — их огибающая
+    const scal: Array<[number, number]> = [];
+    if (T > 0) {
+      let q = 0;
+      for (let s = 0.05; s < total; s += lerp(0.17, 0.26, r())) scal.push([s, (q++ % 2 ? 0.085 : 0.115) * (T / 0.34) * lerp(0.85, 1.15, r())]);
+    }
+    let j0 = 0;
+    const depthAt = (u: number): number => {
+      // u растёт внутри куска; между кусками — сброс указателя назад
+      while (j0 > 0 && scal[j0 - 1][0] > u - 0.2) j0--;
+      while (j0 < scal.length && scal[j0][0] < u - 0.2) j0++;
+      let d = T;
+      for (let j = j0; j < scal.length && scal[j][0] < u + 0.2; j++) {
+        const [c, rad] = scal[j];
+        const du = u - c;
+        if (du > -rad && du < rad) d = Math.max(d, T - 0.35 * rad + Math.sqrt(rad * rad - du * du));
+      }
+      return d;
+    };
+    const cuts = pieceCuts(cum, total);
+    let carryB = 0.04;
+    for (let k = 0; k + 1 < cuts.length; k++) {
+      const sub = subChain(ch, cum, cuts[k], cuts[k + 1]);
+      const o0 = Math.max(0, cuts[k] - PIECE_OV);
+      const subO = subChain(ch, cum, o0, Math.min(total, cuts[k + 1] + PIECE_OV));
+      if (sub.pts.length < 2 || subO.pts.length < 2) continue;
+      let x0 = Infinity;
+      let x1 = -Infinity;
+      let y0 = Infinity;
+      let y1 = -Infinity;
+      for (const [x, y] of subO.pts) {
+        x0 = Math.min(x0, x);
+        x1 = Math.max(x1, x);
+        y0 = Math.min(y0, y);
+        y1 = Math.max(y1, y);
+      }
+      const pc: Piece = {
+        minX: x0 - PIECE_PAD,
+        maxX: x1 + PIECE_PAD,
+        minY: y0 - PIECE_PAD,
+        maxY: y1 + PIECE_PAD,
+        chain: polyPath(subO.pts, false),
+        band: new Path2D(),
+        highlight: new Path2D(),
+        bladesBack: null,
+        bladesFront: null,
+        capFill: null,
+        capLine: null,
       };
-      const outer: P2[] = [];
-      let acc = 0;
-      for (let i = 0; i < ch.en.length; i++) {
-        const a = ch.pts[i];
-        const b = ch.pts[i + 1];
-        const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
-        if (len < 1e-6) continue;
-        const tx = (b[0] - a[0]) / len;
-        const ty = (b[1] - a[1]) / len;
-        const [vnx, vny] = vertexNormal(ch, i);
-        const h0 = bumpH(acc);
-        outer.push([a[0] + vnx * h0, a[1] + vny * h0]);
-        const n = Math.max(1, Math.ceil(len / 0.04));
-        for (let k = 1; k < n; k++) {
-          const s = (k / n) * len;
-          const h = bumpH(acc + s);
-          outer.push([a[0] + tx * s + ch.en[i][0] * h, a[1] + ty * s + ch.en[i][1] * h]);
-        }
-        acc += len;
+      if (T > 0) {
+        // тело кромки одним многоугольником: верх — поверхность с запасом наружу (лишнее режет клип полигона),
+        // низ — фестоны (огибающая кругов вдоль цепочки)
+        const lower = bandLower(ch, cum, o0, Math.min(total, cuts[k + 1] + PIECE_OV), depthAt);
+        polyPath(offsetChain(subO, -0.12).concat(lower.reverse()), true, pc.band);
+        polyPath(offsetChain(subO, Math.min(0.075, T * 0.3)), false, pc.highlight);
       }
-      const [enx, eny] = vertexNormal(ch, ch.pts.length - 1);
-      const he = bumpH(acc);
-      const pe = ch.pts[ch.pts.length - 1];
-      outer.push([pe[0] + enx * he, pe[1] + eny * he]);
-      polyPath(outer, false, capLine);
-      const inner = offsetChain(ch, 0.035).reverse();
-      polyPath(outer.concat(inner), true, capFill);
+      if (blades) {
+        // травинки поверх обводки (два прохода: задние темнее)
+        const back = new Path2D();
+        const front = new Path2D();
+        carryB = walkChain(sub, () => lerp(0.06, 0.16, r()) * (r() < 0.12 ? 3 : 1), carryB, (x, y, nx, ny, tx, ty) => {
+          const isBack = r() < 0.5;
+          const h = lerp(0.08, isBack ? 0.2 : 0.15, r()) * bladeSc;
+          const lean = (r() - 0.45) * 0.09 * bladeSc;
+          const bw = lerp(0.03, 0.045, r()) * bladeSc;
+          const B = isBack ? back : front;
+          const bx = x - nx * 0.03;
+          const by = y - ny * 0.03;
+          B.moveTo(bx - tx * bw, by - ty * bw);
+          B.quadraticCurveTo(bx + nx * h * 0.6 - tx * bw * 0.2, by + ny * h * 0.6 - ty * bw * 0.2, bx + nx * h + tx * lean, by + ny * h + ty * lean);
+          B.quadraticCurveTo(bx + nx * h * 0.5 + tx * bw * 0.6, by + ny * h * 0.5 + ty * bw * 0.6, bx + tx * bw, by + ty * bw);
+          B.closePath();
+        });
+        pc.bladesBack = back;
+        pc.bladesFront = front;
+      } else if (edgeKind === 'snow') {
+        // снежная «подушка»: бугристый внешний контур (обводится) + заливка до кромки
+        const outer = capOutline(subO, o0, bumpH);
+        pc.capLine = polyPath(outer, false);
+        pc.capFill = polyPath(outer.concat(offsetChain(subO, 0.035).reverse()), true);
+      }
+      pieces.push(pc);
     }
   }
 
@@ -817,15 +975,10 @@ function buildGeo(t: TerrainDef, theme: ThemeId): Geo {
     maxY,
     chains,
     surfaceY,
-    chainPath,
     shadeEdges,
     edgeT: T,
-    scallops,
-    highlight,
-    bladesBack,
-    bladesFront,
-    capFill,
-    capLine,
+    pieces,
+    vis: null,
     cracks,
     deck,
   };
@@ -833,34 +986,252 @@ function buildGeo(t: TerrainDef, theme: ThemeId): Geo {
 
 // ───────────────────────── отрисовка ─────────────────────────
 
+// ───────────────────────── кэш тайлов ─────────────────────────
+//
+// Рельеф статичен: при неподвижном зуме он рисуется из тайлов 256×256 px, запечённых точно под текущий
+// масштаб и выровненных по пикселям (blit 1:1 — дёшево и на GPU, и на программном растре). Тайлы строятся
+// лениво, с бюджетом времени на кадр; недостающие куски кадра дорисовываются векторно (клип по их прямоугольникам).
+// Пока зум меняется — векторная отрисовка целиком.
+
+/** Сторона тайла, px. */
+const TT = 256;
+/** Бюджет построения тайлов за кадр, мс (минимум один тайл за кадр). */
+const TILE_BUDGET_MS = 2;
+/** Предел памяти тайлов одного рельефа, байт (LRU). */
+const TILE_MAX_BYTES = 32 * 1024 * 1024;
+/** Зум считается неподвижным, если масштаб не уходил дальше TILE_EPS столько, мс. */
+const TILE_STABLE_MS = 250;
+/** Относительный допуск масштаба: при 1920 px расхождение тайлов с миром на краю ≤ 0.5 px. */
+const TILE_EPS = 5e-4;
+
+interface TTile {
+  /** null — в тайле нет рельефа. */
+  c: AnyCanvas | null;
+  used: number;
+}
+
+interface TCache {
+  theme: ThemeId;
+  /** Масштаб, под который запечены тайлы (0 — ещё нет). */
+  scale: number;
+  /** Масштаб, от которого отсчитывается неподвижность зума. */
+  anchor: number;
+  since: number;
+  tiles: Map<number, TTile>;
+  bytes: number;
+}
+
+const tileCaches = new WeakMap<TerrainDef[], TCache>();
+let primeCtx: Ctx2D | null = null;
+let frameNo = 0;
+
+const nowMs = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+const tileKey = (i: number, j: number): number => (i + 32768) * 65536 + (j + 32768);
+
+/** Кэш тайлов, если зум неподвижен (или вернулся к масштабу готовых тайлов), иначе null. */
+function tileCacheFor(terrain: TerrainDef[], theme: ThemeId, scale: number): TCache | null {
+  const now = nowMs();
+  let c = tileCaches.get(terrain);
+  if (!c) {
+    // первый кадр уровня: тайлы начинают строиться сразу
+    c = { theme, scale: 0, anchor: scale, since: now - TILE_STABLE_MS, tiles: new Map(), bytes: 0 };
+    tileCaches.set(terrain, c);
+  }
+  if (c.theme !== theme) {
+    c.theme = theme;
+    c.tiles.clear();
+    c.bytes = 0;
+    c.scale = 0;
+  }
+  if (Math.abs(scale / c.anchor - 1) > TILE_EPS) {
+    c.anchor = scale;
+    c.since = now;
+  }
+  if (now - c.since < TILE_STABLE_MS) return c.scale > 0 && Math.abs(scale / c.scale - 1) <= TILE_EPS ? c : null;
+  if (c.scale === 0 || Math.abs(c.anchor / c.scale - 1) > TILE_EPS) {
+    c.tiles.clear();
+    c.bytes = 0;
+    c.scale = c.anchor;
+  }
+  return c;
+}
+
+/** Запечь тайл (i, j): мировые пиксели X = x·s, Y = −y·s; тайл покрывает [i·TT, (i+1)·TT) × [j·TT, (j+1)·TT). */
+function buildTile(c: TCache, terrain: TerrainDef[], theme: ThemeId, i: number, j: number): TTile {
+  const s = c.scale;
+  const x0 = (i * TT) / s;
+  const x1 = ((i + 1) * TT) / s;
+  const y1 = (-j * TT) / s;
+  const y0 = (-(j + 1) * TT) / s;
+  let any = false;
+  for (const t of terrain) {
+    if (t.points.length < 3) continue;
+    const g = getGeo(t, theme);
+    if (g.maxX + 0.5 >= x0 && g.minX - 0.5 <= x1 && g.maxY + 0.5 >= y0 && g.minY - 0.5 <= y1) {
+      any = true;
+      break;
+    }
+  }
+  let tile: TTile = { c: null, used: frameNo };
+  if (any) {
+    const cv = createCanvas(TT, TT);
+    drawVector(ctx2d(cv), terrain, theme, s, -i * TT, -j * TT, x0 - 1, x1 + 1, y0 - 1, y1 + 1);
+    // растеризовать сейчас (в бюджете построения), а не при первом показе
+    if (!primeCtx) primeCtx = ctx2d(createCanvas(1, 1));
+    primeCtx.drawImage(cv, 0, 0, 1, 1, 0, 0, 1, 1);
+    tile = { c: cv, used: frameNo };
+    c.bytes += TT * TT * 4;
+  }
+  c.tiles.set(tileKey(i, j), tile);
+  return tile;
+}
+
+/** Освободить давно не используемые тайлы сверх предела памяти. */
+function evictTiles(c: TCache): void {
+  if (c.bytes <= TILE_MAX_BYTES) return;
+  const list = [...c.tiles.entries()].filter(([, t]) => t.c && t.used !== frameNo).sort((a, b) => a[1].used - b[1].used);
+  for (const [k] of list) {
+    if (c.bytes <= TILE_MAX_BYTES * 0.8) break;
+    c.tiles.delete(k);
+    c.bytes -= TT * TT * 4;
+  }
+}
+
+/**
+ * Подготовить всё тяжёлое заранее (экран загрузки / интро уровня): текстуры темы (шумовые тайлы грунта и камня)
+ * и геометрию рельефа. Без вызова это делается лениво на первом кадре. Возвращает затраченное время, мс.
+ */
+export function prewarmTerrain(terrain: TerrainDef[], theme: ThemeId): number {
+  if (typeof document === 'undefined') return 0;
+  const t0 = nowMs();
+  soilTile(theme);
+  rockTile();
+  for (const t of terrain) if (t.points.length >= 3) getGeo(t, theme);
+  return nowMs() - t0;
+}
+
 /**
  * Рельеф уровня в мировых координатах. Совпадает с полигонами TerrainDef точно (физика по ним же);
  * обводка центрирована по контуру, травинки и снежные «подушки» выступают наружу на 0.1–0.2 м.
+ * Массив terrain должен быть тем же объектом от кадра к кадру (кэш геометрии и тайлов привязан к нему).
  */
 export function drawTerrain(ctx: CanvasRenderingContext2D, terrain: TerrainDef[], theme: ThemeId, view: ViewInfo): void {
   if (!terrain.length || view.scale <= 0) return;
-  const P = TERRAIN_PALETTES[theme];
-  ctx.save();
-  applyWorldTransform(ctx, view);
-  ctx.lineJoin = 'round';
-  ctx.lineCap = 'round';
-  const px = 1 / view.scale;
+  frameNo++;
+  const W = view.screenW;
+  const H = view.screenH;
   // видимая область мира с запасом
-  const halfW = (view.screenW / 2) * px + 1;
-  const halfH = (view.screenH / 2) * px + 1;
+  const halfW = W / 2 / view.scale + 1;
+  const halfH = H / 2 / view.scale + 1;
   const vx0 = view.camX - halfW;
   const vx1 = view.camX + halfW;
   const vy0 = view.camY - halfH;
   const vy1 = view.camY + halfH;
+  const cache = typeof document !== 'undefined' ? tileCacheFor(terrain, theme, view.scale) : null;
+  if (!cache) {
+    drawVector(ctx, terrain, theme, view.scale, W / 2 - view.camX * view.scale, H / 2 + view.camY * view.scale, vx0, vx1, vy0, vy1);
+    return;
+  }
+  const s = cache.scale;
+  // начало мировых пикселей на экране — целое: тайлы ложатся 1:1 без пересэмплирования
+  const ox = Math.round(W / 2 - view.camX * s);
+  const oy = Math.round(H / 2 + view.camY * s);
+  const i0 = Math.floor(-ox / TT);
+  const i1 = Math.floor((W - 1 - ox) / TT);
+  const j0 = Math.floor(-oy / TT);
+  const j1 = Math.floor((H - 1 - oy) / TT);
+  const t0 = nowMs();
+  let built = 0;
+  const missing: number[] = [];
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+  for (let j = j0; j <= j1; j++) {
+    for (let i = i0; i <= i1; i++) {
+      let t = cache.tiles.get(tileKey(i, j));
+      if (!t && (built === 0 || nowMs() - t0 < TILE_BUDGET_MS)) {
+        t = buildTile(cache, terrain, theme, i, j);
+        built++;
+      }
+      if (!t) {
+        missing.push(i, j);
+        continue;
+      }
+      t.used = frameNo;
+      if (t.c) ctx.drawImage(t.c, i * TT + ox, j * TT + oy);
+    }
+  }
+  if (missing.length) {
+    // ещё не готовые тайлы — векторно, только внутри их прямоугольников
+    ctx.beginPath();
+    for (let k = 0; k < missing.length; k += 2) ctx.rect(missing[k] * TT + ox, missing[k + 1] * TT + oy, TT, TT);
+    ctx.clip();
+    drawVector(ctx, terrain, theme, s, ox, oy, vx0, vx1, vy0, vy1);
+  }
+  ctx.restore();
+  evictTiles(cache);
+}
+
+/** Векторная отрисовка рельефа: мир → (s, ox, oy) (Y вверх), отсечение по мировому прямоугольнику. */
+function drawVector(
+  ctx: Ctx2D,
+  terrain: TerrainDef[],
+  theme: ThemeId,
+  s: number,
+  ox: number,
+  oy: number,
+  vx0: number,
+  vx1: number,
+  vy0: number,
+  vy1: number,
+): void {
+  const P = TERRAIN_PALETTES[theme];
+  ctx.save();
+  ctx.setTransform(s, 0, 0, -s, ox, oy);
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  const px = 1 / s;
   for (const t of terrain) {
     if (t.points.length < 3) continue;
     const g = getGeo(t, theme);
     if (g.maxX < vx0 || g.minX > vx1 || g.maxY + 0.4 < vy0 || g.minY > vy1) continue;
-    if (t.kind === 'ground') drawGround(ctx, g, P, theme, px);
-    else if (t.kind === 'rock') drawRock(ctx, g, P, theme, px);
-    else drawPlatform(ctx, g, P, theme, px);
+    const V = visOf(g, vx0, vx1, vy0, vy1);
+    if (t.kind === 'ground') drawGround(ctx, g, V, P, theme, px);
+    else if (t.kind === 'rock') drawRock(ctx, g, V, P, theme, px);
+    else drawPlatform(ctx, g, V, P, theme, px);
   }
   ctx.restore();
+}
+
+/** Объединённые пути кусков кромки, попавших в вид [x0, x1] × [y0, y1]; кэш до смены набора кусков. */
+function visOf(g: Geo, x0: number, x1: number, y0: number, y1: number): Vis {
+  const idx: number[] = [];
+  for (let i = 0; i < g.pieces.length; i++) {
+    const p = g.pieces[i];
+    if (p.maxX >= x0 && p.minX <= x1 && p.maxY >= y0 && p.minY <= y1) idx.push(i);
+  }
+  const key = idx.join(',');
+  if (g.vis && g.vis.key === key) return g.vis;
+  const v: Vis = { key, chain: new Path2D(), band: new Path2D(), highlight: new Path2D(), bladesBack: null, bladesFront: null, capFill: null, capLine: null };
+  const add = (into: Path2D | null, src: Path2D | null): Path2D | null => {
+    if (!src) return into;
+    const d = into ?? new Path2D();
+    d.addPath(src);
+    return d;
+  };
+  for (const i of idx) {
+    const p = g.pieces[i];
+    v.chain.addPath(p.chain);
+    v.band.addPath(p.band);
+    v.highlight.addPath(p.highlight);
+    v.bladesBack = add(v.bladesBack, p.bladesBack);
+    v.bladesFront = add(v.bladesFront, p.bladesFront);
+    v.capFill = add(v.capFill, p.capFill);
+    v.capLine = add(v.capLine, p.capLine);
+  }
+  g.vis = v;
+  return v;
 }
 
 function outlineWidth(px: number): number {
@@ -868,85 +1239,89 @@ function outlineWidth(px: number): number {
 }
 
 /** Кромка (трава / песок / снег / мох) по верхним рёбрам — внутри клипа полигона. */
-function drawEdgeBand(ctx: Ctx2D, g: Geo, top: string, dark: string, lip: string, light: string, px: number): void {
+function drawEdgeBand(ctx: Ctx2D, g: Geo, V: Vis, top: string, dark: string, lip: string, light: string, px: number): void {
   const T = g.edgeT;
   if (T <= 0 || !g.chains.length) return;
   // «губа» — тёмная тень под кромкой
   ctx.save();
   ctx.translate(0, -0.06);
-  ctx.strokeStyle = lip;
   ctx.fillStyle = lip;
-  ctx.lineWidth = 2 * T;
-  ctx.stroke(g.chainPath);
-  ctx.fill(g.scallops);
+  ctx.fill(V.band);
   ctx.restore();
   // тело кромки: тёмный низ → основной цвет → светлый верх (ступенчатый «градиент» вдоль кромки)
-  ctx.strokeStyle = dark;
   ctx.fillStyle = dark;
-  ctx.lineWidth = 2 * T;
-  ctx.stroke(g.chainPath);
-  ctx.fill(g.scallops);
+  ctx.fill(V.band);
   ctx.strokeStyle = mix(dark, top, 0.55);
   ctx.lineWidth = 2 * T * 0.74;
-  ctx.stroke(g.chainPath);
+  ctx.stroke(V.chain);
   ctx.strokeStyle = top;
   ctx.lineWidth = 2 * T * 0.5;
-  ctx.stroke(g.chainPath);
+  ctx.stroke(V.chain);
   // блик у самого края
   ctx.strokeStyle = rgba(light, 0.9);
   ctx.lineWidth = Math.max(0.055, 1.2 * px);
-  ctx.stroke(g.highlight);
+  ctx.stroke(V.highlight);
 }
 
-function drawGround(ctx: Ctx2D, g: Geo, P: TerrainPalette, theme: ThemeId, px: number): void {
+function drawGround(ctx: Ctx2D, g: Geo, V: Vis, P: TerrainPalette, theme: ThemeId, px: number): void {
   const G = P.ground;
   // 1. грунт: бесшовная текстура в мировых координатах
   const pat = worldPattern(ctx, `soil:${theme}`, soilTile(theme), SOIL_M);
   ctx.fillStyle = pat ?? G.soil;
   ctx.fill(g.path);
+  const ph = TERRAIN_PROBE.phase;
+  ph?.('soil');
   // 2. затемнение вглубь от нижней поверхности
   const dg = ctx.createLinearGradient(0, g.surfaceY - 0.25, 0, g.surfaceY - 4.5);
   dg.addColorStop(0, rgba(G.soilDeep, 0));
   dg.addColorStop(1, rgba(G.soilDeep, 0.72));
   ctx.fillStyle = dg;
   ctx.fill(g.path);
+  ph?.('deep');
   ctx.save();
   ctx.clip(g.path);
-  // 3. мягкая тень под кромкой (объём) + кромка
+  ph?.('clip');
+  // 3. мягкая тень под кромкой (объём) + кромка; плоские концы — без тёмных «пятен» во внутренних углах
   ctx.strokeStyle = rgba(G.soilDeep, 0.22);
   ctx.lineWidth = 2 * (g.edgeT + 0.32);
-  ctx.stroke(g.chainPath);
-  drawEdgeBand(ctx, g, G.top, G.dark, G.lip, G.light, px);
+  ctx.lineCap = 'butt';
+  ctx.stroke(V.chain);
+  ctx.lineCap = 'round';
+  ph?.('shade');
+  drawEdgeBand(ctx, g, V, G.top, G.dark, G.lip, G.light, px);
+  ph?.('band');
   ctx.restore();
   // 4. обводка полигона
   ctx.lineWidth = outlineWidth(px);
   ctx.strokeStyle = G.outline;
   ctx.stroke(g.path);
+  ph?.('outline');
   // 5. поверх обводки: травинки или снежная подушка
-  drawOverEdge(ctx, g, G.top, G.dark, G.light, G.outline, px);
+  drawOverEdge(ctx, g, V, G.top, G.dark, G.light, G.outline, px);
+  ph?.('over');
 }
 
 /** Травинки / снежная шапка поверх обводки. */
-function drawOverEdge(ctx: Ctx2D, g: Geo, top: string, dark: string, light: string, outline: string, px: number): void {
-  if (g.bladesBack && g.bladesFront) {
+function drawOverEdge(ctx: Ctx2D, g: Geo, V: Vis, top: string, dark: string, light: string, outline: string, px: number): void {
+  if (V.bladesBack && V.bladesFront) {
     ctx.fillStyle = dark;
-    ctx.fill(g.bladesBack);
+    ctx.fill(V.bladesBack);
     ctx.fillStyle = top;
-    ctx.fill(g.bladesFront);
+    ctx.fill(V.bladesFront);
   }
-  if (g.capFill && g.capLine) {
+  if (V.capFill && V.capLine) {
     const grd = ctx.createLinearGradient(0, g.maxY + 0.2, 0, g.surfaceY - 0.3);
     grd.addColorStop(0, light);
     grd.addColorStop(1, top);
     ctx.fillStyle = grd;
-    ctx.fill(g.capFill);
+    ctx.fill(V.capFill);
     ctx.lineWidth = outlineWidth(px);
     ctx.strokeStyle = outline;
-    ctx.stroke(g.capLine);
+    ctx.stroke(V.capLine);
   }
 }
 
-function drawRock(ctx: Ctx2D, g: Geo, P: TerrainPalette, _theme: ThemeId, px: number): void {
+function drawRock(ctx: Ctx2D, g: Geo, V: Vis, P: TerrainPalette, _theme: ThemeId, px: number): void {
   const R = P.rock;
   const grd = ctx.createLinearGradient(g.minX, g.maxY, g.minX + (g.maxY - g.minY) * 0.35, g.minY);
   grd.addColorStop(0, R.light);
@@ -967,10 +1342,10 @@ function drawRock(ctx: Ctx2D, g: Geo, P: TerrainPalette, _theme: ThemeId, px: nu
   ctx.stroke(g.shadeEdges);
   ctx.strokeStyle = rgba(R.light, 0.75);
   ctx.lineWidth = 0.2;
-  ctx.stroke(g.chainPath);
+  ctx.stroke(V.chain);
   ctx.strokeStyle = rgba('#FFFFFF', 0.35);
   ctx.lineWidth = Math.max(0.05, 1.2 * px);
-  ctx.stroke(g.highlight);
+  ctx.stroke(V.highlight);
   // трещины: тёмная щель + светлая стенка ниже-правее
   if (g.cracks) {
     ctx.save();
@@ -983,22 +1358,22 @@ function drawRock(ctx: Ctx2D, g: Geo, P: TerrainPalette, _theme: ThemeId, px: nu
     ctx.lineWidth = Math.max(0.045, 1.2 * px);
     ctx.stroke(g.cracks);
   }
-  if (R.cap === 'moss') drawEdgeBand(ctx, g, P.moss.top, P.moss.dark, mix(P.moss.dark, R.dark, 0.5), P.moss.light, px);
+  if (R.cap === 'moss') drawEdgeBand(ctx, g, V, P.moss.top, P.moss.dark, mix(P.moss.dark, R.dark, 0.5), P.moss.light, px);
   ctx.restore();
   ctx.lineWidth = outlineWidth(px);
   ctx.strokeStyle = R.outline;
   ctx.stroke(g.path);
-  if (R.cap === 'moss') drawOverEdge(ctx, g, P.moss.top, P.moss.dark, P.moss.light, R.outline, px);
+  if (R.cap === 'moss') drawOverEdge(ctx, g, V, P.moss.top, P.moss.dark, P.moss.light, R.outline, px);
   if (R.cap === 'snow') {
     ctx.save();
     ctx.clip(g.path);
-    drawEdgeBand(ctx, g, P.ground.top, P.ground.dark, P.ground.lip, P.ground.light, px);
+    drawEdgeBand(ctx, g, V, P.ground.top, P.ground.dark, P.ground.lip, P.ground.light, px);
     ctx.restore();
-    drawOverEdge(ctx, g, P.ground.top, P.ground.dark, P.ground.light, R.outline, px);
+    drawOverEdge(ctx, g, V, P.ground.top, P.ground.dark, P.ground.light, R.outline, px);
   }
 }
 
-function drawPlatform(ctx: Ctx2D, g: Geo, P: TerrainPalette, theme: ThemeId, px: number): void {
+function drawPlatform(ctx: Ctx2D, g: Geo, V: Vis, P: TerrainPalette, theme: ThemeId, px: number): void {
   const d = g.deck;
   if (!d) return;
   const D = P.deck;
@@ -1073,12 +1448,12 @@ function drawPlatform(ctx: Ctx2D, g: Geo, P: TerrainPalette, theme: ThemeId, px:
   ctx.stroke(g.shadeEdges);
   ctx.strokeStyle = rgba(d.wood ? D.light : R.light, 0.9);
   ctx.lineWidth = 0.09;
-  ctx.stroke(g.chainPath);
-  if (!d.wood && R.cap === 'moss') drawEdgeBand(ctx, g, P.moss.top, P.moss.dark, mix(P.moss.dark, R.dark, 0.5), P.moss.light, px);
+  ctx.stroke(V.chain);
+  if (!d.wood && R.cap === 'moss') drawEdgeBand(ctx, g, V, P.moss.top, P.moss.dark, mix(P.moss.dark, R.dark, 0.5), P.moss.light, px);
   ctx.restore();
   ctx.lineWidth = outlineWidth(px);
   ctx.strokeStyle = outline;
   ctx.stroke(g.path);
-  if (theme === 'snow') drawOverEdge(ctx, g, P.ground.top, P.ground.dark, P.ground.light, outline, px);
-  else if (!d.wood && R.cap === 'moss') drawOverEdge(ctx, g, P.moss.top, P.moss.dark, P.moss.light, R.outline, px);
+  if (theme === 'snow') drawOverEdge(ctx, g, V, P.ground.top, P.ground.dark, P.ground.light, outline, px);
+  else if (!d.wood && R.cap === 'moss') drawOverEdge(ctx, g, V, P.moss.top, P.moss.dark, P.moss.light, R.outline, px);
 }

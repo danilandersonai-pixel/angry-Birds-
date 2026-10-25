@@ -1,25 +1,29 @@
-// Предпросмотр фонов и рельефа: 3 темы × {вид рогатки 15 м, общий план 35 м} на одном тестовом рельефе,
+// Предпросмотр фонов и рельефа: 3 темы × {вид рогатки 15 м, общий план 30 м} на одном тестовом рельефе,
 // плюс кадры 21:9 и 4:3 (проверка заполнения) и замер производительности draw() на 1920×1080.
 // Параметры URL:
 //   ?theme=meadow|beach|snow  — одна тема крупно (вид из ?view=aim|wide, по умолчанию aim)
 //   &aspect=21:9|4:3|16:9     — соотношение сторон крупного кадра
 //   &viewH=…  &camX=…  &camY=…  — ручная камера
 //   ?t=секунды — фиксированное время сцены (иначе анимация в реальном времени)
-//   ?perf=0 — без замера; ?anim=0 — один кадр
+//   ?scene=stress — сложный рельеф (долина, стена, нависание, парящий уступ, помосты)
+//   ?warm=N — сразу N кадров (достроить кэши); ?perf=0 — без замера; ?phases=1 — разбивка растра по фазам; ?anim=0 — один кадр; ?bench=1 — микробенчмарк холста
 
-import '@fontsource/lilita-one';
-import type { BirdType, PigType, TerrainDef, ThemeId } from '../core/types';
+import '@fontsource/rubik/700.css';
+import type { BirdType, Material, PigType, TerrainDef, ThemeId } from '../core/types';
 import type { Sprite } from '../render/sprites/api';
-import { SLINGSHOT } from '../config/constants';
+import { CAMERA, SLINGSHOT } from '../config/constants';
 import { renderBird } from '../render/sprites/birds';
 import { renderPig } from '../render/sprites/pigs';
+import { renderBlock } from '../render/sprites/blocks';
+import { drawBand, drawPouch, renderSlingshot } from '../render/sprites/slingshot';
 import { Background, THEME_INFO, drawForeground, drawTerrain } from '../render/sprites/background';
-import { applyWorldTransform, type ViewInfo } from '../render/view';
+import { TERRAIN_PROBE } from '../render/sprites/terrain';
+import type { ViewInfo } from '../render/view';
 
 const params = new URLSearchParams(location.search);
 const THEMES: ThemeId[] = ['meadow', 'beach', 'snow'];
 const dpr = window.devicePixelRatio || 1;
-const FONT = '"Lilita One", "Arial Rounded MT Bold", sans-serif';
+const FONT = 'Rubik, "Arial Rounded MT Bold", sans-serif';
 const fixedT = params.has('t') ? Number(params.get('t')) : null;
 const animate = params.get('anim') !== '0' && fixedT === null;
 
@@ -62,7 +66,7 @@ const TERRAIN: TerrainDef[] = [
 ];
 
 interface Box {
-  m: 'wood' | 'ice' | 'stone';
+  m: Material;
   x: number;
   y: number;
   w: number;
@@ -87,12 +91,6 @@ const BLOCKS: Box[] = [
   { m: 'wood', x: 64, y: 0.5, w: 1, h: 1 },
   { m: 'stone', x: 63.5, y: 1.5, w: 1, h: 1 },
 ];
-
-const MAT: Record<Box['m'], { light: string; base: string; dark: string; outline: string }> = {
-  wood: { light: '#F0C27A', base: '#D08F45', dark: '#9C6030', outline: '#4A2810' },
-  ice: { light: '#E6FAFF', base: '#A8E2F8', dark: '#6CC0E8', outline: '#246A9E' },
-  stone: { light: '#CDD1D6', base: '#A3A9B0', dark: '#767D86', outline: '#30353C' },
-};
 
 const PIGS: Array<{ t: PigType; x: number; y: number; r: number }> = [
   { t: 'medium', x: 30, y: 3 + 0.6075, r: 0.6075 },
@@ -132,96 +130,135 @@ function drawSprite(ctx: CanvasRenderingContext2D, v: ViewInfo, s: Sprite, x: nu
   ctx.drawImage(s.canvas, -s.ox, -s.oy);
 }
 
-/** Простая рогатка-заглушка (настоящая — в slingshot.ts у другого модуля). */
-function slingPart(ctx: CanvasRenderingContext2D, v: ViewInfo, part: 'back' | 'front'): void {
-  ctx.save();
-  applyWorldTransform(ctx, v);
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  const segs: Array<Array<[number, number]>> =
-    part === 'back'
-      ? [
-          [
-            [0, -SLINGSHOT.BURY],
-            [0.02, 0.6],
-            [0, 1.3],
-          ],
-          [
-            [0.02, 1.2],
-            [-0.2, 1.6],
-            [-0.32, 2.15],
-            [SLINGSHOT.PRONG_BACK.x, SLINGSHOT.PRONG_BACK.y],
-          ],
-        ]
-      : [
-          [
-            [-0.02, 1.2],
-            [0.2, 1.6],
-            [0.31, 2.15],
-            [SLINGSHOT.PRONG_FRONT.x, SLINGSHOT.PRONG_FRONT.y],
-          ],
-        ];
-  for (const [w, col] of [
-    [0.4, '#2E190A'],
-    [0.31, '#9A5A2A'],
-    [0.12, '#CB8645'],
-  ] as const) {
-    ctx.strokeStyle = col;
-    ctx.lineWidth = w;
-    for (const s of segs) {
-      ctx.beginPath();
-      s.forEach((p, i) => (i ? ctx.lineTo(p[0] - (w === 0.12 ? 0.06 : 0), p[1]) : ctx.moveTo(p[0] - (w === 0.12 ? 0.06 : 0), p[1])));
-      ctx.stroke();
-    }
+/** Рогатка из slingshot.ts: back — до рельефа, резинки и кармашек вокруг птицы, front — после. */
+function drawSling(ctx: CanvasRenderingContext2D, v: ViewInfo, part: 'back' | 'front'): void {
+  const sl = sprite('sling', v.scale, (ppu) => {
+    const r = renderSlingshot(ppu);
+    slingFront.set(ppu, r.front);
+    return r.back;
+  });
+  if (part === 'back') {
+    drawSprite(ctx, v, sl, 0, 0);
+    return;
   }
-  if (part === 'front') {
-    ctx.strokeStyle = '#3B2414';
-    ctx.lineWidth = 0.15;
-    ctx.beginPath();
-    ctx.moveTo(SLINGSHOT.PRONG_FRONT.x, SLINGSHOT.PRONG_FRONT.y);
-    ctx.lineTo(SLINGSHOT.ANCHOR.x - 0.3, SLINGSHOT.ANCHOR.y - 0.25);
-    ctx.stroke();
-  }
-  ctx.restore();
+  const front = slingFront.get(sl.ppu);
+  const sx = (x: number): number => (x - v.camX) * v.scale + v.screenW / 2;
+  const sy = (y: number): number => v.screenH / 2 - (y - v.camY) * v.scale;
+  const A = SLINGSHOT.ANCHOR;
+  const Hh = SLINGSHOT.POUCH_HALF;
+  const t = SLINGSHOT.BAND_REST * v.scale;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  drawPouch(ctx, sx(A.x), sy(A.y), -Math.PI / 2, Hh * v.scale, t * 0.85);
+  drawBand(ctx, sx(SLINGSHOT.PRONG_FRONT.x), sy(SLINGSHOT.PRONG_FRONT.y), sx(A.x + Hh), sy(A.y), t);
+  if (front) drawSprite(ctx, v, front, 0, 0);
+}
+
+const slingFront = new Map<number, Sprite>();
+
+function drawBackBand(ctx: CanvasRenderingContext2D, v: ViewInfo): void {
+  const sx = (x: number): number => (x - v.camX) * v.scale + v.screenW / 2;
+  const sy = (y: number): number => v.screenH / 2 - (y - v.camY) * v.scale;
+  const A = SLINGSHOT.ANCHOR;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  drawBand(ctx, sx(SLINGSHOT.PRONG_BACK.x), sy(SLINGSHOT.PRONG_BACK.y), sx(A.x - SLINGSHOT.POUCH_HALF), sy(A.y), SLINGSHOT.BAND_REST * v.scale);
 }
 
 function drawBlocks(ctx: CanvasRenderingContext2D, v: ViewInfo): void {
-  ctx.save();
-  applyWorldTransform(ctx, v);
-  ctx.lineJoin = 'round';
-  for (const b of BLOCKS) {
-    const M = MAT[b.m];
-    const g = ctx.createLinearGradient(0, b.y + b.h / 2, 0, b.y - b.h / 2);
-    g.addColorStop(0, M.light);
-    g.addColorStop(0.35, M.base);
-    g.addColorStop(1, M.dark);
-    ctx.fillStyle = g;
-    ctx.beginPath();
-    ctx.roundRect(b.x - b.w / 2, b.y - b.h / 2, b.w, b.h, Math.min(b.w, b.h) * (b.m === 'stone' ? 0.14 : 0.07));
-    ctx.globalAlpha = b.m === 'ice' ? 0.88 : 1;
-    ctx.fill();
-    ctx.globalAlpha = 1;
-    ctx.lineWidth = Math.max(0.035, 1.5 / v.scale);
-    ctx.strokeStyle = M.outline;
-    ctx.stroke();
-  }
-  ctx.restore();
+  BLOCKS.forEach((b, i) => drawSprite(ctx, v, sprite(`block:${b.m}:${b.w}x${b.h}:${i % 3}`, v.scale, (ppu) => renderBlock(b.m, 'rect', b.w, b.h, 0, i % 3, ppu)), b.x, b.y));
 }
 
-function renderScene(ctx: CanvasRenderingContext2D, v: ViewInfo, theme: ThemeId, bg: Background): void {
+/**
+ * Стресс-рельеф (?scene=stress): V-образная долина, отвесная стена, нависание, тонкий парящий уступ,
+ * узкий пик, скала и помосты разной толщины — проверка кромки, фестонов и шапок на сложных формах.
+ */
+const STRESS: TerrainDef[] = [
+  {
+    kind: 'ground',
+    points: [
+      [-20, 0],
+      [6, 0],
+      [9, -1.5],
+      [12, 0],
+      [14, 0],
+      [14, 4],
+      [17, 4],
+      [18.5, 5.6],
+      [20, 4],
+      [24, 4],
+      [24.6, 2.5],
+      [23.4, 1.2],
+      [26, 0],
+      [60, 0],
+      [60, -12],
+      [-20, -12],
+    ],
+  },
+  {
+    kind: 'ground',
+    points: [
+      [28, 3],
+      [33, 3],
+      [33, 2.6],
+      [28, 2.6],
+    ],
+  },
+  {
+    kind: 'rock',
+    points: [
+      [35, 0],
+      [35.4, 2.6],
+      [36.6, 3.6],
+      [37.4, 2.2],
+      [38.6, 2.8],
+      [39.2, 0],
+    ],
+  },
+  {
+    kind: 'platform',
+    points: [
+      [41, 2],
+      [45, 2],
+      [45, 2.4],
+      [41, 2.4],
+    ],
+  },
+  {
+    kind: 'platform',
+    points: [
+      [47, 0],
+      [51, 0],
+      [51, 2.5],
+      [47, 2.5],
+    ],
+  },
+];
+const SCENE = params.get('scene') === 'stress' ? STRESS : TERRAIN;
+
+/** Копия рельефа: у каждого кадра свой кэш тайлов (он привязан к массиву, как уровень в игре). */
+const terrainCopy = (): TerrainDef[] => SCENE.map((t) => ({ kind: t.kind, points: t.points.map((p) => [p[0], p[1]] as [number, number]) }));
+
+function renderScene(ctx: CanvasRenderingContext2D, v: ViewInfo, theme: ThemeId, bg: Background, terrain: TerrainDef[], times?: number[]): void {
+  const t0 = performance.now();
   bg.draw(ctx, v);
-  slingPart(ctx, v, 'back');
-  drawTerrain(ctx, TERRAIN, theme, v);
-  drawBlocks(ctx, v);
-  ctx.save();
-  for (const p of PIGS) drawSprite(ctx, v, sprite(`pig:${p.t}`, v.scale, (ppu) => renderPig(p.t, 'idle', 0, true, p.r, ppu)), p.x, p.y);
+  const t1 = performance.now();
+  drawSling(ctx, v, 'back');
+  const t2 = performance.now();
+  drawTerrain(ctx, terrain, theme, v);
+  const t3 = performance.now();
+  drawBackBand(ctx, v);
+  if (SCENE === TERRAIN) drawBlocks(ctx, v);
+  if (SCENE === TERRAIN)
+    for (const p of PIGS) drawSprite(ctx, v, sprite(`pig:${p.t}`, v.scale, (ppu) => renderPig(p.t, 'idle', 0, true, p.r, ppu)), p.x, p.y);
   QUEUE.forEach((q, i) =>
     drawSprite(ctx, v, sprite(`bird:${q.t}`, v.scale, (ppu) => renderBird(q.t, 'idle', q.r, ppu)), -SLINGSHOT.QUEUE_X0 - i * SLINGSHOT.QUEUE_DX, q.r),
   );
-  drawSprite(ctx, v, sprite('bird:red', v.scale, (ppu) => renderBird('red', 'aim', 0.45, ppu)), SLINGSHOT.ANCHOR.x, SLINGSHOT.ANCHOR.y);
-  ctx.restore();
-  slingPart(ctx, v, 'front');
+  drawSprite(ctx, v, sprite('bird:red', v.scale, (ppu) => renderBird('red', 'idle', 0.45, ppu)), SLINGSHOT.ANCHOR.x, SLINGSHOT.ANCHOR.y);
+  drawSling(ctx, v, 'front');
+  const t4 = performance.now();
   drawForeground(ctx, theme, v);
+  const t5 = performance.now();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  if (times) times.push(t1 - t0, t3 - t2, t5 - t4);
 }
 
 // ───────────────────────── кадры ─────────────────────────
@@ -229,26 +266,19 @@ function renderScene(ctx: CanvasRenderingContext2D, v: ViewInfo, theme: ThemeId,
 interface Frame {
   canvas: HTMLCanvasElement;
   ctx: CanvasRenderingContext2D;
+  cap: HTMLElement;
   theme: ThemeId;
   bg: Background;
   viewH: number;
   camX: number;
   camY: number | null;
   label: string;
+  terrain: TerrainDef[];
+  /** Время draw() последних кадров (запись команд), мс: фон / рельеф / передний план. */
+  times: number[][];
 }
 
 const frames: Frame[] = [];
-const bgPool = new Map<string, Background>();
-
-function bgFor(theme: ThemeId, key: string): Background {
-  const k = `${theme}:${key}`;
-  let b = bgPool.get(k);
-  if (!b) {
-    b = new Background(theme);
-    bgPool.set(k, b);
-  }
-  return b;
-}
 
 function addFrame(parent: HTMLElement, wCss: number, hCss: number, theme: ThemeId, viewH: number, camX: number, text: string, camY: number | null = null): void {
   const box = document.createElement('div');
@@ -265,21 +295,40 @@ function addFrame(parent: HTMLElement, wCss: number, hCss: number, theme: ThemeI
   parent.append(box);
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
-  frames.push({ canvas, ctx, theme, bg: bgFor(theme, `${canvas.width}x${canvas.height}`), viewH, camX, camY, label: text });
+  // у каждого кадра свой фон — как в игре (один холст — один Background)
+  frames.push({ canvas, ctx, cap, theme, bg: new Background(theme), viewH, camX, camY, label: text, terrain: terrainCopy(), times: [] });
 }
 
 function viewOf(f: Frame, time: number): ViewInfo {
   const H = f.canvas.height;
   const scale = H / f.viewH;
-  // прижим к земле: низ кадра на 1.2 м ниже земли (01 §6.1)
-  const camY = f.camY ?? -1.2 + f.viewH / 2;
+  // прижим к земле: низ кадра на GROUND_MARGIN ниже земли (00 §1.10)
+  const camY = f.camY ?? -CAMERA.GROUND_MARGIN + f.viewH / 2;
   return { screenW: f.canvas.width, screenH: H, camX: f.camX, camY, scale, dpr, time };
 }
 
-function renderAll(time: number): void {
+let lastCap = 0;
+
+function renderAll(time: number, forceCaps = false): void {
   for (const f of frames) {
     f.ctx.setTransform(1, 0, 0, 1, 0, 0);
-    renderScene(f.ctx, viewOf(f, time), f.theme, f.bg);
+    const t: number[] = [];
+    renderScene(f.ctx, viewOf(f, time), f.theme, f.bg, f.terrain, t);
+    f.times.push(t);
+    if (f.times.length > 30) f.times.shift();
+  }
+  // подписи: среднее время draw() (запись команд) за последние кадры, обновление раз в 0.5 с
+  const now = performance.now();
+  if (!forceCaps && now - lastCap < 500) return;
+  lastCap = now;
+  for (const f of frames) {
+    // первый (холодный) кадр строит кэши — в среднее не входит
+    const list = f.times.length > 1 ? f.times.slice(1) : f.times;
+    const n = list.length;
+    if (!n) continue;
+    const avg = (i: number): string => (list.reduce((a, t) => a + t[i], 0) / n).toFixed(2);
+    const cold = f.times.length === 1 ? ' (холодный кадр)' : '';
+    f.cap.textContent = `${f.label} · ${f.canvas.width}×${f.canvas.height} · фон ${avg(0)} · рельеф ${avg(1)} · передн. ${avg(2)} мс${cold}`;
   }
 }
 
@@ -300,7 +349,19 @@ function stat(a: number[]): Stat {
   };
 }
 
-/** Замер на холсте 1920×1080: draw() фона (запись команд и с принудительной растеризацией), рельеф, передний план. */
+/** Сценарии замера: панорама при неподвижном зуме (15 и 30 м) и непрерывный зум 15 → 19 м (полосы масштабируются). */
+const SCENARIOS: Array<{ id: string; viewH: (i: number) => number; camX: number; fast?: boolean }> = [
+  { id: '15', viewH: () => 15, camX: 10 },
+  { id: '30', viewH: () => 30, camX: 30 },
+  { id: 'zoom', viewH: (i) => 15 + i * 0.1, camX: 12 },
+  { id: 'zoomFast', viewH: (i) => 15 + i * 0.1, camX: 12, fast: true },
+];
+
+/**
+ * Замер на холсте 1920×1080: draw() фона, рельефа и переднего плана.
+ * «запись» — время вызова на обычном холсте (растеризация уходит в GPU/композитор);
+ * «растр» — с принудительной растеризацией на CPU (willReadFrequently + getImageData): худший случай без GPU.
+ */
 function measure(theme: ThemeId): Record<string, Stat> {
   const out: Record<string, Stat> = {};
   for (const flush of [false, true]) {
@@ -310,18 +371,29 @@ function measure(theme: ThemeId): Record<string, Stat> {
     const ctx = c.getContext('2d', { willReadFrequently: flush });
     if (!ctx) return out;
     const bg = new Background(theme);
-    for (const viewH of [15, 35]) {
-      const base: ViewInfo = { screenW: 1920, screenH: 1080, camX: viewH === 15 ? 10 : 30, camY: -1.2 + viewH / 2, scale: 1080 / viewH, dpr: 1, time: 0 };
-      bg.prewarm(base); // прогрев: построение полос под этот вид
-      bg.draw(ctx, base);
-      drawTerrain(ctx, TERRAIN, theme, base);
+    for (const sc of SCENARIOS) {
+      const mk = (i: number): ViewInfo => {
+        const viewH = sc.viewH(i);
+        return { screenW: 1920, screenH: 1080, camX: sc.camX + i * 0.15, camY: -CAMERA.GROUND_MARGIN + viewH / 2, scale: 1080 / viewH, dpr: 1, time: i / 60 };
+      };
+      const base = mk(0);
+      const terrain = terrainCopy();
+      const tp0 = performance.now();
+      bg.prewarm(base); // прогрев: построение полос и облаков под этот вид
+      if (!flush) out[`build:${sc.id}`] = stat([performance.now() - tp0]);
+      bg.fastScaling = !!sc.fast;
+      // прогрев: первые кадры достраивают тайлы рельефа видимой области (в игре — интро уровня)
+      for (let i = 0; i < 12; i++) {
+        bg.draw(ctx, base);
+        drawTerrain(ctx, terrain, theme, base);
+      }
       ctx.getImageData(0, 0, 1, 1);
       const tb: number[] = [];
       const tt: number[] = [];
       const tf: number[] = [];
       const phases: Record<string, number[]> = {};
       for (let i = 0; i < 40; i++) {
-        const v = { ...base, camX: base.camX + i * 0.15, time: i / 60 };
+        const v = mk(i);
         let t0 = performance.now();
         if (flush) {
           let tp = performance.now();
@@ -337,7 +409,17 @@ function measure(theme: ThemeId): Record<string, Stat> {
         if (flush) ctx.getImageData(0, 0, 1, 1);
         tb.push(performance.now() - t0);
         t0 = performance.now();
-        drawTerrain(ctx, TERRAIN, theme, v);
+        if (flush) {
+          let tp = performance.now();
+          TERRAIN_PROBE.phase = (label) => {
+            ctx.getImageData(0, 0, 1, 1);
+            const now = performance.now();
+            (phases[`t-${label}`] ??= []).push(now - tp);
+            tp = performance.now();
+          };
+        }
+        drawTerrain(ctx, terrain, theme, v);
+        TERRAIN_PROBE.phase = null;
         if (flush) ctx.getImageData(0, 0, 1, 1);
         tt.push(performance.now() - t0);
         t0 = performance.now();
@@ -345,11 +427,12 @@ function measure(theme: ThemeId): Record<string, Stat> {
         if (flush) ctx.getImageData(0, 0, 1, 1);
         tf.push(performance.now() - t0);
       }
-      const tag = `${flush ? 'raster' : 'record'}:${viewH}`;
+      bg.fastScaling = false;
+      const tag = `${flush ? 'raster' : 'record'}:${sc.id}`;
       out[`bg:${tag}`] = stat(tb);
       out[`terrain:${tag}`] = stat(tt);
       out[`fg:${tag}`] = stat(tf);
-      for (const [k, a] of Object.entries(phases)) out[`phase:${k}:${viewH}`] = stat(a);
+      for (const [k, a] of Object.entries(phases)) out[`phase:${k}:${sc.id}`] = stat(a);
     }
   }
   return out;
@@ -402,6 +485,64 @@ function microBench(): string {
     `drawImage transp 1920x600 scaled 1.1: ${time(() => ctx.drawImage(transp, 0, 100, 2112, 660))}`,
   ];
   ctx.imageSmoothingQuality = 'low';
+  lines.push(`drawImage opaque 9-arg full src 1:1: ${time(() => ctx.drawImage(opaque, 0, 0, 1920, 600, 0, 100, 1920, 600))}`);
+  lines.push(`drawImage opaque 9-arg part src 1:1: ${time(() => ctx.drawImage(opaque, 0, 50, 1920, 550, 0, 150, 1920, 550))}`);
+  lines.push(`drawImage opaque 9-arg 20 pieces 1:1: ${time(() => {
+    for (let i = 0; i < 20; i++) ctx.drawImage(opaque, i * 96, 50, 96, 550, i * 96, 150, 96, 550);
+  })}`);
+  const grad = document.createElement('canvas');
+  grad.width = 1920;
+  grad.height = 600;
+  const gc = grad.getContext('2d')!;
+  const gg = gc.createLinearGradient(0, 0, 0, 600);
+  gg.addColorStop(0, '#2F8FE0');
+  gg.addColorStop(1, '#E4F6F6');
+  gc.fillStyle = gg;
+  gc.fillRect(0, 0, 1920, 600);
+  lines.push(`drawImage gradient-filled canvas 1:1: ${time(() => ctx.drawImage(grad, 0, 100))}`);
+  lines.push(`clip rect + drawImage 3-arg 1:1: ${time(() => {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, 1920, 500);
+    ctx.clip();
+    ctx.drawImage(opaque, 0, 100);
+    ctx.restore();
+  })}`);
+  const smalls: HTMLCanvasElement[] = [];
+  for (let i = 0; i < 8; i++) {
+    const s = document.createElement('canvas');
+    s.width = 256;
+    s.height = 550;
+    const sc = s.getContext('2d')!;
+    sc.fillStyle = '#4a8';
+    sc.fillRect(0, 100, 256, 450);
+    smalls.push(s);
+  }
+  lines.push(`8 canvases 256x550 3-arg 1:1: ${time(() => {
+    for (let i = 0; i < 8; i++) ctx.drawImage(smalls[i], i * 256, 150);
+  })}`);
+  lines.push(`8 canvases 256x550 5-arg ×1.1: ${time(() => {
+    for (let i = 0; i < 8; i++) ctx.drawImage(smalls[i], i * 281.6, 150, 281.6, 605);
+  })}`);
+  const col = document.createElement('canvas');
+  col.width = 1;
+  col.height = 1080;
+  const cc = col.getContext('2d')!;
+  const cg = cc.createLinearGradient(0, 0, 0, 1080);
+  cg.addColorStop(0, '#2F8FE0');
+  cg.addColorStop(1, '#E4F6F6');
+  cc.fillStyle = cg;
+  cc.fillRect(0, 0, 1, 1080);
+  lines.push(`drawImage 1px column → full: ${time(() => ctx.drawImage(col, 0, 0, 1920, 1080))}`);
+  ctx.imageSmoothingEnabled = false;
+  lines.push(`drawImage 1px column → full (nosmooth): ${time(() => ctx.drawImage(col, 0, 0, 1920, 1080))}`);
+  ctx.imageSmoothingEnabled = true;
+  lines.push(`fillRect 300 rows solid ×4: ${time(() => {
+    for (let i = 0; i < 4; i++) {
+      ctx.fillStyle = ['#123', '#234', '#345', '#456'][i];
+      ctx.fillRect(0, 300 + i * 75, 1920, 75);
+    }
+  })}`);
   lines.push(`drawImage opaque scaled 1.1 (low): ${time(() => ctx.drawImage(opaque, 0, 100, 2112, 660))}`);
   ctx.imageSmoothingEnabled = false;
   lines.push(`drawImage opaque scaled 1.1 (nosmooth): ${time(() => ctx.drawImage(opaque, 0, 100, 2112, 660))}`);
@@ -431,7 +572,7 @@ function build(): void {
       else Hh = Math.round(W / a);
     }
     const view = params.get('view') ?? 'aim';
-    const viewH = Number(params.get('viewH') ?? (view === 'wide' ? 35 : 15));
+    const viewH = Number(params.get('viewH') ?? (view === 'wide' ? 30 : 15));
     const camX = Number(params.get('camX') ?? (view === 'wide' ? 30 : 10));
     const camY = params.has('camY') ? Number(params.get('camY')) : null;
     root.className = 'single';
@@ -444,28 +585,40 @@ function build(): void {
     const fh = Math.round((fw * 9) / 16);
     for (const [viewH, camX, name] of [
       [15, 10, 'вид рогатки 15 м'],
-      [35, 30, 'общий план 35 м'],
+      [30, 30, 'общий план 30 м'],
     ] as const) {
       for (const t of THEMES) addFrame(grid, fw, fh, t, viewH, camX, `${THEME_INFO[t].name} · ${name}`);
     }
+    // соотношения сторон 21:9 и 4:3 — заполнение экрана при обоих видах
     const row = document.createElement('div');
     row.className = 'row';
     root.append(row);
-    const hh = 330;
-    addFrame(row, Math.round((hh * 21) / 9), hh, 'meadow', 40, 28, '21:9 · общий план 40 м');
-    addFrame(row, Math.round((hh * 4) / 3), hh, 'snow', 40, 28, '4:3 · общий план 40 м');
+    const hh = 240;
+    const w21 = Math.round((hh * 21) / 9);
+    const w43 = Math.round((hh * 4) / 3);
+    addFrame(row, w21, hh, 'beach', 15, 12, '21:9 · 15 м');
+    addFrame(row, w21, hh, 'meadow', 30, 34, '21:9 · 30 м');
+    addFrame(row, w43, hh, 'snow', 15, 6, '4:3 · 15 м');
+    addFrame(row, w43, hh, 'beach', 30, 26, '4:3 · 30 м');
     const perf = document.createElement('pre');
     perf.id = 'perf';
     perf.textContent = 'замер…';
-    row.append(perf);
+    root.append(perf);
   }
   const t0 = performance.now();
   const timeNow = (): number => (fixedT !== null ? fixedT : 4 + (performance.now() - t0) / 1000);
-  renderAll(timeNow());
+  // ?warm=N — N кадров сразу (достроить тайлы рельефа и полосы до снимка)
+  const warm = Math.max(1, Number(params.get('warm') ?? 1));
+  for (let i = 0; i < warm; i++) renderAll(timeNow(), i === warm - 1);
   const perfEl = document.getElementById('perf');
+  if (perfEl && params.get('perf') === '0') perfEl.textContent = 'замер отключён (?perf=0)';
   if (perfEl && params.get('perf') !== '0') {
     setTimeout(() => {
-      const lines: string[] = ['draw() на 1920×1080, мс (avg / p95 / max)'];
+      const lines: string[] = [
+        'draw() на 1920×1080, dpr 1, мс (avg / p95 / max по 40 кадрам после прогрева; панорама 0.15 м/кадр — новые тайлы рельефа строятся по ходу).',
+        '«запись» — время вызова (обычный холст: растеризация в GPU/композиторе); «растр» — с растеризацией на CPU (худший случай без GPU).',
+        '«зум» — масштаб меняется каждый кадр (полосы масштабируются); «зум, быстро» — то же с fastScaling (без сглаживания).',
+      ];
       const res: Record<string, Record<string, Stat>> = {};
       for (const t of THEMES) {
         res[t] = measure(t);
@@ -474,19 +627,24 @@ function build(): void {
           const s = m[k];
           return s ? `${s.avg.toFixed(2)} / ${s.p95.toFixed(2)} / ${s.max.toFixed(2)}` : '—';
         };
-        lines.push(`${THEME_INFO[t].name}:`);
-        lines.push(`  фон 15 м   запись ${f('bg:record:15')} · растр ${f('bg:raster:15')}`);
-        lines.push(`  фон 35 м   запись ${f('bg:record:35')} · растр ${f('bg:raster:35')}`);
-        lines.push(`  рельеф 15  запись ${f('terrain:record:15')} · растр ${f('terrain:raster:15')}`);
-        lines.push(`  передн. 15 запись ${f('fg:record:15')} · растр ${f('fg:raster:15')}`);
+        const row = (name: string, key: string, id: string): string => `  ${name.padEnd(16)} запись ${f(`${key}:record:${id}`)} · растр ${f(`${key}:raster:${id}`)}`;
+        lines.push(`${THEME_INFO[t].name}: построение полос и облаков (холодный старт) ${m['build:15']?.avg.toFixed(1)} мс`);
+        lines.push(row('фон 15 м', 'bg', '15'));
+        lines.push(row('фон 30 м', 'bg', '30'));
+        lines.push(row('фон, зум', 'bg', 'zoom'));
+        lines.push(row('фон, зум быстро', 'bg', 'zoomFast'));
+        lines.push(row('рельеф 15 м', 'terrain', '15'));
+        lines.push(row('рельеф 30 м', 'terrain', '30'));
+        lines.push(row('передний план', 'fg', '15'));
         if (params.get('phases') === '1')
-          lines.push(
-            '  фазы 15: ' +
-              Object.keys(m)
-                .filter((k) => k.startsWith('phase:') && k.endsWith(':15'))
-                .map((k) => `${k.split(':')[1]} ${m[k].avg.toFixed(2)}`)
-                .join(', '),
-          );
+          for (const id of ['15', '30'])
+            lines.push(
+              `  фазы ${id}: ` +
+                Object.keys(m)
+                  .filter((k) => k.startsWith('phase:') && k.endsWith(`:${id}`))
+                  .map((k) => `${k.split(':')[1]} ${m[k].avg.toFixed(2)}`)
+                  .join(', '),
+            );
       }
       perfEl.textContent = lines.join('\n');
       (window as unknown as { __perf: unknown }).__perf = res;

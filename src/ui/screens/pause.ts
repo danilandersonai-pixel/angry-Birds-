@@ -67,7 +67,22 @@ export class PauseView implements OverlayView {
       h('h2', { class: 'pause-title ts', id: 'abui-pause-title', text: S.pauseTitle }),
       captioned(this.resumeBtn, S.pauseResume),
       h('div', { class: 'pause-pair' }, captioned(this.restartBtn, S.pauseRestart), captioned(this.menuBtn, S.pauseMenu)),
-      h('div', { class: 'pause-toggles' }, ...toggleButtons(ctx, 'xs')),
+      h(
+        'div',
+        { class: 'pause-toggles' },
+        ...toggleButtons(ctx, 'xs'),
+        button({
+          color: 'blue',
+          size: 'xs',
+          icon: 'settings',
+          label: S.settings,
+          testid: 'pause-settings',
+          onClick: () => {
+            ctx.sfx('click');
+            ctx.openSettings();
+          },
+        }),
+      ),
     );
     this.card = h('div', { class: 'panel pause-card' });
     if (level) {

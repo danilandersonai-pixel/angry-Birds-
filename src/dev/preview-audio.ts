@@ -1,15 +1,17 @@
 // Страница предпросмотра звука: кнопка на каждый звук каталога, сценарии через AudioEngine.handle(),
 // музыка меню/уровня. Для объективной проверки — window.__renderAll(): офлайн-рендер каждого звука
-// в OfflineAudioContext ТЕМИ ЖЕ функциями синтеза и через тот же граф шин (компрессор и т. д.),
-// замеры (пик, RMS, длина, центроид, громкость LUFS, «хвост»), WAV в памяти → window.__wav(name) (base64).
+// в OfflineAudioContext ТЕМ ЖЕ путём, что и в игре: запекаемые звуки — буфером, запечённым bakeOne()
+// на 32 кГц с игровым сидом (как в движке), живые — рецептом; через тот же граф шин (компрессор, клиппер).
+// Замеры (пик, RMS, длина, центроид, громкость LUFS, «хвост»), WAV в памяти → window.__wav(name) (base64).
 
 import type { GameEvent } from '../core/events';
 import type { ThemeId } from '../core/types';
 import { AudioEngine } from '../audio/AudioEngine';
-import { type SoundDef, type SoundGroup, SOUND_LIST, soundDef, trimGain } from '../audio/catalog';
+import { BAKE_NOISE_SEED, BAKE_RATE, bakeOne } from '../audio/bake';
+import { busOf, type SoundDef, type SoundGroup, SOUND_LIST, soundDef, trimGain } from '../audio/catalog';
 import { type CompParams, createMixGraph } from '../audio/graph';
 import { CAT_MIX } from '../audio/mix';
-import { makeNoiseBank, makeTanhCurve, mulberry32 } from '../audio/noise';
+import { makeNoiseBank, makeTanhCurve, mulberry32, type NoiseBank } from '../audio/noise';
 import * as F from '../audio/sfx';
 import { setSynthRandom } from '../audio/synth';
 import { startTrack, type TrackId } from '../audio/tracks';
@@ -24,8 +26,36 @@ interface RenderItem {
   label: string;
   dur: number;
   expectMs?: number;
+  /** Ключи запекаемых звуков, которые build берёт буферами (как в игре). */
+  baked?: readonly string[];
+  /** Сколько запечённых вариантов замерить (игра выбирает случайный): громкость — среднее по вариантам. */
+  variants?: number;
   /** Строит звук в offline-контексте со старта t0 (через граф шин, если chain, иначе прямо в destination). */
-  build(oc: OfflineAudioContext, chain: boolean, seed: number, t0: number): void;
+  build(oc: OfflineAudioContext, chain: boolean, seed: number, t0: number, bufs: ReadonlyMap<string, AudioBuffer>): void;
+}
+
+// ── запечённые буферы: тот же bakeOne, частота и сид варианта 0, что и в движке ──
+let bakeNoise: NoiseBank | null = null;
+const bakeCache = new Map<string, AudioBuffer>();
+async function bakedBuffer(def: SoundDef, v = 0): Promise<AudioBuffer> {
+  const id = `${def.key}#${v}`;
+  const hit = bakeCache.get(id);
+  if (hit) return hit;
+  bakeNoise ??= makeNoiseBank(new OfflineAudioContext(1, 1, BAKE_RATE), 2, BAKE_NOISE_SEED);
+  const b = await bakeOne(OfflineAudioContext, def, v, bakeNoise, BAKE_RATE);
+  bakeCache.set(id, b);
+  return b;
+}
+
+/** Голос так, как его играет движок: буфер (запекаемые) или живой рецепт, в узел out. */
+function voice(oc: OfflineAudioContext, out: AudioNode, def: SoundDef, bufs: ReadonlyMap<string, AudioBuffer>, nb: NoiseBank, rnd: () => number, t: number, param: number): void {
+  const b = def.bake > 0 ? bufs.get(def.key) : undefined;
+  if (b) {
+    const src = oc.createBufferSource();
+    src.buffer = b;
+    src.connect(out);
+    src.start(t);
+  } else def.fn({ ctx: oc, out, nb, rnd, tanh: makeTanhCurve(3) }, t, param);
 }
 
 /** Переопределение компрессора для экспериментов (__renderAll({comp})). */
@@ -51,6 +81,8 @@ export interface SoundStats {
   nonFinite: number;
   /** Для музыки — оценка темпа автокорреляцией огибающей, BPM. */
   bpm: number | null;
+  /** Запечённые варианты: моментальная громкость каждого (mMaxLufs — их среднее), LUFS. */
+  mMaxVariants?: number[];
 }
 
 const SR = 48000;
@@ -60,9 +92,11 @@ function sfxItem(def: SoundDef, name = def.key.replace(/:/g, '_'), param = def.p
   const item: RenderItem = {
     name,
     group: def.group,
-    label,
+    label: def.bake > 0 ? `${label} [буфер 32 кГц]` : label,
     dur: def.dur + (def.send ? 0.9 : 0.25),
-    build(oc, chain, seed, t0) {
+    baked: def.bake > 0 ? [def.key] : [],
+    variants: Math.max(1, def.bake),
+    build(oc, chain, seed, t0, bufs) {
       const rnd = mulberry32(seed);
       setSynthRandom(rnd);
       const nb = makeNoiseBank(oc, 2, 4242);
@@ -71,7 +105,7 @@ function sfxItem(def: SoundDef, name = def.key.replace(/:/g, '_'), param = def.p
         const g = graph(oc);
         const inp = oc.createGain();
         inp.gain.value = CAT_MIX[def.cat].gain * trimGain(def);
-        inp.connect(g.busFor(def.cat));
+        inp.connect(busOf(g, def));
         if (def.send) {
           const sg = oc.createGain();
           sg.gain.value = def.send;
@@ -79,8 +113,7 @@ function sfxItem(def: SoundDef, name = def.key.replace(/:/g, '_'), param = def.p
         }
         out = inp;
       }
-      const s: F.S = { ctx: oc, out, nb, rnd, tanh: makeTanhCurve(3) };
-      def.fn(s, t0, param);
+      voice(oc, out, def, bufs, nb, rnd, t0, param);
     },
   };
   if (def.expectMs !== undefined) item.expectMs = def.expectMs;
@@ -124,7 +157,60 @@ function ambItem(theme: ThemeId, dur: number): RenderItem {
   };
 }
 
-/** Полный список рендера: каждый звук каталога + варианты параметров + музыка 20 с + фоны тем. */
+/** Реплика сцены микса: [ключ, время от старта с, громкость события, параметр, панорама]. */
+type MixCue = readonly [key: string, at: number, gain?: number, param?: number, pan?: number];
+
+/**
+ * Сцена микса через игровой граф: голоса как в движке (громкость категории × калибровка × событие, шина, реверб)
+ * плюс музыка трека. Проверка худшего случая: пики после компрессора и баланс SFX над музыкой.
+ */
+function mixItem(name: string, label: string, dur: number, cues: ReadonlyArray<MixCue>, music?: { id: TrackId; theme: ThemeId }): RenderItem {
+  return {
+    name,
+    group: 'mix',
+    label,
+    dur,
+    baked: [...new Set(cues.map(([k]) => k))].filter((k) => (soundDef(k)?.bake ?? 0) > 0),
+    build(oc, chain, seed, t0, bufs) {
+      const rnd = mulberry32(seed);
+      setSynthRandom(rnd);
+      const nb = makeNoiseBank(oc, 2, 4242);
+      const g = chain ? graph(oc) : null;
+      if (music) startTrack(oc, nb, g ? g.music : oc.destination, g ? g.amb : oc.destination, music.id, music.theme, { at: t0, fadeIn: 0.05, untilS: dur - 0.5, rnd });
+      for (const [key, at, gain = 1, param, pan = 0] of cues) {
+        const def = soundDef(key);
+        if (!def) throw new Error(`нет звука ${key}`);
+        const inp = oc.createGain();
+        inp.gain.value = (g ? CAT_MIX[def.cat].gain * trimGain(def) : 1) * gain;
+        const p = oc.createStereoPanner();
+        p.pan.value = pan;
+        inp.connect(p).connect(g ? busOf(g, def) : oc.destination);
+        if (g && def.send) {
+          const sg = oc.createGain();
+          sg.gain.value = def.send;
+          inp.connect(sg).connect(g.send);
+        }
+        voice(oc, inp, def, bufs, nb, rnd, t0 + at, param ?? def.param ?? 0);
+      }
+    },
+  };
+}
+
+/** Худший случай: цепочка из трёх TNT + Бомб, обрушение башни из всех материалов, гибель свиней — поверх фона уровня. */
+function worstCaseCues(): MixCue[] {
+  const c: MixCue[] = [['launch:bomb', 0], ['slingRelease:hi', 0], ['hurt:bomb', 1.0], ['feather', 1.0, 0.8]];
+  const booms: Array<[string, number]> = [['boom:tnt', 1.2], ['boom:tnt', 1.32], ['boom:bomb', 1.36], ['boom:tnt', 1.44]];
+  booms.forEach(([k, t], i) => c.push([k, t, 1, undefined, (i - 1.5) * 0.15]));
+  for (let i = 0; i < 6; i++) {
+    const m = (['woodBreak', 'iceShatter', 'stoneBreak'] as const)[i % 3];
+    c.push([m, 1.22 + i * 0.05, 1.2, undefined, (i % 3 - 1) * 0.3]);
+  }
+  for (let i = 0; i < 4; i++) c.push([(['woodHit:2', 'stoneHit:2', 'iceHit:2', 'ground:1'] as const)[i], 1.25 + i * 0.03]);
+  c.push(['rubble', 1.3], ['pigPop:large', 1.3], ['pigPop:small', 1.38], ['pigPopQuiet', 1.45], ['helmet', 1.4]);
+  return c;
+}
+
+/** Полный список рендера: каждый звук каталога + варианты параметров + музыка 20 с + фоны тем + сцены микса. */
 export function renderList(): RenderItem[] {
   const items: RenderItem[] = [];
   for (const d of SOUND_LIST) {
@@ -137,6 +223,20 @@ export function renderList(): RenderItem[] {
     } else items.push(sfxItem(d));
   }
   items.push(trackItem('menu', 'meadow', 20), trackItem('level', 'meadow', 20), ambItem('beach', 8), ambItem('snow', 8));
+  items.push(
+    mixItem('mix_worst_tnt_chain', 'Худший случай: цепь TNT + обрушение над фоном уровня', 5, worstCaseCues(), { id: 'level', theme: 'meadow' }),
+    mixItem('mix_shot_over_level', 'Выстрел и удары над фоном уровня (пляж)', 4, [
+      ['hop', 0.2], ['select:red', 0.4], ['slingGrab', 1.0], ['slingStretch', 1.2, 1, 0.5], ['slingStretch', 1.35, 1, 0.9],
+      ['slingRelease:hi', 1.6], ['launch:red', 1.64, 1, undefined, 0.1], ['woodHit:1', 2.6, 0.6], ['woodCrack:1', 2.62], ['hurt:red', 2.6], ['feather', 2.6, 0.8],
+      ['pigHurt:medium', 2.8], ['woodBreak', 2.9], ['pigPop:medium', 3.0],
+    ], { id: 'level', theme: 'beach' }),
+    mixItem('mix_menu_ui', 'Кнопки поверх польки меню', 4, [['ui:click', 1.0], ['ui:whoosh', 1.6], ['ui:popIn', 2.4], ['ui:back', 3.2]], { id: 'menu', theme: 'meadow' }),
+    mixItem('mix_victory', 'Экран победы: джингл, звёзды, тики, рекорд', 6, [
+      ['jingle:win', 0], ['star:0', 1.6], ['star:1', 2.05], ['star:2', 2.5],
+      ...Array.from({ length: 26 }, (_, k): MixCue => ['tick', 2.75 + k * 0.046, 1, k / 25]),
+      ['scoreDone', 3.95], ['newBest', 4.0],
+    ]),
+  );
   return items;
 }
 
@@ -365,28 +465,39 @@ async function renderAll(opts: RenderAllOpts = {}): Promise<SoundStats[]> {
   for (const it of renderList()) {
     seed += 17;
     if (re && !re.test(it.name)) continue;
-    // Компрессор Chromium стартует «холодным» (детектор = 0) и полсекунды душит сигнал —
-    // в игре он давно прогрет, поэтому звук ставим после разогрева WARM_S и отрезаем начало.
-    const lead = chain ? WARM_S : 0;
-    const oc = new OfflineAudioContext(2, Math.ceil(SR * (it.dur + lead)), SR);
-    if (chain) {
-      // разогрев: тихий тон ниже порога компрессора, затихает до старта звука
-      const o = oc.createOscillator();
-      const g = oc.createGain();
-      o.frequency.value = 220;
-      g.gain.setValueAtTime(0, 0);
-      o.connect(g).connect(oc.destination);
-      o.start(0);
-      o.stop(0.01);
+    const runs: SoundStats[] = [];
+    for (let v = 0; v < (it.variants ?? 1); v++) {
+      // Компрессор Chromium стартует «холодным» (детектор = 0) и полсекунды душит сигнал —
+      // в игре он давно прогрет, поэтому звук ставим после разогрева WARM_S и отрезаем начало.
+      const lead = chain ? WARM_S : 0;
+      const oc = new OfflineAudioContext(2, Math.ceil(SR * (it.dur + lead)), SR);
+      if (chain) {
+        // разогрев: тихий тон ниже порога компрессора, затихает до старта звука
+        const o = oc.createOscillator();
+        const g = oc.createGain();
+        o.frequency.value = 220;
+        g.gain.setValueAtTime(0, 0);
+        o.connect(g).connect(oc.destination);
+        o.start(0);
+        o.stop(0.01);
+      }
+      const bufs = new Map<string, AudioBuffer>();
+      for (const k of it.baked ?? []) bufs.set(k, await bakedBuffer(soundDef(k)!, v));
+      try {
+        it.build(oc, chain, seed, lead + 0.01, bufs);
+      } finally {
+        setSynthRandom(Math.random);
+      }
+      const buf = cut(await oc.startRendering(), lead);
+      runs.push(analyze(it, buf));
+      if (v === 0 && opts.wav !== false) wavs.set(it.name, encodeWav(buf));
     }
-    try {
-      it.build(oc, chain, seed, lead + 0.01);
-    } finally {
-      setSynthRandom(Math.random);
+    const st = runs[0]!;
+    if (runs.length > 1) {
+      st.mMaxVariants = runs.map((r) => r.mMaxLufs);
+      st.mMaxLufs = st.mMaxVariants.reduce((a, b) => a + b, 0) / runs.length;
     }
-    const buf = cut(await oc.startRendering(), lead);
-    out.push(analyze(it, buf));
-    if (opts.wav !== false) wavs.set(it.name, encodeWav(buf));
+    out.push(st);
   }
   return out;
 }
@@ -469,7 +580,7 @@ const ev = (e: GameEvent): void => engine.handle(e, view);
 {
   const row = section('Музыка', 'Смена трека — кроссфейд 0.6 с; повторный выбор того же трека ничего не перезапускает.');
   button(row, 'Меню (полька)', () => engine.playMusic('menu'));
-  for (const th of ['meadow', 'beach', 'snow'] as const) button(row, `Уровень: ${th}`, () => engine.playMusic('level', th));
+  for (const th of ['meadow', 'beach', 'snow'] as const) button(row, `Уровень (фон): ${th}`, () => engine.playMusic('level', th));
   button(row, 'Тишина', () => engine.playMusic(null));
   button(row, 'Пауза вкл/выкл', (() => {
     let p = false;
@@ -482,7 +593,7 @@ const ev = (e: GameEvent): void => engine.handle(e, view);
 // ── сценарии через handle() ──
 {
   const row = section('Сценарии (через AudioEngine.handle — лимиты, кулдауны, пространство)',
-    'Камера: camX = 10 м, viewW = 24 м. «Шторм» — 30 ударов в кадр 60 кадров подряд: слышно ≤ 4 в кадр, общий лимит 24 голоса.');
+    'Камера: camX = 10 м, viewW = 24 м. «Шторм» — 30 ударов в кадр 60 кадров подряд: слышно ≤ 4 в кадр, общий лимит 32 голоса (на телефоне 20).');
   const getX = slider(row, 'x источника, м', -30, 50, 1, 10);
   const getI = slider(row, 'импульс J', 0, 20, 0.5, 8);
   button(row, 'Удар по дереву', () => ev({ type: 'impact', x: getX(), y: 1, impulse: getI(), a: 'bird', b: 'wood' }));
@@ -522,11 +633,31 @@ const ev = (e: GameEvent): void => engine.handle(e, view);
     setTimeout(() => ev({ type: 'explosion', x: getX(), y: 1, radius: 3, source: 'bomb' }), 2000);
   });
   button(row, 'Смех свиней', () => ev({ type: 'pigsLaugh' }));
+  button(row, 'Смех: король + малый', () => ev({ type: 'pigsLaugh', pigs: ['small', 'king', 'small'] }));
+  button(row, 'Удар: мелкий / крупный блок', () => {
+    ev({ type: 'impact', x: getX(), y: 1, impulse: getI(), a: 'wood', b: 'bird', size: 0.35 });
+    setTimeout(() => ev({ type: 'impact', x: getX(), y: 1, impulse: getI(), a: 'wood', b: 'bird', size: 2.5 }), 450);
+  });
   button(row, 'Бонус 3 птицы', () => {
     ev({ type: 'stateChanged', from: 'settling', to: 'bonus' });
     for (let i = 0; i < 3; i++) setTimeout(() => ev({ type: 'birdBonus', bird: 'red', x: -2 - i, y: 0.5, points: 10000 }), i * 700);
   });
   button(row, 'Победа (levelEnd)', () => ev({ type: 'levelEnd', won: true, score: 50000, stars: 3 }));
+  button(row, 'Экран победы как в UI (ui: звёзды, тики без прогресса, рекорд)', () => {
+    engine.ui('win');
+    (['star1', 'star2', 'star3'] as const).forEach((n, i) => setTimeout(() => engine.ui(n), [500, 950, 1400][i]));
+    for (let t = 1650; t < 2850; t += 61) setTimeout(() => engine.ui('tick'), t);
+    setTimeout(() => engine.ui('newRecord'), 2850);
+  });
+  button(row, 'Конец уровня → рестарт (фон уровня возвращается)', () => {
+    engine.playMusic('level', 'beach');
+    ev({ type: 'stateChanged', from: 'loading', to: 'ready' });
+    setTimeout(() => {
+      ev({ type: 'stateChanged', from: 'bonus', to: 'won' });
+      ev({ type: 'levelEnd', won: true, score: 1, stars: 1 });
+    }, 1500);
+    setTimeout(() => ev({ type: 'stateChanged', from: 'loading', to: 'ready' }), 5000);
+  });
   button(row, 'Экран победы: звёзды + счёт', () => {
     engine.ui('pop');
     [0.5, 0.95, 1.4].forEach((t, i) => setTimeout(() => engine.reward((['star0', 'star1', 'star2'] as const)[i]!), t * 1000));

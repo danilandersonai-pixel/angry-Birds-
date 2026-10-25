@@ -121,10 +121,10 @@ const LAUNCH: Record<BirdType, Syl[]> = {
   // Форманта, следящая за F0 (q 3), даёт «тело» тонкому голосу: без неё F2 «у» (950 Гц) совпадает
   // с F0 900 Гц на старте и звенит ~10 мс пиком на −4 dBFS при тихом остальном звуке.
   blues: [{ at: 0, v: { wave: 'triangle', f0: [[0, 900], [120, 1300], [250, 1250]], gain: 0.3, durMs: 200, env: { a: 14, d: 60, s: 0.75, r: 60 }, formants: [...fm('u', 'i', 100, 1.2, 1.6), { f: [[0, 1000], [120, 1400], [250, 1350]], q: 3, g: 2.2 }], body: 0.5, vib: { rate: 9, depth: 40, delayMs: 80 } } }],
-  // «Йи-ха!» 0.35 с
+  // «Йи-ха!» 0.35 с — два коротких слога, по высоте посередине между Редом и Сильвер (≈ ±3 полутона)
   chuck: [
-    { at: 0, v: { wave: 'sawtooth', f0: [[0, 600], [140, 900]], gain: 0.46, durMs: 120, env: EVS, formants: fm('i', 'i', 1) } },
-    { at: 170, asp: 0.35, v: { wave: 'sawtooth', f0: [[0, 820], [180, 700]], gain: 0.5, durMs: 160, env: EVS, formants: fm('a', 'a', 1), vib: { rate: 7, depth: 25, delayMs: 60 } } },
+    { at: 0, v: { wave: 'sawtooth', f0: [[0, 660], [120, 990]], gain: 0.46, durMs: 110, env: EVS, formants: fm('i', 'i', 1) } },
+    { at: 155, asp: 0.35, v: { wave: 'sawtooth', f0: [[0, 900], [170, 760]], gain: 0.5, durMs: 150, env: EVS, formants: fm('a', 'a', 1), vib: { rate: 7, depth: 25, delayMs: 60 } } },
   ],
   // «Хо-о!» 0.4 с
   bomb: [{ at: 0, asp: 0.3, v: { wave: 'sawtooth', f0: [[0, 160], [150, 225], [400, 200]], gain: 0.4, durMs: 360, env: EV, formants: fm('o', 'o', 1, 2.6, 2), body: 0.5, growl: { rate: 25, depth: 0.4 }, sub: 0.3 } }],
@@ -134,8 +134,8 @@ const LAUNCH: Record<BirdType, Syl[]> = {
   hal: [{ at: 0, asp: 0.25, v: { wave: 'square', f0: [[0, 480], [90, 560], [350, 440]], gain: 0.65, durMs: 300, env: EV, formants: [...fm('a', 'a', 1), { f: 2400, q: 8, g: 0.8 }], growl: { rate: 45, depth: 0.6, untilMs: 80 } } }],
   // «Р-р-р-ах!» 0.6 с
   terence: [{ at: 0, v: { wave: 'sawtooth', f0: [[0, 95], [350, 110], [600, 120]], gain: 0.37, durMs: 560, env: { a: 20, d: 120, s: 0.85, r: 100 }, formants: [{ f: [[0, 420], [350, 450], [420, 750]], q: 6, g: 2.4 }, { f: [[0, 800], [420, 1150]], q: 8, g: 1.8 }], body: 0.6, growl: { rate: 28, depth: 0.7, untilMs: 350 }, sub: 0.5 } }],
-  // «Уи-и-и!» 0.4 с
-  silver: [{ at: 0, v: { wave: 'triangle', f0: [[0, 700], [150, 1100], [400, 1000]], gain: 1.4, durMs: 350, env: EV, formants: fm('u', 'i', 120, 3, 3), body: 0.5, vib: { rate: 7, depth: 30, delayMs: 120 } } }],
+  // «Уи-и-и!» 0.4 с — узнаётся по быстрой глубокой трели (11 Гц ±60 центов) на длинной ноте
+  silver: [{ at: 0, v: { wave: 'triangle', f0: [[0, 700], [150, 1100], [400, 1000]], gain: 1.4, durMs: 350, env: EV, formants: fm('u', 'i', 120, 3, 3), body: 0.5, vib: { rate: 11, depth: 60, delayMs: 90 } } }],
 };
 
 const SELECT: Record<BirdType, Syl[]> = {
@@ -580,8 +580,9 @@ export function star(s: S, t: number, i: number): number {
 }
 
 export const starEmpty = (s: S, t: number): number => playTone(s.ctx, s.out, t, { wave: 'triangle', f: [[0, 300], [60, 240]], gain: 0.4, a: 1, tau: 25 });
-/** Бонус за птицу: колокольчик A5 + i полутонов. */
-export const bonusDing = (s: S, t: number, i: number): number => bell(s, t, 81 + i, 0.33, 0.6);
+/** Бонус за птицу: колокольчик A5 + i полутонов (i ограничен октавой — птиц в очереди меньше). */
+export const bonusDing = (s: S, t: number, i: number): number =>
+  bell(s, t, 81 + Math.max(0, Math.min(12, Math.round(Number.isFinite(i) ? i : 0))), 0.33, 0.6);
 /** Тик счётчика очков; progress 0..1 поднимает тон 1800→3000 Гц. */
 export const scoreTick = (s: S, t: number, progress: number): number =>
   playTone(s.ctx, s.out, t, { wave: 'triangle', f: 1800 + 1200 * clamp01(progress), gain: 0.35, a: 0.5, tau: 6 });

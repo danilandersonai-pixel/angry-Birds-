@@ -15,6 +15,11 @@ export const THEME_UI: Record<ThemeId, { card: string; cardHi: string; cardEdge:
 
 const dpr = (): number => Math.min(2, Math.max(1, typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1));
 
+/** Текущий масштаб меню (u-menu), под который растеризуются иллюстрации. Обновляет UI при раскладке. */
+export const artScale = { u: 1.25 };
+/** Множитель разрешения холстов: не меньше 1.25 (HUD), не больше 2 (потолок меню). */
+const resK = (): number => Math.min(2, Math.max(1.25, artScale.u)) * dpr();
+
 /**
  * Спрайт персонажа как DOM-холст. rU — радиус тела в единицах u; CSS-размер задаётся в u,
  * поэтому персонаж масштабируется вместе с интерфейсом. Разрешение — с запасом под u ≤ 1.25 и DPR.
@@ -26,7 +31,7 @@ export function characterCanvas(
   rU: number,
   cls = '',
 ): HTMLCanvasElement {
-  const ppu = Math.ceil(rU * 1.25 * dpr());
+  const ppu = Math.ceil(rU * resK());
   let canvas: HTMLCanvasElement;
   try {
     canvas =
@@ -401,7 +406,7 @@ export function episodeHeroes(ep: EpisodeDef, prevEpisodes: readonly EpisodeDef[
 
 /** Холст-арт карточки эпизода: пейзаж темы + герой-птица в полёте + свинья на земле. wU×hU — размер в u. */
 export function episodeArt(ep: EpisodeDef, prev: readonly EpisodeDef[], wU: number, hU: number, seed: number): HTMLCanvasElement {
-  const k = 1.25 * dpr();
+  const k = resK();
   const W = Math.round(wU * k);
   const H = Math.round(hU * k);
   const cv = document.createElement('canvas');

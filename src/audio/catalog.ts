@@ -2,6 +2,7 @@
 // Один источник правды для движка (handle/ui), запекания (bake.ts) и страницы предпросмотра/рендера.
 
 import type { BirdType, PigType } from '../core/types';
+import type { MixGraph } from './graph';
 import type { Cat } from './mix';
 import { DEFEAT, playJingle, VICTORY } from './music';
 import * as F from './sfx';
@@ -22,12 +23,21 @@ export interface SoundDef {
   prio: 0 | 1 | 2;
   /** Уровень посыла в реверб. */
   send?: number;
+  /** Шина: 'music' — джинглы (звучат только при включённой музыке); иначе — по категории (sfx/ui). */
+  bus?: 'music';
   /** Параметр рецепта по умолчанию (натяжение, длительность, номер…). */
   param?: number;
   /** Ожидаемая длина выше −50 дБ, мс — только там, где она указана в docs/research/05-audio.md §8, §13. */
   expectMs?: number;
   /** Подстройка громкости, дБ (калибровка по громкости, см. LOUDNESS_TRIM_DB). */
   trimDb: number;
+  /**
+   * Доля длины звука, которую голос держит место в пуле (по умолчанию 1). Для колокольчиков 2/3:
+   * у экспоненциального хвоста −40 дБ наступает на 2/3 пути до −60 дБ; тише хвост доигрывает вне лимита.
+   */
+  holdFrac?: number;
+  /** Вес при краже голоса (score × weight, по умолчанию 1): тик счёта уступает звёздам, рекорд важнее звёзд. */
+  weight?: number;
   fn: (s: F.S, t: number, param: number) => number;
 }
 
@@ -42,26 +52,35 @@ const PIG_RU: Record<PigType, string> = {
 };
 const LAUNCH_MS: Record<BirdType, number> = { red: 485, blues: 252, chuck: 403, bomb: 470, matilda: 392, hal: 409, terence: 687, silver: 467 };
 const TIER_I = [0.15, 0.5, 0.9] as const;
+/** Колокольчики держат голос до −40 дБ (2/3 длины до −60 дБ). */
+const BELL_HOLD = 2 / 3;
 const TIER_RU = ['лёгкий', 'средний', 'сильный'] as const;
 
 /**
  * Калибровка «весомости»: рецепты из 05-audio выровнены по ПИКУ, а слышим мы громкость.
  * Поправки, дБ, посчитаны по максимальной моментальной громкости (BS.1770, окно 400 мс) офлайн-рендера
- * через игровой граф (scripts/render-audio.mjs) к целям класса, LUFS:
+ * через игровой граф (scripts/render-audio.mjs) ТЕМ ЖЕ путём, что в игре: запекаемые звуки — буфером 32 кГц
+ * с игровым сидом (среднее по вариантам), живые — рецептом. Цели класса, LUFS:
  *   взрывы −13 · крик при запуске −13 (Синие −14.5, Теренс −14) · способности −15 · разрушения −16 · смех/гибель свиней −17
  *   реплика выбора −19 · «уф» −20 · трещины, удары (сильные) −20…−21 · лёд −17 · земля −21 · захват рогатки −27
- *   звёзды −13/−12/−11 · бонус −14 · джинглы −14/−16 · UI −23…−24 · hover −36.
+ *   звёзды −13/−12/−11 · бонус −14 · джинглы −14/−16 · UI −21…−22.
+ * Кнопки меню (RMS в окне 100 мс) на 5–7 дБ громче медианы польки (−25 dBFS), hover — около неё.
+ * Переход на замер запечённого пути (32 против 48 кГц, свои сиды): Синие −1, лёд-звон +1, обломки +1.3,
+ * трещины льда +0.6…0.8, земля сильная +0.8, «пуф» +0.9, Теренс +0.5…0.7, отмена +0.5; трещины камня
+ * в запечённом виде уже совпадают с трещинами дерева и льда (±0.5 дБ по стадиям) — поправка не нужна.
  */
 export const LOUDNESS_TRIM_DB: Readonly<Record<string, number>> = {
-  'slingGrab': 1, 'hop': -1, 'launch:red': -2.5, 'hurt:red': 1, 'launch:blues': -4.5, 'select:blues': -3.5,
+  'slingGrab': 1, 'slingCancel': 0.5, 'hop': -1, 'launch:red': -2.5, 'hurt:red': 1, 'launch:blues': -4.5, 'select:blues': -3.5,
   'hurt:blues': -4, 'select:chuck': 3, 'launch:bomb': 2, 'select:bomb': 2, 'hurt:bomb': 3, 'launch:matilda': 1.5,
-  'select:matilda': -1.5, 'hurt:matilda': -5.5, 'launch:hal': -1.5, 'hurt:hal': -1, 'launch:terence': 2.5, 'select:terence': 2,
-  'hurt:terence': 5.5, 'launch:silver': -5.5, 'select:silver': -2.5, 'hurt:silver': -6, 'feather': 2, 'ab:silver': -8.5,
+  'select:matilda': -1.5, 'hurt:matilda': -5.5, 'launch:hal': -1.5, 'hurt:hal': -1, 'launch:terence': 3.2, 'select:terence': 2.5,
+  'hurt:terence': 5.5, 'launch:silver': -5.5, 'select:silver': -2.5, 'hurt:silver': -6, 'feather': 2, 'puff': 0.9, 'ab:silver': -8.5, 'ab:blues': -1.9,
   'ab:bombSwell': -2, 'fuse': -4, 'iceHit:0': -3.5, 'iceHit:1': -3.5, 'iceHit:2': -3.5, 'ground:0': -2,
-  'ground:1': -1.5, 'woodBreak': 2, 'iceShatter': -1, 'boom:tnt': 1.5, 'boom:bomb': 1.5, 'boom:egg': 2,
+  'ground:1': -0.7, 'iceCrack:1': 0.8, 'iceCrack:2': 0.7, 'iceCrack:3': 0.6, 'woodBreak': 2, 'iceShatter': 0, 'rubble': 1.3,
+  'boom:tnt': 1.5, 'boom:bomb': 1.5, 'boom:egg': 2,
   'helmet': -4.5, 'star:0': -1, 'star:1': -1.5, 'star:2': -2.5, 'bonus': -2.5, 'scoreDone': -3,
-  'jingle:win': 2, 'jingle:lose': 2, 'ui:click': 1.5, 'ui:toggleOn': -2, 'ui:toggleOff': -2, 'ui:popIn': -2,
-  'ui:locked': -4, 'ui:whoosh': -1, 'ui:hover': 7.5,
+  'jingle:win': 2, 'jingle:lose': 2,
+  // UI: +2 дБ к первой калибровке (сцена mix_menu_ui); полька при этом стала на 5 дБ тише (TRACK_GAIN.menu)
+  'ui:click': 3.5, 'ui:back': 2, 'ui:toggleOn': 0, 'ui:toggleOff': 0, 'ui:popIn': 0, 'ui:locked': -2, 'ui:whoosh': 1, 'ui:hover': 16.5,
 };
 
 type DefIn = Omit<SoundDef, 'trimDb'>;
@@ -135,18 +154,18 @@ const defs0: DefIn[] = [
   { key: 'pigPopQuiet', group: 'pig', label: 'Гибель (без визга)', cat: 'impact', dur: 0.45, bake: 2, prio: 0, fn: (s, t) => F.pigPop(s, t, 'medium', false) },
   { key: 'helmet', group: 'pig', label: 'Каска слетела', cat: 'impact', dur: 1.5, bake: 1, prio: 1, expectMs: 1114, fn: (s, t) => F.helmetClang(s, t) },
 
-  // ── награды (живой синтез: длинные колокольные хвосты) ──
+  // ── награды (живой синтез: длинные колокольные хвосты; место в пуле — до −40 дБ) ──
   ...[0, 1, 2].map((i): DefIn => ({
     key: `star:${i}`, group: 'reward', label: `Звезда ${i + 1}`, cat: 'reward', dur: 4.5, bake: 0, prio: 2, expectMs: i === 2 ? 3758 : 3531,
-    fn: (s, t) => F.star(s, t, i),
+    holdFrac: BELL_HOLD, fn: (s, t) => F.star(s, t, i),
   })),
   { key: 'starEmpty', group: 'reward', label: 'Пустая звезда', cat: 'reward', dur: 0.3, bake: 0, prio: 2, fn: (s, t) => F.starEmpty(s, t) },
-  { key: 'bonus', group: 'reward', label: 'Бонус за птицу', cat: 'reward', dur: 2.8, bake: 0, prio: 2, param: 0, fn: (s, t, i) => F.bonusDing(s, t, i) },
-  { key: 'tick', group: 'reward', label: 'Тик счётчика', cat: 'reward', dur: 0.12, bake: 0, prio: 2, param: 0.5, fn: (s, t, p) => F.scoreTick(s, t, p) },
-  { key: 'scoreDone', group: 'reward', label: 'Счёт закончен', cat: 'reward', dur: 3.5, bake: 0, prio: 2, fn: (s, t) => F.scoreDone(s, t) },
-  { key: 'newBest', group: 'reward', label: 'Новый рекорд', cat: 'reward', dur: 5.5, bake: 0, prio: 2, fn: (s, t) => F.newBest(s, t) },
-  { key: 'jingle:win', group: 'reward', label: 'Джингл победы', cat: 'reward', dur: 3.2, bake: 0, prio: 2, expectMs: 2932, fn: (s, t) => playJingle(s.ctx, s.nb, s.out, VICTORY, t, 0.6) },
-  { key: 'jingle:lose', group: 'reward', label: 'Джингл поражения', cat: 'reward', dur: 2.8, bake: 0, prio: 2, expectMs: 2396, fn: (s, t) => playJingle(s.ctx, s.nb, s.out, DEFEAT, t, 0.8) },
+  { key: 'bonus', group: 'reward', label: 'Бонус за птицу', cat: 'reward', dur: 2.8, bake: 0, prio: 2, param: 0, holdFrac: BELL_HOLD, weight: 0.8, fn: (s, t, i) => F.bonusDing(s, t, i) },
+  { key: 'tick', group: 'reward', label: 'Тик счётчика', cat: 'reward', dur: 0.12, bake: 0, prio: 2, param: 0.5, weight: 0.5, fn: (s, t, p) => F.scoreTick(s, t, p) },
+  { key: 'scoreDone', group: 'reward', label: 'Счёт закончен', cat: 'reward', dur: 3.5, bake: 0, prio: 2, holdFrac: BELL_HOLD, fn: (s, t) => F.scoreDone(s, t) },
+  { key: 'newBest', group: 'reward', label: 'Новый рекорд', cat: 'reward', dur: 5.5, bake: 0, prio: 2, holdFrac: BELL_HOLD, weight: 1.2, fn: (s, t) => F.newBest(s, t) },
+  { key: 'jingle:win', group: 'reward', label: 'Джингл победы', cat: 'jingle', bus: 'music', dur: 3.2, bake: 0, prio: 2, expectMs: 2932, fn: (s, t) => playJingle(s.ctx, s.nb, s.out, VICTORY, t, 0.6) },
+  { key: 'jingle:lose', group: 'reward', label: 'Джингл поражения', cat: 'jingle', bus: 'music', dur: 2.8, bake: 0, prio: 2, expectMs: 2396, fn: (s, t) => playJingle(s.ctx, s.nb, s.out, DEFEAT, t, 0.8) },
 
   // ── интерфейс ──
   ...(['click', 'back', 'toggleOn', 'toggleOff', 'popIn', 'locked', 'whoosh', 'hover'] as const).map((u): DefIn => ({
@@ -163,6 +182,16 @@ export const SOUND_LIST: readonly SoundDef[] = defs;
 
 export function soundDef(key: string): SoundDef | undefined {
   return SOUNDS.get(key);
+}
+
+/** Шина назначения звука в графе микшера (одна функция для движка и офлайн-рендера). */
+export function busOf(g: MixGraph, d: SoundDef): AudioNode {
+  return d.bus === 'music' ? g.music : g.busFor(d.cat);
+}
+
+/** Звучит ли звук на шине музыки (джинглы): тогда его включает/выключает setMusic, а не setSfx. */
+export function onMusicBus(key: string): boolean {
+  return SOUNDS.get(key)?.bus === 'music';
 }
 
 /** Линейный множитель громкости звука (подстройка калибровки). */

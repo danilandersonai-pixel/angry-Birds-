@@ -49,11 +49,72 @@
 .abui *::after {
   box-sizing: border-box;
 }
+/* Полоса для меню, оверлеев и диалогов: в обычном режиме — весь экран (без своего контекста наложения). */
+.abui-band {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+/* «Играть так» в портрете (07 §15.1): полоса верстается как экран 640×360 и масштабируется в 16:9 по ширине;
+   HUD, подсказки и тосты остаются в полный размер в полосах сверху и снизу (UI.relayout) */
 .abui[data-letterbox] {
-  inset: auto 0;
+  --lb-h: calc(360px * var(--lb-k, 1));
+  --lb-sky: #5bc0f5;
+  --lb-ground: #6c4325;
+}
+.abui[data-letterbox] .abui-band {
+  inset: auto;
+  left: 50%;
   top: 50%;
-  height: calc(100vw * 9 / 16);
-  transform: translateY(-50%);
+  width: 640px;
+  height: 360px;
+  transform: translate(-50%, -50%) scale(var(--lb-k, 1));
+  z-index: 20;
+}
+/* полосы сверху и снизу тонированы под тему: небо сверху, земля снизу */
+.abui[data-letterbox]::before,
+.abui[data-letterbox]::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: calc(50% - var(--lb-h) / 2 + 1px);
+  pointer-events: none;
+}
+.abui[data-letterbox]::before {
+  top: 0;
+  background: linear-gradient(180deg, var(--ink) 0%, var(--ink-2) 45%, var(--lb-sky) 100%);
+}
+.abui[data-letterbox]::after {
+  bottom: 0;
+  background: linear-gradient(180deg, var(--lb-ground) 0%, #2a1a10 55%, var(--ink) 100%);
+}
+.abui[data-letterbox][data-theme='beach'] {
+  --lb-sky: #7b3f8e;
+  --lb-ground: #c8904e;
+}
+.abui[data-letterbox][data-theme='snow'] {
+  --lb-sky: #2c6cc2;
+  --lb-ground: #5f6a85;
+}
+/* плашка уровня — над полосой; подсказки — под полосой; баннер — на 30 % высоты полосы */
+.abui[data-letterbox] .hud-level {
+  top: auto;
+  bottom: calc(50% + var(--lb-h) / 2 + 12px);
+}
+.abui[data-letterbox] .hint,
+.abui[data-letterbox] .ability-hint {
+  top: calc(50% + var(--lb-h) / 2 + 12px);
+}
+.abui[data-letterbox] .banner {
+  top: calc(50% - var(--lb-h) * 0.2);
+}
+/* пауза открыта в полосе — HUD сверху гаснет и не нажимается (под результатами он скрыт совсем — .is-dim) */
+.abui[data-letterbox][data-overlay] .hud:not(.is-dim) {
+  opacity: 0.3;
+}
+.abui[data-letterbox][data-overlay] .hud .btn {
+  pointer-events: none;
 }
 .abui-defs {
   position: absolute;
@@ -79,6 +140,8 @@
 .ts {
   -webkit-text-stroke: var(--stroke, 0.18em) var(--stroke-c, var(--ink));
   paint-order: stroke fill;
+  /* обводка «съедает» пробелы: возвращаем их ширину */
+  word-spacing: calc(var(--stroke, 0.18em) * 0.6);
 }
 .num {
   font-family: var(--font-num);
@@ -111,6 +174,15 @@
 }
 .abui-overlays {
   z-index: 30;
+}
+.abui-dialogs {
+  z-index: 40;
+}
+/* меню, оверлеи и диалоги масштабируются сильнее HUD (потолок 2.0 вместо 1.25, см. layout.ts) */
+.abui-screens,
+.abui-overlays,
+.abui-dialogs {
+  --u: var(--u-menu, 1px);
 }
 .abui-toasts {
   z-index: 50;
@@ -471,7 +543,7 @@
   gap: max(6px, calc(10 * var(--u)));
 }
 .btn-cap {
-  font-size: max(13px, calc(20 * var(--u)));
+  font-size: max(14px, calc(20 * var(--u)));
   font-weight: 900;
   text-transform: uppercase;
   letter-spacing: 0.03em;
@@ -580,8 +652,10 @@
 }
 .ribbon-text {
   position: relative;
+  color: #fff;
   margin-top: -1.2%;
-  font-size: max(22px, calc(44 * var(--u)));
+  /* --rk < 1 — текст не влез в тело ленты с отступом 8 % (dom.ts, fitRibbon) */
+  font-size: calc(max(22px, calc(44 * var(--u))) * var(--rk, 1));
   text-transform: uppercase;
   letter-spacing: 0.02em;
   white-space: nowrap;
@@ -645,7 +719,7 @@
 }
 .scr-title .sub {
   display: block;
-  font-size: max(13px, calc(20 * var(--u)));
+  font-size: max(14px, calc(20 * var(--u)));
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -655,6 +729,7 @@
 
 /* ───────────── загрузка ───────────── */
 .scr-loading {
+  isolation: isolate;
   background: linear-gradient(180deg, #5bc0f5 0%, #8fd4fa 55%, #bfe9ff 100%);
   display: flex;
   flex-direction: column;
@@ -663,56 +738,12 @@
   gap: calc(14 * var(--u));
   padding-bottom: 12vh;
 }
-.ld-ground {
+.ld-bg {
   position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 18%;
-  background: linear-gradient(180deg, #7ccb4a, #4e9a2e);
-  box-shadow: inset 0 calc(6 * var(--u)) 0 #a8e070;
-}
-.ld-ground::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: calc(-10 * var(--u));
-  height: calc(20 * var(--u));
-  background: radial-gradient(circle at 50% 100%, #7ccb4a 0 60%, transparent 62%) 0 0 / calc(40 * var(--u)) 100% repeat-x;
-}
-.ld-cloud {
-  position: absolute;
-  width: calc(200 * var(--u));
-  height: calc(60 * var(--u));
-  border-radius: 999px;
-  background: linear-gradient(#fff, #dcefff);
-  opacity: 0.95;
-  animation: drift 40s linear infinite alternate;
-}
-.ld-cloud::before,
-.ld-cloud::after {
-  content: '';
-  position: absolute;
-  border-radius: 50%;
-  background: #fff;
-}
-.ld-cloud::before {
-  width: 42%;
-  height: 130%;
-  left: 14%;
-  top: -60%;
-}
-.ld-cloud::after {
-  width: 36%;
-  height: 104%;
-  left: 48%;
-  top: -44%;
-}
-@keyframes drift {
-  to {
-    translate: calc(80 * var(--u)) 0;
-  }
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
 }
 .ld-bird {
   position: relative;
@@ -750,10 +781,21 @@
     opacity: 0.6;
   }
 }
-.ld-logo {
-  font-size: max(26px, calc(52 * var(--u)));
-  text-transform: uppercase;
-  white-space: nowrap;
+/* компактный логотип загрузки — тот же объёмный, что на титуле, но в потоке и меньше */
+.logo.logo--compact {
+  position: relative;
+  left: auto;
+  top: auto;
+  transform: none;
+  width: auto;
+  margin: calc(-6 * var(--u)) 0 calc(4 * var(--u));
+  filter: drop-shadow(0 max(2px, calc(5 * var(--u))) 0 #3a0a04) drop-shadow(0 calc(10 * var(--u)) calc(8 * var(--u)) rgba(0, 0, 0, 0.3));
+}
+.logo--compact .logo-line--1 {
+  font-size: max(22px, calc(46 * var(--u)));
+}
+.logo--compact .logo-line--2 {
+  font-size: max(32px, calc(70 * var(--u)));
 }
 .bar {
   position: relative;
@@ -869,9 +911,15 @@
   background-clip: text;
   color: transparent;
 }
+/* интро: первая строка падает, вторая «выпрыгивает» на месте после её приземления (logo.ts, logoLetterDelay) —
+   буквы второй строки не пролетают сквозь первую */
 .logo-ch.is-drop {
   animation: logo-drop 0.55s var(--e-back) both;
-  animation-delay: calc(var(--i) * 40ms + 80ms);
+  animation-delay: var(--d, 0ms);
+}
+.logo-ch.is-pop {
+  animation: logo-pop 0.42s var(--e-back) both;
+  animation-delay: var(--d, 0ms);
 }
 .logo-ch.is-wave {
   animation: logo-wave 5s ease-in-out infinite;
@@ -883,6 +931,19 @@
     opacity: 0;
   }
   60% {
+    opacity: 1;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+@keyframes logo-pop {
+  from {
+    transform: translateY(18%) scale(0.2);
+    opacity: 0;
+  }
+  50% {
     opacity: 1;
   }
   to {
@@ -909,7 +970,7 @@
   background: linear-gradient(180deg, #f2483f, #c72019);
   border: max(2px, calc(3 * var(--u))) solid #6e0d09;
   box-shadow: 0 calc(4 * var(--u)) 0 #6e0d09;
-  font-size: max(13px, calc(24 * var(--u)));
+  font-size: max(14px, calc(24 * var(--u)));
   font-weight: 900;
   letter-spacing: 0.04em;
   rotate: -4deg;
@@ -989,7 +1050,7 @@
   left: 50%;
   bottom: calc(var(--inset-b) + 4 * var(--u));
   transform: translateX(-50%);
-  font-size: max(11px, calc(16 * var(--u)));
+  font-size: max(14px, calc(16 * var(--u)));
   font-weight: 700;
   white-space: nowrap;
   opacity: 0.85;
@@ -1125,7 +1186,7 @@
   --stroke-c: var(--ep-edge);
 }
 .ep-num {
-  font-size: max(12px, calc(19 * var(--u)));
+  font-size: max(14px, calc(19 * var(--u)));
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -1209,11 +1270,20 @@
   pointer-events: none;
 }
 .ep-req {
-  font-size: max(12px, calc(18 * var(--u)));
+  font-size: max(14px, calc(18 * var(--u)));
   font-weight: 700;
   line-height: 1.2;
   --stroke: 0.24em;
   max-width: calc(260 * var(--u));
+}
+/* клон карточки для зума эпизод ↔ уровни (UI.zoomCard) */
+.ep-card.zoom-clone {
+  position: absolute;
+  margin: 0;
+  z-index: 5;
+  pointer-events: none;
+  transition: none;
+  will-change: transform, opacity;
 }
 .ep-card.is-unlocking .ep-art-cv {
   transition: filter 0.6s linear;
@@ -1316,12 +1386,13 @@
   white-space: nowrap;
   --stroke: 0.22em;
 }
-.lv-foot .star {
+/* значок звезды внутри текста («Ещё 6 ★ в эпизоде 1») */
+.inl-star {
   display: inline-block;
-  width: 1.1em;
-  height: 1.1em;
-  vertical-align: -0.18em;
-  margin: 0 0.15em;
+  width: 1.15em;
+  height: 1.15em;
+  vertical-align: -0.2em;
+  margin: 0 0.08em;
 }
 .tile-tip {
   position: absolute;
@@ -1331,7 +1402,7 @@
   padding: calc(8 * var(--u)) calc(14 * var(--u));
   border-radius: calc(12 * var(--u));
   background: rgba(11, 26, 43, 0.9);
-  font-size: max(13px, calc(18 * var(--u)));
+  font-size: max(14px, calc(18 * var(--u)));
   font-weight: 700;
   white-space: nowrap;
   opacity: 0;
@@ -1370,7 +1441,7 @@
   text-align: right;
 }
 .hud-best {
-  font-size: max(13px, calc(21 * var(--u)));
+  font-size: max(14px, calc(21 * var(--u)));
   font-weight: 900;
   text-transform: uppercase;
   letter-spacing: 0.03em;
@@ -1432,8 +1503,12 @@
 .hud-level.is-hidden {
   opacity: 0;
 }
-.hud-left .btn,
+/* HUD пропускает касания к игре (тап «способность» в полёте); ловят только кнопки */
+.hud .pill,
 .hud-right {
+  pointer-events: none;
+}
+.hud-left .btn {
   pointer-events: auto;
 }
 .hud {
@@ -1453,8 +1528,8 @@
   top: calc(var(--inset-t) + max(52px, 76 * var(--u)));
   transform: translateX(-50%);
   max-width: min(calc(680 * var(--u)), 80vw);
-  pointer-events: auto;
-  cursor: pointer;
+  /* не перехватывает касания: прячется по захвату птицы (приложение вызывает hideHint) */
+  pointer-events: none;
 }
 .hint-box {
   position: relative;
@@ -1473,18 +1548,19 @@
   font-weight: 700;
   line-height: 1.25;
 }
+/* хвостик вниз — под говорящей птицей (07 §10.3) */
 .hint-box::after {
   content: '';
   position: absolute;
-  left: calc(50% - 14 * var(--u));
-  top: calc(-16 * var(--u));
-  width: calc(28 * var(--u));
-  height: calc(28 * var(--u));
-  background: #fff4d6;
-  border-left: max(2px, calc(5 * var(--u))) solid #7a4a1c;
-  border-top: max(2px, calc(5 * var(--u))) solid #7a4a1c;
+  left: calc(26 * var(--u));
+  bottom: calc(-15 * var(--u));
+  width: calc(26 * var(--u));
+  height: calc(26 * var(--u));
+  background: #f2d9a0;
+  border-right: max(2px, calc(5 * var(--u))) solid #7a4a1c;
+  border-bottom: max(2px, calc(5 * var(--u))) solid #7a4a1c;
   transform: rotate(45deg);
-  border-radius: calc(4 * var(--u)) 0 0 0;
+  border-radius: 0 0 calc(4 * var(--u)) 0;
 }
 .hint-box .char {
   flex: none;
@@ -1593,7 +1669,7 @@
   color: #ffe36a;
 }
 .pause-card .meta {
-  font-size: max(13px, calc(20 * var(--u)));
+  font-size: max(14px, calc(20 * var(--u)));
   font-weight: 700;
   color: var(--muted);
 }
@@ -1608,7 +1684,7 @@
 .res .ribbon {
   position: relative;
   z-index: 2;
-  width: calc(700 * var(--u));
+  width: calc(760 * var(--u));
   margin-bottom: calc(-52 * var(--u));
 }
 .res-panel {
@@ -1618,6 +1694,27 @@
   display: flex;
   flex-direction: column;
   align-items: center;
+}
+/* «1-3 · Каменная плита» вверху панели — одинаково на победе и поражении */
+.res-level {
+  position: relative;
+  max-width: 100%;
+  margin: calc(-8 * var(--u)) 0 calc(2 * var(--u));
+  font-size: max(14px, calc(22 * var(--u)));
+  font-weight: 700;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  --stroke: 0.22em;
+}
+.res-level .num {
+  font-size: 1.12em;
+  color: #ffe36a;
+}
+/* центральная звезда приподнята на 24u — под подписью уровня оставляем ей место */
+.res-level + .res-stars {
+  margin-top: calc(22 * var(--u));
 }
 .res-rays-clip {
   position: absolute;
@@ -1696,7 +1793,7 @@
   opacity: 1;
 }
 .res-label {
-  font-size: max(13px, calc(22 * var(--u)));
+  font-size: max(14px, calc(22 * var(--u)));
   font-weight: 900;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -1718,7 +1815,7 @@
 }
 .res-msg {
   margin-top: calc(6 * var(--u));
-  font-size: max(13px, calc(20 * var(--u)));
+  font-size: max(14px, calc(20 * var(--u)));
   font-weight: 700;
   color: var(--muted);
   text-align: center;
@@ -1778,7 +1875,7 @@
   left: 50%;
   bottom: calc(var(--inset-b) + 4 * var(--u));
   transform: translateX(-50%);
-  font-size: max(12px, calc(18 * var(--u)));
+  font-size: max(14px, calc(18 * var(--u)));
   font-weight: 700;
   opacity: 0.8;
   --stroke: 0.24em;
@@ -1825,6 +1922,17 @@
   font-weight: 700;
   color: var(--muted);
   text-align: center;
+}
+.lose-score {
+  margin-top: calc(4 * var(--u));
+  font-size: max(15px, calc(24 * var(--u)));
+  font-weight: 700;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.lose-score .num {
+  font-size: 1.15em;
+  color: #fff;
 }
 .lose-shadow {
   position: absolute;
@@ -1961,13 +2069,14 @@
 }
 .rotate-birds {
   display: flex;
-  gap: 10px;
+  max-width: 100%;
+  gap: 14px;
   align-items: flex-end;
   margin-top: 8px;
 }
 .rotate-birds .char {
-  width: calc(var(--sz) * 1.9px);
-  height: calc(var(--sz) * 1.9px);
+  width: calc(var(--sz) * 1.35px);
+  height: calc(var(--sz) * 1.35px);
 }
 .rotate-arrow {
   position: absolute;
@@ -1996,3 +2105,567 @@
 
 /* ───────────── маленькие экраны ───────────── */
 
+/* ───────────── HUD: «К рогатке», «Коснитесь, чтобы пропустить» ───────────── */
+.hud-home {
+  position: absolute;
+  left: var(--inset-l);
+  top: 50%;
+  translate: 0 -50%;
+}
+.hud-home.is-hidden {
+  display: none;
+}
+.hud-home .btn {
+  --size: calc(64 * var(--u));
+  --min: 44px;
+  pointer-events: auto;
+}
+.home-badge {
+  position: absolute;
+  right: calc(-10 * var(--u));
+  top: calc(-10 * var(--u));
+  min-width: max(20px, calc(30 * var(--u)));
+  height: max(20px, calc(30 * var(--u)));
+  padding: 0.2em 0.3em 0;
+  border-radius: 999px;
+  background: var(--red);
+  border: max(2px, calc(3 * var(--u))) solid var(--red-dk);
+  font-size: max(12px, calc(18 * var(--u)));
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  --stroke: 0.2em;
+  --stroke-c: var(--red-dk);
+}
+.home-badge.is-empty {
+  display: none;
+}
+.hud-skip {
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--inset-b) + 18 * var(--u));
+  translate: -50% 0;
+  font-size: max(14px, calc(22 * var(--u)));
+  font-weight: 700;
+  white-space: nowrap;
+  --stroke: 0.22em;
+  animation: blink 1.6s ease-in-out infinite;
+}
+.hud-skip.is-hidden {
+  display: none;
+}
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 0.85;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* ───────────── подсказка способности (07 §10.4) ───────────── */
+/* сверху по центру, под строкой HUD: не закрывает землю со свиньями и опорами во время полёта и удара */
+.ability-hint {
+  position: absolute;
+  left: 50%;
+  top: calc(var(--inset-t) + max(52px, 76 * var(--u)));
+  translate: -50% 0;
+  display: flex;
+  align-items: center;
+  gap: calc(10 * var(--u));
+  max-width: min(calc(560 * var(--u)), 70vw);
+  padding: calc(6 * var(--u)) calc(20 * var(--u)) calc(6 * var(--u)) calc(10 * var(--u));
+  border-radius: 999px;
+  background: rgba(11, 26, 43, 0.72);
+  box-shadow: 0 calc(4 * var(--u)) calc(12 * var(--u)) rgba(0, 0, 0, 0.25);
+  font-size: max(14px, calc(21 * var(--u)));
+  font-weight: 700;
+  line-height: 1.2;
+  pointer-events: none;
+}
+.ability-text small {
+  display: block;
+  font-size: 0.8em;
+  color: var(--muted);
+}
+.ability-hint .char {
+  flex: none;
+}
+/* рука «тап»: палец опускается, от кончика расходится волна (только transform и opacity) */
+.ability-finger {
+  --b-edge: var(--ink);
+  position: relative;
+  flex: none;
+  width: max(26px, calc(40 * var(--u)));
+  height: max(26px, calc(40 * var(--u)));
+}
+.ability-finger .ic {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  transform-origin: 46% 90%;
+  animation: tap-hand 1.2s ease-in-out infinite;
+}
+.ability-finger .ic-f {
+  stroke-width: 1.6;
+}
+.ability-finger::after {
+  content: '';
+  position: absolute;
+  left: 46%;
+  top: 10%;
+  width: 70%;
+  height: 70%;
+  margin: -35% 0 0 -35%;
+  border-radius: 50%;
+  border: max(2px, calc(3 * var(--u))) solid #fff;
+  opacity: 0;
+  animation: tap-wave 1.2s ease-out infinite;
+}
+@keyframes tap-hand {
+  0%,
+  100% {
+    transform: none;
+  }
+  30% {
+    transform: translateY(8%) scale(0.92);
+  }
+  45% {
+    transform: none;
+  }
+}
+@keyframes tap-wave {
+  0%,
+  25% {
+    transform: scale(0.3);
+    opacity: 0;
+  }
+  32% {
+    opacity: 0.9;
+  }
+  80%,
+  100% {
+    transform: scale(1.5);
+    opacity: 0;
+  }
+}
+
+/* ───────────── баннер уровня (07 §12.1) ───────────── */
+.banner {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 30%;
+  translate: 0 -50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(10 * var(--u));
+  pointer-events: none;
+}
+.banner .ribbon {
+  pointer-events: auto;
+  cursor: pointer;
+}
+.banner-badge {
+  padding: 0.35em 1em 0.3em;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #ffe36a, #ffc21a 55%, #f0a20a);
+  border: max(2px, calc(4 * var(--u))) solid #7a3500;
+  box-shadow: 0 calc(5 * var(--u)) 0 rgba(0, 0, 0, 0.25);
+  color: #7a3500;
+  font-size: max(16px, calc(26 * var(--u)));
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  --stroke: 0.14em;
+  --stroke-c: #fff4c8;
+  pointer-events: auto;
+}
+
+/* ───────────── поражение: совет ───────────── */
+.lose-tip {
+  max-width: calc(480 * var(--u));
+  margin: calc(4 * var(--u)) 0 calc(10 * var(--u));
+  padding: calc(10 * var(--u)) calc(18 * var(--u));
+  border-radius: calc(18 * var(--u));
+  background: rgba(255, 227, 106, 0.14);
+  box-shadow: inset 0 0 0 max(1px, calc(2 * var(--u))) rgba(255, 227, 106, 0.4);
+  font-size: max(15px, calc(21 * var(--u)));
+  font-weight: 700;
+  line-height: 1.3;
+  text-align: center;
+  color: #fff4c8;
+}
+.lose-tip b {
+  color: #ffe36a;
+  font-weight: 900;
+}
+
+/* ───────────── диалоги (07 §14) ───────────── */
+.dlg {
+  position: absolute;
+  inset: 0;
+  /* свой контекст наложения: z-index крестика не вылезает поверх следующего диалога */
+  isolation: isolate;
+  pointer-events: auto;
+  --paper-ink: #4a2a0e;
+  --paper-muted: #7a5a36;
+  --paper-edge: #7a4a1c;
+}
+.dlg-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--inset-t) var(--inset-r) var(--inset-b) var(--inset-l);
+  pointer-events: none;
+}
+.dlg-panel {
+  position: relative;
+  flex: 0 1 auto;
+  width: min(calc(680 * var(--u)), 100%);
+  /* сверху выступает лента: оставляем ей место */
+  margin-top: max(26px, calc(44 * var(--u)));
+  max-height: calc(100% - max(26px, calc(44 * var(--u))));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: calc(30 * var(--u));
+  border-radius: calc(36 * var(--u));
+  background: linear-gradient(180deg, #fff4d6, #f2d9a0);
+  border: max(3px, calc(6 * var(--u))) solid var(--paper-edge);
+  box-shadow:
+    0 calc(12 * var(--u)) 0 rgba(0, 0, 0, 0.25),
+    0 calc(24 * var(--u)) calc(48 * var(--u)) rgba(0, 0, 0, 0.35),
+    inset 0 0 0 calc(3 * var(--u)) rgba(255, 255, 255, 0.6);
+  color: var(--paper-ink);
+  pointer-events: auto;
+}
+.dlg-panel > .ribbon {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  translate: -50% -58%;
+  width: calc(540 * var(--u));
+  max-width: 92%;
+}
+.dlg-panel > .ribbon .ribbon-text {
+  font-size: calc(max(18px, calc(36 * var(--u))) * var(--rk, 1));
+}
+.dlg-close {
+  position: absolute;
+  right: calc(-20 * var(--u));
+  top: calc(-20 * var(--u));
+  z-index: 3;
+}
+.dlg-close.btn--xs {
+  --size: calc(56 * var(--u));
+  --min: 44px;
+}
+.dlg-scroll {
+  position: relative;
+  width: 100%;
+  min-height: 0;
+  flex: 0 1 auto;
+  display: flex;
+  flex-direction: column;
+  border-radius: 0 0 calc(30 * var(--u)) calc(30 * var(--u));
+  overflow: hidden;
+}
+.dlg-body {
+  width: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: calc(22 * var(--u)) calc(36 * var(--u)) calc(20 * var(--u));
+  display: flex;
+  flex-direction: column;
+  gap: calc(6 * var(--u));
+  scrollbar-width: thin;
+  scrollbar-color: #b9a27a transparent;
+}
+/* тени у краёв прокрутки и стрелка «есть ещё ниже» */
+.dlg-shade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: max(22px, calc(44 * var(--u)));
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s linear;
+}
+.dlg-shade--up {
+  top: 0;
+  background: linear-gradient(180deg, rgba(122, 74, 28, 0.28), rgba(122, 74, 28, 0) 70%);
+}
+.dlg-shade--down {
+  bottom: 0;
+  background: linear-gradient(0deg, #f2d9a0 18%, rgba(242, 217, 160, 0)), linear-gradient(0deg, rgba(122, 74, 28, 0.3), rgba(122, 74, 28, 0) 60%);
+}
+.dlg-shade--down::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: max(6px, calc(10 * var(--u)));
+  width: max(10px, calc(16 * var(--u)));
+  height: max(10px, calc(16 * var(--u)));
+  margin-left: max(-5px, calc(-8 * var(--u)));
+  border-right: max(3px, calc(5 * var(--u))) solid var(--paper-edge);
+  border-bottom: max(3px, calc(5 * var(--u))) solid var(--paper-edge);
+  border-radius: 0 0 calc(3 * var(--u)) 0;
+  rotate: 45deg;
+  animation: more-bob 1.2s ease-in-out infinite;
+}
+@keyframes more-bob {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  50% {
+    transform: translate(20%, 20%);
+  }
+}
+.dlg-panel[data-more-up='true'] .dlg-shade--up,
+.dlg-panel[data-more-down='true'] .dlg-shade--down {
+  opacity: 1;
+}
+
+/* настройки: две колонки — свитчи и сброс слева, сегменты справа (07 §14.1) */
+.dlg-settings {
+  width: min(max(calc(1000 * var(--u)), 600px), 100%);
+}
+.set-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  column-gap: max(18px, calc(44 * var(--u)));
+  align-items: start;
+}
+.set-col {
+  display: flex;
+  flex-direction: column;
+  gap: calc(6 * var(--u));
+  min-width: 0;
+}
+@media (orientation: portrait) {
+  .abui:not([data-letterbox]) .set-grid,
+  .abui:not([data-letterbox]) .dlg-about {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.dlg-body > * {
+  flex-shrink: 0;
+}
+.dlg-confirm {
+  width: min(calc(600 * var(--u)), 100%);
+}
+.dlg-confirm > .ribbon {
+  width: calc(660 * var(--u));
+  max-width: 108%;
+}
+.dlg-confirm > .ribbon .ribbon-text {
+  font-size: calc(max(16px, calc(30 * var(--u))) * var(--rk, 1));
+}
+.dlg-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(8 * var(--u)) calc(16 * var(--u));
+  min-height: max(46px, calc(56 * var(--u)));
+  padding: calc(4 * var(--u)) 0;
+  border-bottom: max(1px, calc(2 * var(--u))) dashed rgba(122, 74, 28, 0.25);
+}
+.dlg-row--center {
+  justify-content: center;
+  border-bottom: none;
+  padding-top: calc(14 * var(--u));
+}
+.dlg-label {
+  font-size: max(15px, calc(23 * var(--u)));
+  font-weight: 900;
+  cursor: pointer;
+}
+.dlg-row--seg {
+  flex-direction: column;
+  align-items: stretch;
+  gap: max(6px, calc(8 * var(--u)));
+  padding: calc(6 * var(--u)) 0 calc(10 * var(--u));
+}
+.dlg-row--seg .dlg-label {
+  cursor: default;
+}
+.dlg-row--seg .seg {
+  display: flex;
+}
+.dlg-row--seg .seg-opt {
+  flex: 1 1 auto;
+}
+/* свитч 88×48u */
+.sw {
+  position: relative;
+  flex: none;
+  width: max(64px, calc(88 * var(--u)));
+  height: max(36px, calc(48 * var(--u)));
+  margin: 0;
+  padding: 0;
+  border-radius: 999px;
+  border: max(2px, calc(3 * var(--u))) solid var(--paper-edge);
+  background: #b9a27a;
+  box-shadow: inset 0 calc(3 * var(--u)) 0 rgba(0, 0, 0, 0.15);
+  cursor: pointer;
+  transition: background-color 0.15s linear;
+  outline: none;
+}
+.sw[aria-checked='true'] {
+  background: #5dbb2a;
+}
+.sw-knob {
+  position: absolute;
+  top: 50%;
+  left: max(3px, calc(4 * var(--u)));
+  width: max(26px, calc(36 * var(--u)));
+  height: max(26px, calc(36 * var(--u)));
+  translate: 0 -50%;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 calc(3 * var(--u)) 0 rgba(0, 0, 0, 0.25);
+  transition: left 0.15s var(--e-out);
+}
+.sw[aria-checked='true'] .sw-knob {
+  left: calc(100% - max(3px, calc(4 * var(--u))) - max(26px, calc(36 * var(--u))));
+}
+.sw:focus-visible,
+.seg-opt:focus-visible {
+  box-shadow:
+    0 0 0 calc(3 * var(--u)) var(--focus-in),
+    0 0 0 calc(7 * var(--u)) var(--focus-out);
+}
+/* сегменты */
+.seg {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: calc(4 * var(--u));
+  padding: calc(4 * var(--u));
+  border-radius: 999px;
+  background: #e8c98a;
+  border: max(2px, calc(3 * var(--u))) solid var(--paper-edge);
+}
+.seg-opt {
+  min-height: max(36px, calc(44 * var(--u)));
+  min-width: max(44px, calc(60 * var(--u)));
+  margin: 0;
+  padding: 0 max(6px, calc(14 * var(--u)));
+  white-space: nowrap;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--paper-ink);
+  font: inherit;
+  font-size: max(14px, calc(20 * var(--u)));
+  font-weight: 900;
+  cursor: pointer;
+  outline: none;
+  transition: background-color 0.15s linear, color 0.15s linear;
+}
+.seg-opt[aria-checked='true'] {
+  background: linear-gradient(180deg, #7dd6ff, #2fa4ec 52%, #1a7cc8);
+  color: #fff;
+  box-shadow:
+    inset 0 0 0 max(1.5px, calc(3 * var(--u))) #0e3f70,
+    0 calc(3 * var(--u)) 0 rgba(0, 0, 0, 0.2);
+  -webkit-text-stroke: 0.16em #0e3f70;
+  paint-order: stroke fill;
+}
+.dlg-about {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  column-gap: max(18px, calc(44 * var(--u)));
+  margin-top: calc(8 * var(--u));
+  padding: calc(10 * var(--u)) calc(18 * var(--u));
+  border-radius: calc(20 * var(--u));
+  background: rgba(122, 74, 28, 0.08);
+  font-size: max(14px, calc(19 * var(--u)));
+  font-weight: 700;
+  line-height: 1.35;
+  color: var(--paper-muted);
+}
+.dlg-h {
+  margin: calc(6 * var(--u)) 0 calc(2 * var(--u)) !important;
+  font-size: max(14px, calc(22 * var(--u))) !important;
+  font-weight: 900 !important;
+  color: var(--paper-ink);
+}
+.dlg-ver {
+  grid-column: 1 / -1;
+  margin-top: calc(4 * var(--u)) !important;
+  font-size: 0.85em;
+  opacity: 0.8;
+}
+.dlg-text {
+  margin: calc(6 * var(--u)) 0 calc(18 * var(--u)) !important;
+  font-size: max(15px, calc(25 * var(--u)));
+  font-weight: 700;
+  line-height: 1.3;
+  text-align: center;
+  color: var(--paper-muted);
+}
+.dlg-btns {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: max(12px, calc(20 * var(--u)));
+}
+.dlg-btns .btn--pill {
+  min-width: calc(180 * var(--u));
+}
+.dlg-row--center .btn-text,
+.dlg-btns .btn-text {
+  font-size: max(15px, calc(24 * var(--u)));
+}
+
+/* ───────────── маленькие экраны ───────────── */
+/* Низкий ландшафт (телефон): компактнее заголовки и подписи, чтобы всё влезало в 360 px высоты. */
+/* (полоса летербокса — тоже «низкий экран» 360 px) */
+.abui[data-letterbox] .res-skip {
+  display: none;
+}
+.abui[data-letterbox] .lose-pig {
+  width: calc(150 * var(--u));
+  height: calc(140 * var(--u));
+}
+.abui[data-letterbox] .lose-pig .char {
+  width: calc(var(--sz) * var(--u) * 0.72);
+  height: calc(var(--sz) * var(--u) * 0.72);
+}
+@media (max-height: 430px) {
+  .res-skip {
+    display: none;
+  }
+  /* поражение на телефоне: свинья меньше, чтобы панель с советом влезала по высоте */
+  .lose-pig {
+    width: calc(150 * var(--u));
+    height: calc(140 * var(--u));
+  }
+  .lose-pig .char {
+    width: calc(var(--sz) * var(--u) * 0.72);
+    height: calc(var(--sz) * var(--u) * 0.72);
+  }
+  .lose-shadow {
+    width: calc(108 * var(--u));
+    bottom: calc(4 * var(--u));
+  }
+  .dlg-body {
+    padding-top: calc(30 * var(--u));
+  }
+}
+/* Узкая полоса (летербокс или окно ниже 300 px) — прячем второстепенное. */
+@media (max-height: 300px) {
+  .tt-version,
+  .lv-foot,
+  .logo-badge {
+    display: none;
+  }
+}

@@ -1,13 +1,13 @@
 // Выбор эпизода (07 §8): три карточки с пейзажем темы, героями, звёздами и замком.
 
 import type { EpisodeDef } from '../../core/types';
-import { episodeStarsNeeded } from '../../storage/progress';
 import { episodeArt } from '../art';
 import { anim, popIn, shake } from '../anim';
 import type { UiCtx, View } from '../ctx';
-import { button, focusEl, h, starsPill } from '../dom';
+import { button, focusEl, h, starsPill, withStarIcons } from '../dom';
 import { icon, starSvg } from '../icons';
-import { S, STARS, STARS_ACC, plural, t } from '../strings';
+import { episodeGate, gateText } from '../rules';
+import { S, t } from '../strings';
 
 export interface EpisodeState {
   ep: EpisodeDef;
@@ -15,7 +15,7 @@ export interface EpisodeState {
   unlocked: boolean;
   got: number;
   total: number;
-  /** Текст требования для закрытого эпизода (полный — для тоста и озвучки, короткий — на карточке). */
+  /** Причина блокировки: полный текст — для тоста и озвучки, короткий (★ — значок) — на карточке. */
   req: string;
   reqShort: string;
 }
@@ -24,18 +24,9 @@ export function episodeStates(ctx: UiCtx): EpisodeState[] {
   const eps = ctx.deps.episodes;
   return eps.map((ep, i) => {
     const ids = ep.levels.map((l) => l.id);
-    const first = ids[0];
-    const unlocked = first !== undefined && ctx.deps.progress.isUnlocked(first, ctx.order);
+    const g = episodeGate(ctx.deps.progress, eps, ctx.order, i);
     const got = ctx.deps.progress.starsTotal(ids);
-    let req = '';
-    let reqShort = '';
-    if (i > 0) {
-      const prev = eps[i - 1]!;
-      const n = episodeStarsNeeded(prev.levels.length);
-      req = t('episodeLockedReq', { prev: prev.name, n, stars: plural(n, STARS_ACC) });
-      reqShort = t('episodeLockedCard', { n, stars: plural(n, STARS), prev: i });
-    }
-    return { ep, index: i, unlocked, got, total: ids.length * 3, req, reqShort };
+    return { ep, index: i, unlocked: g.open, got, total: ids.length * 3, req: gateText(g, 'full', ep.name), reqShort: gateText(g, 'card', ep.name) };
   });
 }
 
@@ -115,7 +106,7 @@ export class EpisodesView implements View {
       }
     } else {
       art.append(h('span', { class: 'ep-lock', html: `<span class="btn btn--gray">${icon('lock')}</span>` }));
-      info.append(h('span', { class: 'ep-req ts', text: st.reqShort }));
+      info.append(withStarIcons(h('span', { class: 'ep-req ts' }), st.reqShort));
     }
     card.append(art, info);
     card.addEventListener('click', () => {
@@ -126,7 +117,7 @@ export class EpisodesView implements View {
         return;
       }
       this.ctx.sfx('click');
-      this.ctx.goLevels(ep.id, 'fwd');
+      this.ctx.goLevels(ep.id, 'fwd', card);
     });
     return card;
   }
@@ -167,6 +158,11 @@ export class EpisodesView implements View {
       },
       () => lock.remove(),
     );
+  }
+
+  /** Карточка эпизода (для обратного зума с экрана уровней). */
+  cardOf(epId: string): HTMLElement | undefined {
+    return this.cards.find((c) => c.dataset.ep === epId);
   }
 
   focus(): void {

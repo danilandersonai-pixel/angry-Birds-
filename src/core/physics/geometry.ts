@@ -4,6 +4,13 @@
 import type { BlockShape, Vec } from '../types';
 
 const EPS = 1e-9;
+/**
+ * Минимальное расстояние между вершинами выпуклой части. planck сваривает вершины ближе 0.5·linearSlop (2.5 мм)
+ * и молча заменяет вырожденный полигон квадратом 2×2 — такие части отбрасываем сами.
+ */
+const MIN_VERTEX_GAP = 0.003;
+/** Части меньшей площади (иглы от почти коллинеарных вершин) не создаём. */
+const MIN_PIECE_AREA = 1e-6;
 
 function cross(o: Vec, a: Vec, b: Vec): number {
   return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
@@ -39,29 +46,32 @@ export function shapeArea(shape: BlockShape, w: number, h: number): number {
   return shape === 'rect' ? w * h : (w * h) / 2;
 }
 
-/** Контур против часовой, без совпадающих соседей и коллинеарных вершин. */
-export function normalizePolygon(input: readonly Vec[], tol = 1e-6): Vec[] {
+/** Убирает соседние вершины ближе gap и коллинеарные вершины; может вернуть меньше трёх точек. */
+function cleanRing(input: readonly Vec[], gap: number): Vec[] {
   let pts = input.filter((p, i) => {
     const q = input[(i + 1) % input.length];
-    return Math.hypot(p.x - q.x, p.y - q.y) > tol;
+    return Math.hypot(p.x - q.x, p.y - q.y) >= gap;
   });
-  let changed = true;
-  while (changed && pts.length > 3) {
+  for (let changed = true; changed && pts.length > 3; ) {
     changed = false;
     for (let i = 0; i < pts.length; i++) {
       const a = pts[(i + pts.length - 1) % pts.length];
       const b = pts[i];
       const c = pts[(i + 1) % pts.length];
-      const lenAB = Math.hypot(b.x - a.x, b.y - a.y);
-      const lenBC = Math.hypot(c.x - b.x, c.y - b.y);
-      if (Math.abs(cross(a, b, c)) <= tol * lenAB * lenBC) {
+      if (Math.abs(cross(a, b, c)) <= 1e-6 * Math.hypot(b.x - a.x, b.y - a.y) * Math.hypot(c.x - b.x, c.y - b.y)) {
         pts = pts.filter((_, j) => j !== i);
         changed = true;
         break;
       }
     }
   }
-  if (pts.length < 3 || Math.abs(signedArea(pts)) < tol) throw new Error('Вырожденный многоугольник');
+  return pts;
+}
+
+/** Контур против часовой, без почти совпадающих соседей (ближе 3 мм) и коллинеарных вершин. */
+export function normalizePolygon(input: readonly Vec[]): Vec[] {
+  const pts = cleanRing(input, MIN_VERTEX_GAP);
+  if (pts.length < 3 || Math.abs(signedArea(pts)) < MIN_PIECE_AREA) throw new Error('Вырожденный многоугольник');
   return signedArea(pts) < 0 ? pts.reverse() : pts;
 }
 
@@ -82,6 +92,35 @@ export function insetPolygon(pts: readonly Vec[], d: number): Vec[] {
     const k = d / Math.max(1 + n1x * n2x + n1y * n2y, 0.05);
     return { x: p.x + (n1x + n2x) * k, y: p.y + (n1y + n2y) * k };
   });
+}
+
+/** Точка p лежит на отрезке ab (с допуском 1 нм). */
+function onSegment(p: Vec, a: Vec, b: Vec): boolean {
+  const len = Math.hypot(b.x - a.x, b.y - a.y);
+  if (Math.abs(cross(a, b, p)) > 1e-9 * len) return false;
+  return (p.x - a.x) * (p.x - b.x) + (p.y - a.y) * (p.y - b.y) <= 0;
+}
+
+/** Отрезки ab и cd пересекаются или касаются (в том числе накладываются на одной прямой). */
+function segmentsTouch(a: Vec, b: Vec, c: Vec, d: Vec): boolean {
+  const d1 = cross(a, b, c);
+  const d2 = cross(a, b, d);
+  const d3 = cross(c, d, a);
+  const d4 = cross(c, d, b);
+  if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return true;
+  return onSegment(c, a, b) || onSegment(d, a, b) || onSegment(a, c, d) || onSegment(b, c, d);
+}
+
+/** Простой контур: несмежные рёбра не пересекаются и не касаются. */
+function isSimple(pts: readonly Vec[]): boolean {
+  const n = pts.length;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 2; j < n; j++) {
+      if (i === 0 && j === n - 1) continue; // смежные через замыкание
+      if (segmentsTouch(pts[i], pts[(i + 1) % n], pts[j], pts[(j + 1) % n])) return false;
+    }
+  }
+  return true;
 }
 
 export function isConvex(pts: readonly Vec[]): boolean {
@@ -132,10 +171,21 @@ function mergeAlongEdge(a: readonly Vec[], b: readonly Vec[]): Vec[] | null {
   return null;
 }
 
+/** Часть годится для planck: вершины не сварятся, площадь не нулевая. */
+function isSolidPiece(pts: readonly Vec[]): boolean {
+  if (pts.length < 3 || signedArea(pts) < MIN_PIECE_AREA) return false;
+  for (let i = 0; i < pts.length; i++) {
+    for (let j = i + 1; j < pts.length; j++) {
+      if (Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y) < MIN_VERTEX_GAP) return false;
+    }
+  }
+  return true;
+}
+
 /** Разбиение простого CCW-многоугольника на выпуклые части (≤ maxVerts вершин): уши + жадная склейка. */
-export function convexPieces(pts: readonly Vec[], maxVerts: number): Vec[][] {
-  if (isConvex(pts) && pts.length <= maxVerts) return [pts.slice()];
-  const pieces = triangulate(pts).filter((t) => signedArea(t) > 1e-7);
+function convexPieces(pts: readonly Vec[], maxVerts: number): Vec[][] {
+  if (isConvex(pts) && pts.length <= maxVerts && isSolidPiece(pts)) return [pts.slice()];
+  const pieces = triangulate(pts).filter((t) => signedArea(t) > 1e-9);
   for (let merged = true; merged; ) {
     merged = false;
     for (let i = 0; i < pieces.length && !merged; i++) {
@@ -149,5 +199,27 @@ export function convexPieces(pts: readonly Vec[], maxVerts: number): Vec[][] {
       }
     }
   }
-  return pieces.map((p) => normalizePolygon(p));
+  return pieces.map((p) => cleanRing(p, MIN_VERTEX_GAP)).filter(isSolidPiece);
+}
+
+/** Сжатие не вывернуло ни одного ребра (вывернутое ребро — деталь тоньше 2·inset) и не дало самопересечений. */
+function insetHolds(outline: readonly Vec[], inner: readonly Vec[]): boolean {
+  const n = outline.length;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    const dot = (outline[j].x - outline[i].x) * (inner[j].x - inner[i].x) + (outline[j].y - outline[i].y) * (inner[j].y - inner[i].y);
+    if (dot <= 0) return false;
+  }
+  return isSimple(inner);
+}
+
+/**
+ * Рельеф: контур в любом обходе → нормализация → сжатие на inset → выпуклые части для planck.
+ * Если деталь тоньше 2·inset (сжатие выворачивает рёбра) — части строятся по исходному контуру.
+ */
+export function terrainPieces(points: ReadonlyArray<readonly [number, number]>, inset: number, maxVerts: number): Vec[][] {
+  const outline = normalizePolygon(points.map(([x, y]) => ({ x, y })));
+  if (!isSimple(outline)) throw new Error('Многоугольник рельефа самопересекается');
+  const inner = insetPolygon(outline, inset);
+  return convexPieces(insetHolds(outline, inner) ? normalizePolygon(inner) : outline, maxVerts);
 }

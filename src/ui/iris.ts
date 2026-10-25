@@ -66,9 +66,14 @@ export class Iris {
     return this.fade('open', durMs);
   }
 
+  /** Координаты окна → координаты корня UI (учитывает масштаб корня в летербоксе). */
   private local(x: number, y: number): { x: number; y: number; w: number; h: number } {
-    const r = this.svg.parentElement!.getBoundingClientRect();
-    return { x: x - r.left, y: y - r.top, w: r.width, h: r.height };
+    const p = this.svg.parentElement!;
+    const r = p.getBoundingClientRect();
+    const w = p.clientWidth || r.width;
+    const h = p.clientHeight || r.height;
+    const k = r.width > 0 && w > 0 ? r.width / w : 1;
+    return { x: (x - r.left) / k, y: (y - r.top) / k, w, h };
   }
 
   private run(kind: 'close' | 'open', gx: number, gy: number, durMs: number): Promise<void> {

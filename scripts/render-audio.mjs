@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Объективная проверка звука: офлайн-рендер КАЖДОГО звука и музыки теми же функциями синтеза,
-// что и в игре (через Chromium/Playwright и dev/preview-audio.html → window.__renderAll()),
+// Объективная проверка звука: офлайн-рендер КАЖДОГО звука и музыки тем же путём, что и в игре
+// (запекаемые — буфером 32 кГц из bakeOne с игровым сидом, громкость — среднее по вариантам; живые — рецептом;
+// через Chromium/Playwright и dev/preview-audio.html → window.__renderAll()),
 // WAV на диск, замеры ffmpeg (ebur128 true-peak/LUFS, volumedetect), волновые формы и спектрограммы PNG,
 // сводные листы по группам (ImageMagick montage) и таблица с флагами проблем.
 //
@@ -90,7 +91,7 @@ for (const s of game) {
   const flags = [];
   if (s.nonFinite > 0) flags.push('NaN');
   if ((ff.truePeak ?? s.peakDb) >= -1 || s.peakDb >= -1) flags.push('PEAK');
-  if (s.tailDb > -60 && s.group !== 'music') flags.push('TAIL');
+  if (s.tailDb > -60 && s.group !== 'music' && s.group !== 'mix') flags.push('TAIL');
   if (s.firstAbs > 1e-4) flags.push('CLICK0');
   if (s.expectMs && (s.lenMs < s.expectMs * 0.7 || s.lenMs > s.expectMs * 1.4)) flags.push('LEN');
   if (s.group !== 'music' && s.mMaxLufs < -40) flags.push('QUIET');
@@ -100,7 +101,7 @@ for (const s of game) {
 // ── 3. картинки: волна (пиковая огибающая) + спектрограмма, листы по группам ──
 if (IMAGES) {
   const label = (s) => `${s.name}  ${s.lenMs.toFixed(0)}ms  pk ${s.peakDb.toFixed(1)}  M ${s.mMaxLufs.toFixed(1)}`;
-  const isMusic = (s) => s.group === 'music';
+  const isMusic = (s) => s.group === 'music' || s.group === 'mix';
   for (const s of rows) {
     const wav = path.join(OUT, `${s.name}.wav`);
     const w = isMusic(s) ? 2000 : 520;
@@ -117,7 +118,7 @@ if (IMAGES) {
   const groups = [...new Set(rows.map((s) => s.group))];
   for (const g of groups) {
     const tiles = rows.filter((s) => s.group === g).map((s) => path.join(OUT, 'png', `${s.name}.png`));
-    const cols = g === 'music' ? 1 : 4;
+    const cols = g === 'music' || g === 'mix' ? 1 : 4;
     for (let i = 0, part = 0; i < tiles.length; i += cols * 6, part++) {
       const out = path.join(OUT, 'sheets', `${g}${tiles.length > cols * 6 ? `-${part + 1}` : ''}.png`);
       execFileSync('montage', [...tiles.slice(i, i + cols * 6), '-tile', `${cols}x`, '-geometry', '+6+6', '-background', '#0a1018', out]);
@@ -134,9 +135,9 @@ if (IMAGES) {
 // ── 4. отчёт ──
 const f1 = (v) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : v.toFixed(1));
 const lines = [
-  '| звук | группа | пик сырой | пик игра | TP ffmpeg | M max LUFS | I LUFS | длина, мс (ожид.) | центроид, Гц | хвост dB | BPM | флаги |',
-  '|---|---|---|---|---|---|---|---|---|---|---|---|',
-  ...rows.map((s) => `| ${s.name} | ${s.group} | ${f1(s.rawPeakDb)} | ${f1(s.peakDb)} | ${f1(s.truePeak)} | ${f1(s.mMaxLufs)} | ${f1(s.lufsI)} | ${s.lenMs.toFixed(0)}${s.expectMs ? ` (${s.expectMs})` : ''} | ${s.centroidHz.toFixed(0)} | ${f1(s.tailDb)} | ${s.bpm ? s.bpm.toFixed(1) : ''} | ${s.flags.join(' ')} |`),
+  '| звук | группа | путь | пик сырой | пик игра | TP ffmpeg | M max LUFS (варианты) | I LUFS | длина, мс (ожид.) | центроид, Гц | хвост dB | BPM | флаги |',
+  '|---|---|---|---|---|---|---|---|---|---|---|---|---|',
+  ...rows.map((s) => `| ${s.name} | ${s.group} | ${s.label.includes('[буфер') ? 'буфер' : 'живой'} | ${f1(s.rawPeakDb)} | ${f1(s.peakDb)} | ${f1(s.truePeak)} | ${f1(s.mMaxLufs)}${s.mMaxVariants ? ` (${s.mMaxVariants.map(f1).join(' / ')})` : ''} | ${f1(s.lufsI)} | ${s.lenMs.toFixed(0)}${s.expectMs ? ` (${s.expectMs})` : ''} | ${s.centroidHz.toFixed(0)} | ${f1(s.tailDb)} | ${s.bpm ? s.bpm.toFixed(1) : ''} | ${s.flags.join(' ')} |`),
 ];
 writeFileSync(path.join(OUT, 'report.json'), JSON.stringify(rows, null, 2));
 writeFileSync(path.join(OUT, 'report.md'), lines.join('\n') + '\n');

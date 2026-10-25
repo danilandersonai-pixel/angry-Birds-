@@ -59,6 +59,36 @@ export class View implements EntityView {
   }
 }
 
+/** Неподвижная копия вида в его текущей точке (камера держит точку взрыва яйца). */
+export function frozenCopy(src: View, x: number, y: number): View {
+  const v = new View(src.id, src.kind, src.shape, src.w, src.h, src.radius, src.seed);
+  v.place(x, y, src.angle);
+  v.savePrev();
+  return v;
+}
+
+/** Центроид группы видов (сёстры Синих): позиция, предыдущая позиция и скорость — средние; поза — первой. */
+export function centroidInto(target: View, members: readonly View[]): void {
+  let x = 0, y = 0, px = 0, py = 0, vx = 0, vy = 0;
+  for (const m of members) {
+    x += m.x;
+    y += m.y;
+    px += m.px;
+    py += m.py;
+    vx += m.vx;
+    vy += m.vy;
+  }
+  const n = members.length;
+  target.place(x / n, y / n, members[0].angle);
+  target.px = px / n;
+  target.py = py / n;
+  target.pangle = members[0].pangle;
+  target.vx = vx / n;
+  target.vy = vy / n;
+  target.birdPose = members[0].birdPose;
+  target.abilityUsed = members[0].abilityUsed;
+}
+
 /** Вид птицы (до выстрела живёт без тела в кармашке, затем привязывается к телу с тем же id). */
 export function birdView(id: number, type: BirdType, seed: number): View {
   const d = BIRD_DEFS[type];

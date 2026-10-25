@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Уровни — предпросмотр</title>
+    <style>
+      :root { --bg: #18202b; --panel: #0f151d; --ink: #e8eef6; --muted: #9aa8b8; --err: #ff5a4f; --warn: #ffb84d; --ok: #6fdc6a; }
+      html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); font: 13px/1.4 system-ui, sans-serif; }
+      a { color: #8cc8ff; }
+      body.single { overflow: hidden; height: 100vh; }
+      #app { height: 100%; }
+      /* один уровень */
+      .single-wrap { display: grid; grid-template-columns: 1fr 380px; grid-template-rows: auto 1fr auto; height: 100vh; }
+      .single-wrap header { grid-column: 1 / 3; padding: 6px 12px; background: var(--panel); display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; }
+      .single-wrap header h1 { font-size: 17px; margin: 0; }
+      .single-wrap header .k { color: var(--muted); }
+      .stage { position: relative; min-width: 0; min-height: 0; }
+      .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; }
+      aside { background: var(--panel); overflow: auto; padding: 8px 10px; border-left: 1px solid #263243; }
+      aside h2 { font-size: 13px; margin: 10px 0 4px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+      .issue { padding: 4px 6px; margin: 2px 0; border-radius: 4px; background: #172131; cursor: pointer; }
+      .issue:hover { background: #1f2c40; }
+      .issue .code { font: 11px ui-monospace, monospace; opacity: .85; }
+      .issue.error { border-left: 3px solid var(--err); }
+      .issue.warning { border-left: 3px solid var(--warn); }
+      .badge { display: inline-block; padding: 0 6px; border-radius: 9px; font-weight: 700; font-size: 12px; }
+      .badge.ok { background: #1d3b22; color: var(--ok); }
+      .badge.err { background: #4a1916; color: var(--err); }
+      .badge.warn { background: #45330f; color: var(--warn); }
+      .status { grid-column: 1 / 3; padding: 4px 12px; background: var(--panel); font: 12px ui-monospace, monospace; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .legend div { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+      .sw { width: 14px; height: 10px; border-radius: 2px; display: inline-block; border: 1px solid rgba(0,0,0,.5); }
+      .line { width: 22px; height: 0; border-top: 2px dashed; display: inline-block; }
+      /* сетка всех уровней */
+      .all { padding: 12px 16px; }
+      .all h1 { font-size: 20px; margin: 4px 0 10px; }
+      .all h2 { font-size: 16px; margin: 18px 0 8px; }
+      .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; }
+      .card { background: var(--panel); border-radius: 6px; overflow: hidden; text-decoration: none; color: inherit; display: block; border: 1px solid #263243; }
+      .card:hover { border-color: #4b6a91; }
+      .card canvas { display: block; width: 100%; height: 190px; }
+      .card .cap { padding: 6px 8px; display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+      .empty { color: var(--muted); font-style: italic; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/dev/preview-level.ts"></script>
+  </body>
+</html>

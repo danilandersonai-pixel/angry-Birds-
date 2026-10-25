@@ -126,13 +126,19 @@ export class Timeline {
   }
 
   skip(): void {
+    if (this.finished) return;
     this.time = Infinity;
     this.advance(true);
   }
 
   stop(): void {
     this.running = false;
-    cancelAnimationFrame(this.raf);
+    this.cancel();
+  }
+
+  private cancel(): void {
+    if (this.raf && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this.raf);
+    this.raf = 0;
   }
 
   private advance(skipped: boolean): void {
@@ -151,7 +157,7 @@ export class Timeline {
     if (this.events.every((e) => e.fired) && this.tweens.every((tw) => tw.done)) {
       this.finished = true;
       this.running = false;
-      cancelAnimationFrame(this.raf);
+      this.cancel();
       const cb = this.onFinish;
       this.onFinish = null;
       cb?.();

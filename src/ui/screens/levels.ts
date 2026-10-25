@@ -1,12 +1,12 @@
 // Выбор уровня (07 §9): сетка 5×2 плиток с номером, звёздами под ним, замками; текущий уровень пульсирует.
 
 import type { EpisodeDef } from '../../core/types';
-import { episodeStarsNeeded } from '../../storage/progress';
 import { anim, popIn, shake } from '../anim';
 import type { UiCtx, View } from '../ctx';
-import { button, focusEl, h, starsPill } from '../dom';
+import { button, focusEl, h, starsPill, withStarIcons } from '../dom';
 import { icon, starSvg } from '../icons';
-import { S, STARS, fmt, plural, t } from '../strings';
+import { episodeGate, gateText } from '../rules';
+import { S, fmt, t } from '../strings';
 
 const COLS = 5;
 
@@ -102,6 +102,7 @@ export class LevelsView implements View {
     });
   }
 
+  /** Подвал: что нужно для следующего эпизода (та же причина, что на его карточке) или итог эпизода. */
   private footer(got: number, epIndex: number): HTMLElement {
     const eps = this.ctx.deps.episodes;
     const ids = this.ep.levels.map((l) => l.id);
@@ -109,18 +110,15 @@ export class LevelsView implements View {
     const allCleared = ids.every((id) => (this.ctx.deps.progress.record(id)?.stars ?? 0) > 0);
     const nextEp = eps[epIndex + 1];
     let text = '';
-    if (nextEp) {
-      const need = episodeStarsNeeded(ids.length);
-      const nextOpen = nextEp.levels[0] ? this.ctx.deps.progress.isUnlocked(nextEp.levels[0].id, this.ctx.order) : false;
-      if (nextOpen) text = t('levelsNextOpen', { name: nextEp.name });
-      else if (got < need) text = t('levelsToNextEp', { n: need - got, stars: plural(need - got, STARS) });
-      else if (!allCleared) text = t('levelsFinishLast', { id: ids[ids.length - 1] ?? '' });
-    } else if (allCleared) {
-      text = got >= total ? S.levelsEpPerfect : S.levelsEpDone;
-    }
-    const foot = h('p', { class: 'lv-foot ts' });
-    if (text) foot.textContent = text;
-    return foot;
+    if (nextEp) text = gateText(episodeGate(this.ctx.deps.progress, eps, this.ctx.order, epIndex + 1), 'footer', nextEp.name);
+    else if (allCleared) text = got >= total ? S.levelsEpPerfect : S.levelsEpDone;
+    return withStarIcons(h('p', { class: 'lv-foot ts' }), text);
+  }
+
+  /** Полный текст причины, по которой закрыт этот эпизод (для тоста по его первой плитке). */
+  private gateOfThis(): string {
+    const eps = this.ctx.deps.episodes;
+    return gateText(episodeGate(this.ctx.deps.progress, eps, this.ctx.order, eps.indexOf(this.ep)), 'full', this.ep.name);
   }
 
   private buildTile(info: TileInfo): HTMLButtonElement {
@@ -152,10 +150,9 @@ export class LevelsView implements View {
         const idx = this.ctx.order.indexOf(info.id);
         const prev = idx > 0 ? this.ctx.order[idx - 1]! : info.id;
         const prevLoc = this.ctx.loc(prev);
-        const msg =
-          prevLoc && prevLoc.episode.id !== this.ep.id
-            ? (this.el.querySelector('.lv-foot')?.textContent ?? '') || t('levelsLocked', { prev })
-            : t('levelsLocked', { prev });
+        // первый уровень эпизода закрыт воротами эпизода — причина та же, что на карточке
+        const gate = prevLoc && prevLoc.episode.id !== this.ep.id ? this.gateOfThis() : '';
+        const msg = gate || t('levelsLocked', { prev });
         this.ctx.toast(msg);
         return;
       }

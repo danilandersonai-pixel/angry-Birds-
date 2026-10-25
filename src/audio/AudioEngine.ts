@@ -1,24 +1,61 @@
 // AudioEngine — весь звук игры синтезом Web Audio, без аудиофайлов (docs/research/05-audio.md).
 //
-// Контракт (спецификация §3):  unlock, setSfx, setMusic, setMasterVolume, playMusic, handle, ui, ready.
-// Расширения (05-audio §2.3, 07-ui-ux): reward, scoreTick, setPaused, play, playMusic(track, theme), dispose.
+// ── ТОЧНЫЙ ПУБЛИЧНЫЙ API (контракт спецификации §3 + расширения 00-summary §2.1, 05-audio §2.3) ──
 //
-// Граф: голоса → sfx/ui → (send → реверб) → master → компрессор → выход; музыка/фон → duck → master.
-// События кадра копятся и разбираются одной пачкой (microtask): отбор ударов, лимит голосов (24),
-// кулдауны одинаковых звуков (40–60 мс), громкость по силе удара и удалённости от камеры.
+//   export class AudioEngine {
+//     constructor(opts?: { sfx?: boolean; music?: boolean; volume?: number; autoUnlock?: boolean });
+//     /** Создать/возобновить AudioContext. Звать СИНХРОННО из обработчика жеста; без жеста — тихий no-op. */
+//     unlock(): Promise<void>;
+//     setSfx(on: boolean): void;                 // шины sfx/ui → 0 за τ 30 мс, звучащие голоса гаснут
+//     setMusic(on: boolean): void;               // off — секвенсор останавливается (фейд 0.3 с), джинглов нет
+//     setMasterVolume(v: number): void;          // 0..1
+//     playMusic(track: 'menu' | 'level' | null, theme?: ThemeId): void;
+//         // 'menu' — полька «Пернатый переполох»; 'level' — фон темы (музыки в уровне нет); null — тишина.
+//         // Смена трека (или темы уровня) = новая сессия звука: фитили гаснут, память карты событий сбрасывается.
+//     setPaused(p: boolean): void;               // музыка/фон ×0.5, фитили гаснут, разовые звуки доигрывают
+//     handle(e: GameEvent, listener?: { camX: number; viewW: number }): void;   // события кадра — пачкой
+//     ui(name: 'click' | 'back' | 'pop' | 'swoosh' | 'star1' | 'star2' | 'star3' | 'tick' | 'win' | 'lose' | 'newRecord'
+//          | 'hover' | 'toggleOn' | 'toggleOff' | 'locked' | 'popIn' | 'whoosh' | 'starEmpty' | 'scoreDone',  // расширения
+//        arg?: number): void;                    // arg — прогресс 0..1 для 'tick' (без него — по времени прокрутки)
+//     readonly ready: boolean;                   // контекст создан и запущен
+//     // ── расширения ──
+//     reward(kind: 'star0' | 'star1' | 'star2' | 'starEmpty' | 'scoreDone' | 'newBest'): void;
+//     scoreTick(progress: number): void;         // тик счётчика 1800 → 3000 Гц, не чаще раза в 45 мс
+//     resetSession(): void;                      // новая игровая сессия (рестарт/выход): фитили гаснут, память с нуля
+//     play(key: string, opts?: PlayOpts): boolean;  // любой ключ каталога (предпросмотр)
+//     stats(): AudioStats;
+//     readonly context: AudioContext | null;
+//     dispose(): void;                           // навсегда: контекст закрыт, жесты больше ничего не создают
+//   }
+//
+// Конец уровня: событие levelEnd (или ui('win'|'lose') во время фона уровня) гасит фон уровня и играет джингл;
+// заказанная музыка становится null. Новая сессия (рестарт с экрана итогов) распознаётся по stateChanged,
+// чей from не совпадает с последним состоянием, — фон уровня той же темы возвращается сам. Явный playMusic()
+// после levelEnd отменяет это возвращение. Рестарт посреди уровня тоже распознаётся (фитили гаснут);
+// приложение может и само позвать resetSession().
+//
+// Без жеста пользователя контекст не создаётся: тишина и ни одного сообщения в консоли. Тяжёлые массивы
+// (шумы, отклик реверба) считаются заранее в простое главного потока; в жесте — только контекст, resume и граф.
+// Граф: голоса → sfx/ui → (send → реверб) → master → компрессор → мягкий клиппер → выход;
+// музыка/фон/джинглы → duck → master. Задержка графа — 6 мс (упреждение компрессора).
+// События кадра копятся и разбираются одной пачкой (microtask): отбор ударов, лимит голосов (32, моб. 20),
+// кулдауны одинаковых звуков (удары 30 мс, остальное 35–2000 мс), громкость по силе удара и удалённости от камеры.
 // Большинство SFX запекаются в буферы после разблокировки; до готовности звучит живой синтез того же рецепта.
 
 import type { GameEvent, SessionState } from '../core/events';
-import type { PigType, ThemeId } from '../core/types';
-import { BAKE_LIST, bakeAll, type OfflineCtor } from './bake';
-import { soundDef, trimGain } from './catalog';
+import type { ThemeId } from '../core/types';
+import { BAKE_LIST, BAKE_NOISE_SEED, BAKE_RATE, bakeAll, type OfflineCtor } from './bake';
+import { busOf, onMusicBus, soundDef, trimGain } from './catalog';
 import { BUS_LEVEL, createMixGraph, type MixGraph } from './graph';
+import { idleRun, type IdleTask } from './idle';
 import {
   type Cue, type FrameEvent, type Listener, type PlanState, type PlayCue, type RewardKind, type UiSoundName,
-  createPlanState, IdleGrunts, planFrame, REWARD_KEYS, TickProgress, UI_KEYS,
+  createPlanState, gruntPig, IdleGrunts, planFrame, REWARD_KEYS, TickProgress, UI_KEYS,
 } from './mapping';
 import { type Cat, CAT_LIMIT, CAT_MIX, cooldownFor, MAX_VOICES, MAX_VOICES_MOBILE, mobileLimits, type PoolStats, VoicePool, type VoiceSlot } from './mix';
-import { makeNoiseBank, makeTanhCurve, type NoiseBank } from './noise';
+import {
+  makeTanhCurve, type NoiseBank, type NoiseData, noiseBankFrom, noiseDataGen, reverbIRFrom, reverbIRGen, runGen,
+} from './noise';
 import type { S } from './sfx';
 import { beginCollect, endCollect } from './synth';
 import { startTrack, type TrackHandle, type TrackId } from './tracks';
@@ -54,7 +91,12 @@ export interface AudioStats {
 
 const GESTURES = ['pointerdown', 'pointerup', 'touchend', 'keydown', 'click'] as const;
 const CROSSFADE_S = 0.6;
-const GRUNT_PIGS: readonly PigType[] = ['small', 'medium', 'large', 'medium'];
+/** Частота, на которой шумы и отклик реверба считаются до жеста (самая частая у оборудования). */
+const PREP_RATE = 48000;
+/** Сид шумов живого синтеза. */
+const LIVE_NOISE_SEED = 1337;
+/** Отпущенный (украденный, остановленный) голос отключается от шины через столько мс: фейд 5 мс + stop() через 40 мс. */
+const RELEASE_DISCONNECT_MS = 60;
 
 export class AudioEngine {
   private ctx: AudioContext | null = null;
@@ -62,7 +104,7 @@ export class AudioEngine {
   private nb: NoiseBank | null = null;
   private readonly tanh = makeTanhCurve(3);
   private readonly pool: VoicePool;
-  private readonly plan: PlanState = createPlanState();
+  private plan: PlanState = createPlanState();
   private readonly baked = new Map<string, AudioBuffer[]>();
   private bakeStarted = false;
   private pending: FrameEvent[] = [];
@@ -73,16 +115,25 @@ export class AudioEngine {
   private paused = false;
   private wantMusic: TrackId | null = null;
   private wantTheme: ThemeId = 'meadow';
+  /** Фон уровня, погашенный концом уровня: вернётся сам при новой сессии (рестарт с экрана итогов). */
+  private levelAfterEnd: ThemeId | null = null;
   private track: TrackHandle | null = null;
   private readonly tags = new Map<string, VoiceSlot>();
-  private readonly ticks = new TickProgress();
+  private ticks = new TickProgress();
   private readonly grunts = new IdleGrunts();
   private gruntTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly timers = new Set<ReturnType<typeof setTimeout>>();
   private session: SessionState | null = null;
   private primed = false;
   private started = false;
   private armed = false;
   private suspendedByUs = false;
+  private disposed = false;
+  /** Подготовка в простое до жеста: шумы живого синтеза, шумы запекания, отклик реверба. */
+  private prepNoise: IdleTask<NoiseData> | null = null;
+  private prepBakeNoise: IdleTask<NoiseData> | null = null;
+  private prepIR: IdleTask<Float32Array[]> | null = null;
+  private irRate = 0;
 
   constructor(opts: AudioEngineOptions = {}) {
     this.sfxOn = opts.sfx ?? true;
@@ -90,6 +141,7 @@ export class AudioEngine {
     this.volume = clamp01(opts.volume ?? 1);
     const mobile = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
     this.pool = new VoicePool(mobile ? MAX_VOICES_MOBILE : MAX_VOICES, mobile ? mobileLimits() : CAT_LIMIT);
+    if (typeof window !== 'undefined') this.prepare();
     if (opts.autoUnlock !== false) this.armUnlock();
   }
 
@@ -98,12 +150,20 @@ export class AudioEngine {
     return this.ctx?.state === 'running';
   }
 
-  /** Живой AudioContext (null до первого unlock или без поддержки Web Audio). */
+  /** Живой AudioContext (null до первого unlock, без поддержки Web Audio и после dispose). */
   get context(): AudioContext | null {
     return this.ctx;
   }
 
-  // ───────────────────────── разблокировка ─────────────────────────
+  // ───────────────────────── подготовка и разблокировка ─────────────────────────
+
+  /** Посчитать шумы и отклик реверба заранее, по кусочку в простое главного потока. */
+  private prepare(): void {
+    this.prepNoise = idleRun(noiseDataGen(PREP_RATE, 2, LIVE_NOISE_SEED));
+    this.prepIR = idleRun(reverbIRGen(PREP_RATE));
+    this.irRate = PREP_RATE;
+    this.prepBakeNoise = idleRun(noiseDataGen(BAKE_RATE, 2, BAKE_NOISE_SEED));
+  }
 
   /**
    * Создать/возобновить AudioContext. Вызывать СИНХРОННО из обработчика жеста (pointerdown/click/keydown):
@@ -128,13 +188,18 @@ export class AudioEngine {
     // Без жеста resume() может не завершиться никогда — не держим вызывающего дольше 1.5 с.
     const timeout = new Promise<void>((r) => setTimeout(r, 1500));
     return Promise.race([resumed, timeout]).then(() => {
-      if (c.state === 'running') this.onRunning();
+      if (c.state === 'running' && this.ctx === c) this.onRunning();
     });
   }
 
   private ensureContext(): AudioContext | null {
+    if (this.disposed) return null;
     if (this.ctx) return this.ctx;
     if (typeof window === 'undefined') return null;
+    // Без активации пользователем Chrome создаёт контекст «suspended» и пишет предупреждение в консоль —
+    // ждём настоящего жеста (слушатели остаются взведёнными).
+    const ua = (navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation;
+    if (ua && !ua.isActive) return null;
     const AC = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!AC) return null;
     let c: AudioContext;
@@ -144,13 +209,29 @@ export class AudioEngine {
       return null;
     }
     this.ctx = c;
-    this.g = createMixGraph(c);
-    this.nb = makeNoiseBank(c, 2);
+    // Граф без отклика реверба: IR ставится позже, вне обработчика жеста (реверб нужен только взрывам и разрушениям).
+    const g = createMixGraph(c, c.destination, {}, { reverbIR: null });
+    this.g = g;
+    // Шумы обычно готовы заранее; если жест пришёл раньше — досчитываются здесь.
+    const noise = this.prepNoise ? this.prepNoise.finish() : runGen(noiseDataGen(PREP_RATE, 2, LIVE_NOISE_SEED));
+    this.prepNoise = null;
+    this.nb = noiseBankFrom(c, noise);
+    if (!this.prepIR || this.irRate !== c.sampleRate) {
+      this.prepIR?.cancel();
+      this.prepIR = idleRun(reverbIRGen(c.sampleRate));
+      this.irRate = c.sampleRate;
+    }
+    this.prepIR.then((chs) =>
+      this.later(() => {
+        if (this.g === g) g.setReverbIR(reverbIRFrom(c, chs));
+      }, 0),
+    );
     this.applyLevels(true);
     c.onstatechange = () => {
+      if (this.disposed || this.ctx !== c) return;
       if (c.state === 'running') this.onRunning();
       // iOS: звонок/Siri переводят контекст в 'interrupted' — вернуть можно только жестом.
-      else if (!this.suspendedByUs && typeof document !== 'undefined' && !document.hidden) this.armUnlock();
+      else if (c.state !== 'closed' && !this.suspendedByUs && typeof document !== 'undefined' && !document.hidden) this.armUnlock();
     };
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', this.onVisibility);
     return c;
@@ -158,7 +239,7 @@ export class AudioEngine {
 
   private readonly onVisibility = (): void => {
     const c = this.ctx;
-    if (!c) return;
+    if (!c || this.disposed) return;
     if (document.hidden) {
       if (c.state === 'running') {
         this.suspendedByUs = true;
@@ -166,7 +247,13 @@ export class AudioEngine {
       }
     } else if (this.suspendedByUs) {
       this.suspendedByUs = false;
-      void c.resume();
+      // iOS может не отпустить контекст без жеста — тогда снова ждём касания
+      void c
+        .resume()
+        .catch(() => undefined)
+        .then(() => {
+          if (c.state !== 'running' && c.state !== 'closed') this.armUnlock();
+        });
     }
   };
 
@@ -175,7 +262,7 @@ export class AudioEngine {
   };
 
   private armUnlock(): void {
-    if (this.armed || typeof window === 'undefined') return;
+    if (this.disposed || this.armed || typeof window === 'undefined') return;
     this.armed = true;
     for (const ev of GESTURES) window.addEventListener(ev, this.onGesture, { capture: true, passive: true });
   }
@@ -187,25 +274,45 @@ export class AudioEngine {
   }
 
   private onRunning(): void {
+    if (this.disposed) return;
     this.disarmUnlock();
     if (!this.started) {
       this.started = true;
-      this.startBake();
+      // запекание — не в задаче жеста: после того как готовы шумы запекания, отдельной задачей
+      this.later(() => this.startBake(), 0);
       this.gruntTimer = setInterval(this.idleTick, 1000);
     }
     if (this.wantMusic && this.musicOn && !this.track) this.startMusic(this.wantMusic, this.wantTheme);
   }
 
   private startBake(): void {
-    if (this.bakeStarted || typeof window === 'undefined') return;
+    if (this.bakeStarted || this.disposed || typeof window === 'undefined') return;
     const Off = (window.OfflineAudioContext ??
       (window as unknown as { webkitOfflineAudioContext?: OfflineCtor }).webkitOfflineAudioContext) as OfflineCtor | undefined;
     if (!Off) return;
     this.bakeStarted = true;
-    bakeAll(Off, 32000, BAKE_LIST, (key, bufs) => this.baked.set(key, bufs)).catch((err: unknown) => {
-      // Без запекания всё звучит живым синтезом — только дороже по CPU.
-      console.warn('[audio] запекание не удалось, работает живой синтез:', err);
-    });
+    const go = (noise: NoiseData | null): void => {
+      if (this.disposed) return;
+      bakeAll(Off, BAKE_RATE, BAKE_LIST, (key, bufs) => {
+        if (!this.disposed) this.baked.set(key, bufs);
+      }, { noise, cancelled: () => this.disposed }).catch((err: unknown) => {
+        // Без запекания всё звучит живым синтезом — только дороже по CPU.
+        if (!this.disposed) console.warn('[audio] запекание не удалось, работает живой синтез:', err);
+      });
+    };
+    const prep = this.prepBakeNoise;
+    this.prepBakeNoise = null;
+    if (prep) prep.then((d) => this.later(() => go(d), 0));
+    else go(null);
+  }
+
+  /** setTimeout, который dispose() отменяет. */
+  private later(fn: () => void, ms: number): void {
+    const h = setTimeout(() => {
+      this.timers.delete(h);
+      if (!this.disposed) fn();
+    }, ms);
+    this.timers.add(h);
   }
 
   // ───────────────────────── переключатели ─────────────────────────
@@ -214,7 +321,7 @@ export class AudioEngine {
     this.sfxOn = on;
     this.applyLevels();
     if (!on && this.ctx) {
-      this.pool.releaseAll(this.ctx.currentTime);
+      this.releaseWhere((onMusic) => !onMusic);
       this.tags.clear();
       this.plan.fuses.clear();
     }
@@ -222,8 +329,28 @@ export class AudioEngine {
 
   setMusic(on: boolean): void {
     this.musicOn = on;
-    if (!on) this.stopMusic(0.3);
-    else if (this.wantMusic && this.ready && !this.track) this.startMusic(this.wantMusic, this.wantTheme);
+    if (!on) {
+      this.stopMusic(0.3);
+      this.releaseWhere((onMusic) => onMusic); // джингл тоже замолкает
+    } else if (this.wantMusic && this.ready && !this.track) this.startMusic(this.wantMusic, this.wantTheme);
+  }
+
+  /** Остановить голоса пула по признаку «звучит на шине музыки». */
+  private releaseWhere(pred: (onMusic: boolean) => boolean): void {
+    const c = this.ctx;
+    if (!c) return;
+    const now = c.currentTime;
+    for (const v of this.pool.voices(now)) if (pred(onMusicBus(v.key))) this.pool.release(v, now);
+  }
+
+  /** Остановить голоса с меткой, начинающейся с prefix (фитили). */
+  private releaseTagged(prefix: string): void {
+    const now = this.ctx?.currentTime ?? 0;
+    for (const [tag, slot] of [...this.tags]) {
+      if (!tag.startsWith(prefix)) continue;
+      this.pool.release(slot, now);
+      this.tags.delete(tag);
+    }
   }
 
   setMasterVolume(v: number): void {
@@ -236,13 +363,21 @@ export class AudioEngine {
     this.paused = on;
     this.applyLevels();
     if (on && this.ctx) {
-      for (const [tag, slot] of [...this.tags]) {
-        if (!tag.startsWith('fuse:')) continue;
-        this.pool.release(slot, this.ctx.currentTime);
-        this.tags.delete(tag);
-      }
+      this.releaseTagged('fuse:');
       this.plan.fuses.clear();
     }
+  }
+
+  /**
+   * Новая игровая сессия (рестарт, выход в меню, другой уровень): гасит фитили, сбрасывает память
+   * карты событий (фитили, «уф» свиней, номер бонуса, типы свиней, ведро ударов) и прогресс тиков.
+   * Движок зовёт её сам при смене трека и при stateChanged нового GameSession; звать вручную безопасно.
+   */
+  resetSession(): void {
+    this.releaseTagged('fuse:');
+    this.plan = createPlanState();
+    this.ticks = new TickProgress();
+    this.grunts.reset();
   }
 
   private applyLevels(immediate = false): void {
@@ -267,13 +402,17 @@ export class AudioEngine {
   // ───────────────────────── музыка ─────────────────────────
 
   /**
-   * Музыка экрана: 'menu' — полька, 'level' — тихий эмбиент + фон темы, null — тишина.
+   * Музыка экрана: 'menu' — полька, 'level' — фон темы (без музыки), null — тишина.
    * Смена — кроссфейд 0.6 с. Повторный вызов с тем же треком ничего не перезапускает.
+   * Смена трека или темы уровня начинает новую сессию звука (resetSession).
    */
   playMusic(track: 'menu' | 'level' | null, theme?: ThemeId): void {
     const th = theme ?? this.wantTheme;
+    const changed = track !== this.wantMusic || (track === 'level' && th !== this.wantTheme);
     this.wantMusic = track;
     this.wantTheme = th;
+    this.levelAfterEnd = null; // явный заказ отменяет автоматическое возвращение фона уровня
+    if (changed && track !== null) this.resetSession();
     if (track !== 'level') this.grunts.reset();
     const cur = this.track;
     if (cur && track && cur.id === track && (track === 'menu' || cur.theme === th)) return;
@@ -292,6 +431,14 @@ export class AudioEngine {
   private stopMusic(fadeS: number): void {
     this.track?.stop(fadeS);
     this.track = null;
+  }
+
+  /** Конец уровня: фон гаснет, заказ музыки снимается, но запоминается — вернётся при новой сессии. */
+  private endLevelMusic(): void {
+    if (this.wantMusic === 'level' || this.track?.id === 'level') this.levelAfterEnd = this.wantTheme;
+    this.wantMusic = null;
+    this.grunts.reset();
+    this.stopMusic(0.5);
   }
 
   /** Музыка и фон −6 дБ на взрыв: атака τ 30 мс, возврат τ 250 мс через 150 мс. */
@@ -313,7 +460,13 @@ export class AudioEngine {
    * Вызывать для каждого события из drainEvents() в том же кадре: события кадра обрабатываются пачкой.
    */
   handle(e: GameEvent, listener?: Listener): void {
-    if (e.type === 'stateChanged') this.session = e.to;
+    if (this.disposed) return;
+    if (e.type === 'stateChanged') {
+      const prev = this.session;
+      this.session = e.to;
+      // from ≠ последнему состоянию — это уже другой GameSession (рестарт, следующий уровень)
+      if (prev !== null && e.from !== prev) this.onNewSession();
+    }
     if (!this.ready) return;
     if (!this.sfxOn && e.type !== 'levelEnd' && e.type !== 'stateChanged') return;
     this.pending.push({ e, l: listener });
@@ -323,16 +476,37 @@ export class AudioEngine {
     }
   }
 
+  private onNewSession(): void {
+    const theme = this.levelAfterEnd;
+    this.resetSession();
+    if (theme && this.wantMusic === null) this.playMusic('level', theme);
+  }
+
   private readonly flush = (): void => {
     this.flushQueued = false;
     const batch = this.pending;
     this.pending = [];
     const c = this.ctx;
-    if (!c || c.state !== 'running') return;
+    if (!c || c.state !== 'running' || this.disposed) return;
     const now = c.currentTime;
-    const cues = planFrame(batch, this.plan, { now, rnd: Math.random, voices: (cat) => this.pool.count(now, cat) });
+    const cues = planFrame(batch, this.plan, {
+      now,
+      rnd: Math.random,
+      voices: (cat) => this.pool.count(now, cat),
+      hasTag: (tag) => this.liveTag(tag, now),
+    });
     for (const q of cues) this.exec(q, now);
   };
+
+  /** Голос с меткой ещё звучит (не доиграл и не был остановлен). */
+  private liveTag(tag: string, now: number): boolean {
+    const slot = this.tags.get(tag);
+    if (!slot) return false;
+    if (slot.end > now) return true;
+    this.pool.prune(now); // доиграл — отпустить и снять метку
+    this.tags.delete(tag);
+    return false;
+  }
 
   private exec(q: Cue, now: number): void {
     switch (q.op) {
@@ -349,11 +523,9 @@ export class AudioEngine {
         this.duckMusic();
         break;
       case 'levelEnd':
-        // Музыка уровня гаснет, через 0.1 с — джингл (UI может позвать ui('win'|'lose') — кулдаун не даст повтора).
-        this.wantMusic = null;
-        this.grunts.reset();
-        this.stopMusic(0.5);
-        if (this.sfxOn) this.playKey(q.won ? 'jingle:win' : 'jingle:lose', { delay: 0.1 });
+        // Фон уровня гаснет, через 0.1 с — джингл (UI может позвать ui('win'|'lose') — кулдаун не даст повтора).
+        this.endLevelMusic();
+        if (this.musicOn) this.playKey(q.won ? 'jingle:win' : 'jingle:lose', { delay: 0.1 });
         break;
       case 'state':
         this.grunts.onState(q.to, now, Math.random);
@@ -366,26 +538,23 @@ export class AudioEngine {
     if (!c || c.state !== 'running' || !this.sfxOn || this.paused) return;
     if (this.session !== 'ready' && this.session !== 'aiming') return;
     if (!this.grunts.due(c.currentTime, Math.random)) return;
-    const pig = GRUNT_PIGS[Math.floor(Math.random() * GRUNT_PIGS.length)]!;
-    // свиньи справа от рогатки и обычно за краем кадра — тихо и правее
-    this.playKey(`pigGrunt:${pig}`, { gain: 0.5, pan: 0.25 + Math.random() * 0.25 });
+    // хрюкает свинья из тех, что есть на уровне; они справа от рогатки и обычно за краем кадра — тихо и правее
+    this.playKey(`pigGrunt:${gruntPig(this.plan, Math.random)}`, { gain: 0.5, pan: 0.25 + Math.random() * 0.25 });
   };
 
   // ───────────────────────── UI и награды ─────────────────────────
 
-  /** UI-звук. Для 'tick' arg — прогресс счётчика 0..1 (без него тон растёт сам при частых тиках). */
+  /** UI-звук. Для 'tick' arg — прогресс счётчика 0..1 (без него тон растёт по времени прокрутки счёта). */
   ui(name: UiSoundName, arg?: number): void {
-    if (!this.ready || !this.sfxOn) return;
+    if (!this.ready) return;
     const key = UI_KEYS[name];
     if (!key) return;
+    if (onMusicBus(key) ? !this.musicOn : !this.sfxOn) return; // джинглы — часть музыки (05-audio §9.6)
     if (name === 'tick') {
       this.scoreTick(arg ?? this.ticks.next(this.ctx!.currentTime));
       return;
     }
-    if ((name === 'win' || name === 'lose') && this.track?.id === 'level') {
-      this.wantMusic = null;
-      this.stopMusic(0.5);
-    }
+    if ((name === 'win' || name === 'lose') && this.track?.id === 'level') this.endLevelMusic();
     this.playKey(key);
   }
 
@@ -403,7 +572,7 @@ export class AudioEngine {
 
   /** Проиграть звук каталога по ключу (страница предпросмотра, особые случаи UI). */
   play(key: string, opts: PlayOpts = {}): boolean {
-    if (!this.ready || !this.sfxOn) return false;
+    if (!this.ready || !(onMusicBus(key) ? this.musicOn : this.sfxOn)) return false;
     return this.playKey(key, opts) !== null;
   }
 
@@ -433,23 +602,27 @@ export class AudioEngine {
     if (!(q.gain * CAT_MIX[cat].gain >= 0.02)) return null; // слишком тихо/далеко — не тратим голос
     const gain = q.gain * CAT_MIX[cat].gain * trimGain(def);
     const now = c.currentTime;
-    const slot = this.pool.acquire(q.key, cat, q.score * CAT_MIX[cat].prio, cooldownFor(q.key, cat), now);
+    const slot = this.pool.acquire(q.key, cat, q.score * CAT_MIX[cat].prio * (def.weight ?? 1), cooldownFor(q.key, cat), now);
     if (!slot) return null;
 
     const t = now + (cat === 'ui' || cat === 'reward' ? 0.005 : 0.01) + Math.max(0, q.delay);
     const input = c.createGain();
     input.gain.value = gain;
-    const bus = g.busFor(cat);
+    /** Узлы голоса, которые надо отключить от шин, когда он отзвучит. */
+    const wires: AudioNode[] = [input];
+    const bus = busOf(g, def);
     if (q.pan) {
       const p = c.createStereoPanner();
       p.pan.value = Math.max(-1, Math.min(1, q.pan));
       input.connect(p).connect(bus);
+      wires.push(p);
     } else input.connect(bus);
     const send = q.send || def.send || 0;
     if (send > 0) {
       const sg = c.createGain();
       sg.gain.value = send;
       input.connect(sg).connect(g.send);
+      wires.push(sg);
     }
 
     let sources: AudioScheduledSourceNode[] = [];
@@ -476,9 +649,21 @@ export class AudioEngine {
         sources = endCollect();
       }
     }
-    slot.end = end;
+    // Колокольчики держат место в пуле до −40 дБ (holdFrac), тихий хвост доигрывает вне лимита.
+    slot.end = t + Math.max(0, end - t) * (def.holdFrac ?? 1);
+    const tag = q.tag;
+    let wired = true;
+    const unwire = (): void => {
+      if (!wired) return;
+      wired = false;
+      for (const w of wires) w.disconnect();
+    };
+    const dropTag = (): void => {
+      if (tag && this.tags.get(tag) === slot) this.tags.delete(tag);
+    };
     slot.onStop = (n) => {
-      // фейд τ 5 мс и реальная остановка источников через 40 мс — без щелчка и без лишнего CPU
+      // фейд τ 5 мс и реальная остановка источников через 40 мс — без щелчка и без лишнего CPU;
+      // затем вход голоса отключается от шины (иначе панорама и посыл висят на шине до закрытия контекста)
       input.gain.cancelScheduledValues(n);
       input.gain.setValueAtTime(input.gain.value, n);
       input.gain.setTargetAtTime(0, n, 0.005);
@@ -489,11 +674,14 @@ export class AudioEngine {
           /* уже остановлен */
         }
       }
+      dropTag();
+      this.later(unwire, RELEASE_DISCONNECT_MS);
     };
-    const tag = q.tag;
     slot.onEnd = () => {
-      input.disconnect();
-      if (tag && this.tags.get(tag) === slot) this.tags.delete(tag);
+      dropTag();
+      const left = end - (this.ctx?.currentTime ?? end);
+      if (left > 0.005) this.later(unwire, left * 1000 + 20); // хвост за пределом пула ещё звучит
+      else unwire();
     };
     if (tag) this.tags.set(tag, slot);
     return slot;
@@ -514,17 +702,36 @@ export class AudioEngine {
     };
   }
 
-  /** Освободить всё (закрыть контекст). */
+  /**
+   * Освободить всё навсегда: контекст закрыт, слушатели и таймеры сняты, подготовка и запекание прерваны.
+   * После dispose() жесты ничего не создают, вызовы методов — тихий no-op.
+   */
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     this.disarmUnlock();
-    this.stopMusic(0.05);
+    this.stopMusic(0);
     if (this.gruntTimer) clearInterval(this.gruntTimer);
     this.gruntTimer = null;
     if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', this.onVisibility);
+    for (const p of [this.prepNoise, this.prepIR, this.prepBakeNoise]) p?.cancel();
+    this.prepNoise = this.prepIR = this.prepBakeNoise = null;
     const c = this.ctx;
+    if (c) this.pool.releaseAll(c.currentTime);
+    for (const h of this.timers) clearTimeout(h);
+    this.timers.clear();
+    this.pending = [];
+    this.tags.clear();
+    this.baked.clear();
+    this.wantMusic = null;
+    this.levelAfterEnd = null;
     this.ctx = null;
     this.g = null;
-    if (c) void c.close().catch(() => undefined);
+    this.nb = null;
+    if (c) {
+      c.onstatechange = null; // close() вызовет onstatechange('closed') — без этого движок снова взводил жесты
+      void c.close().catch(() => undefined);
+    }
   }
 }
 

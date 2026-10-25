@@ -2,6 +2,7 @@
 // Движок складывает события кадра в пачку и вызывает planFrame(); результат — список «реплик» (Cue),
 // которые движок исполняет: проиграть ключ каталога, остановить фитиль, приглушить музыку, конец уровня.
 
+import { ABILITY } from '../config/constants';
 import type { GameEvent, ImpactSurface, SessionState } from '../core/events';
 import type { PigType } from '../core/types';
 import { type Cat, type ImpactReq, impactIntensity, impactVolume, selectImpacts, spatial, tierOf, TokenBucket } from './mix';
@@ -47,14 +48,17 @@ export interface PlanState {
   bonusIdx: number;
   /** id свиньи → время последнего «уф» (не чаще раза в 300 мс на свинью). */
   pigVoxAt: Map<number, number>;
-  /** Птицы с горящим фитилём. */
+  /** Птицы с горящим фитилём (сверяется с живыми голосами через PlanEnv.hasTag). */
   fuses: Set<number>;
   /** Ведро токенов ударов. */
   bucket: TokenBucket;
+  /** Типы свиней, замеченные на уровне (для хрюканья «от скуки»): из pigsLaugh.pigs и pigDamaged. */
+  pigKinds: Set<PigType>;
 }
 
+/** Новое состояние карты (и сброс при новой сессии: рестарт, выход в меню, смена уровня). */
 export function createPlanState(): PlanState {
-  return { lastPower: 0, bonusIdx: 0, pigVoxAt: new Map(), fuses: new Set(), bucket: new TokenBucket(6, 40) };
+  return { lastPower: 0, bonusIdx: 0, pigVoxAt: new Map(), fuses: new Set(), bucket: new TokenBucket(6, 40), pigKinds: new Set() };
 }
 
 export interface PlanEnv {
@@ -63,6 +67,11 @@ export interface PlanEnv {
   rnd: () => number;
   /** Сколько голосов категории звучит сейчас (для «громкой/тихой» гибели свиньи). */
   voices?: (cat: Cat) => number;
+  /**
+   * Звучит ли ещё голос с меткой (фитиль). Фитиль, который доиграл, был остановлен паузой
+   * или не пережил рестарт, забывается — новый удар той же птицы снова его зажжёт.
+   */
+  hasTag?: (tag: string) => boolean;
 }
 
 export interface FrameEvent {
@@ -70,8 +79,8 @@ export interface FrameEvent {
   l?: Listener | undefined;
 }
 
-/** Длительность фитиля Bomb по умолчанию (останавливается взрывом/исчезновением раньше), мс. */
-export const FUSE_MS = 3000;
+/** Длительность фитиля Bomb = автоподрыв ядра через ABILITY.BOMB.FUSE после первого удара, мс. */
+export const FUSE_MS = ABILITY.BOMB.FUSE * 1000;
 /** Длина дуги Хэла, мс. */
 export const HAL_ARC_MS = 1000;
 /** Не чаще раза в 300 мс «уф» одной и той же свиньи. */
@@ -88,10 +97,27 @@ export function impactKey(surf: ImpactSurface, I: number): { key: string; k: num
   return null;
 }
 
-const fuseTag = (id: number): string => `fuse:${id}`;
+export const fuseTag = (id: number): string => `fuse:${id}`;
 
 interface ImpactItem extends ImpactReq {
   l: Listener | undefined;
+  /** playbackRate по размеру блока (крупный — ниже). */
+  rate: number;
+}
+
+/** Высота удара по размеру блока √(w·h): крупный блок звучит ниже, мелкий — выше (05-audio §8.4). */
+export function sizeRate(size: number | undefined): number {
+  if (!(size !== undefined && size > 0 && Number.isFinite(size))) return 1;
+  return Math.min(1.25, Math.max(0.8, size ** -0.4));
+}
+
+/** Голоса смеха: типы живых свиней (без повторов, король — первым), иначе «стандартный хор». */
+export function laughVoices(pigs: ReadonlyArray<PigType> | undefined, rnd: () => number): PigType[] {
+  const n = 1 + Math.floor(rnd() * 3);
+  const uniq = [...new Set(pigs ?? [])];
+  if (uniq.length === 0) return (['medium', 'small', 'large'] as PigType[]).slice(0, n);
+  uniq.sort((a, b) => (a === 'king' ? -1 : b === 'king' ? 1 : 0));
+  return uniq.slice(0, Math.min(n, uniq.length));
 }
 
 /** Разобрать пачку событий одного кадра в реплики. */
@@ -108,6 +134,7 @@ export function planFrame(batch: ReadonlyArray<FrameEvent>, st: PlanState, env: 
   const stopFuse = (id: number): void => {
     if (st.fuses.delete(id)) out.push({ op: 'stop', tag: fuseTag(id) });
   };
+  if (env.hasTag) for (const id of [...st.fuses]) if (!env.hasTag(fuseTag(id))) st.fuses.delete(id);
 
   for (const { e, l } of batch) {
     const sp = (x: number, reach = 1): { gain: number; pan: number } => (l ? spatial(x, l.camX, l.viewW, reach) : { gain: 1, pan: 0 });
@@ -173,7 +200,9 @@ export function planFrame(batch: ReadonlyArray<FrameEvent>, st: PlanState, env: 
           const ik = impactKey(surf, I);
           if (!ik || seen.has(ik.key)) continue;
           seen.add(ik.key);
-          impacts.push({ key: ik.key, intensity: I * ik.k * (first ? 1 : 0.6), x: e.x, l });
+          // размер блока задаёт высоту только «материальной» поверхности
+          const rate = MATERIALS.has(surf) || surf === 'tnt' ? sizeRate(e.size) : 1;
+          impacts.push({ key: ik.key, intensity: I * ik.k * (first ? 1 : 0.6), x: e.x, l, rate });
           first = false;
         }
         break;
@@ -213,6 +242,7 @@ export function planFrame(batch: ReadonlyArray<FrameEvent>, st: PlanState, env: 
       case 'pigDamaged': {
         const s = sp(e.x);
         const last = st.pigVoxAt.get(e.id);
+        st.pigKinds.add(e.pig);
         if (last === undefined || env.now - last >= PIG_VOX_GAP_S) {
           st.pigVoxAt.set(e.id, env.now);
           play(`pigHurt:${e.pig}`, 'pigVox', s.gain, s.pan);
@@ -249,13 +279,14 @@ export function planFrame(batch: ReadonlyArray<FrameEvent>, st: PlanState, env: 
         break;
       }
       case 'pigsLaugh': {
-        const kinds: PigType[] = ['medium', 'small', 'large'];
-        const n = 1 + Math.floor(env.rnd() * 3);
+        // 1–3 голоса со сдвигом 90–180 мс; свиньи справа от рогатки — панорама +0.15/+0.3/+0.45
+        if (e.pigs && e.pigs.length > 0) st.pigKinds = new Set(e.pigs); // живые свиньи — точный список
+        const kinds = laughVoices(e.pigs, env.rnd);
         let delay = 0;
-        for (let i = 0; i < n; i++) {
-          play(`pigLaugh:${kinds[i]!}`, 'pigVox', 0.9 - 0.2 * i, (i - 1) * 0.3, { delay, rate: 0.96 + env.rnd() * 0.08 });
+        kinds.forEach((k, i) => {
+          play(`pigLaugh:${k}`, 'pigVox', 0.9 - 0.2 * i, 0.15 + 0.15 * i, { delay, rate: 0.96 + env.rnd() * 0.08 });
           delay += 0.09 + env.rnd() * 0.09;
-        }
+        });
         break;
       }
       case 'levelEnd':
@@ -274,7 +305,7 @@ export function planFrame(batch: ReadonlyArray<FrameEvent>, st: PlanState, env: 
   for (const r of chosen) {
     if (!st.bucket.take(env.now)) break;
     const s = r.l ? spatial(r.x, r.l.camX, r.l.viewW) : { gain: 1, pan: 0 };
-    play(r.key, 'impact', impactVolume(r.intensity) * s.gain, s.pan, { score: r.intensity });
+    play(r.key, 'impact', impactVolume(r.intensity) * s.gain, s.pan, { score: r.intensity, rate: r.rate });
   }
   if (overflow > 1.5 || destroyed >= 3) {
     play('rubble', 'break', Math.min(1, Math.max(overflow, destroyed) / 6), 0, { delay: 0.02 });
@@ -325,14 +356,22 @@ export const REWARD_KEYS: Readonly<Record<RewardKind, string>> = {
   newBest: 'newBest',
 };
 
-/** Прогресс тика без явного аргумента: тики подряд (чаще раза в 0.3 с) постепенно поднимают тон. */
+/** Ожидаемая длина прокрутки счёта на экране победы, с (07-ui-ux §12.5: 1.2 с; последний тик — раньше конца). */
+export const TICK_ROLL_S = 1.1;
+
+/**
+ * Прогресс тика без явного аргумента — по времени от первого тика серии (пауза > 0.3 с начинает новую),
+ * с той же кривой, что и сам счёт (ease-out cubic): тон следует за цифрами и к концу прокрутки 1.2 с
+ * доходит до 3000 Гц; при укороченной анимации (0.5 с) — до ≈ 2750 Гц.
+ */
 export class TickProgress {
   private last = -Infinity;
-  private n = 0;
+  private t0 = 0;
   next(now: number): number {
-    this.n = now - this.last > 0.3 ? 0 : this.n + 1;
+    if (now - this.last > 0.3) this.t0 = now;
     this.last = now;
-    return Math.min(1, this.n / 24);
+    const k = Math.min(1, Math.max(0, (now - this.t0) / TICK_ROLL_S));
+    return 1 - (1 - k) ** 3;
   }
 }
 
@@ -353,6 +392,15 @@ export class IdleGrunts {
   reset(): void {
     this.next = Infinity;
   }
+}
+
+/** Обычный «хор», пока типы свиней уровня неизвестны. */
+export const DEFAULT_GRUNT_PIGS: readonly PigType[] = ['small', 'medium', 'large', 'medium'];
+
+/** Кто хрюкает «от скуки»: случайная из замеченных на уровне свиней, иначе — из обычного хора. */
+export function gruntPig(st: PlanState, rnd: () => number): PigType {
+  const pool = st.pigKinds.size > 0 ? [...st.pigKinds] : DEFAULT_GRUNT_PIGS;
+  return pool[Math.min(pool.length - 1, Math.floor(rnd() * pool.length))]!;
 }
 
 /** Все ключи, которые карта может запросить (для проверки каталога в тестах). */

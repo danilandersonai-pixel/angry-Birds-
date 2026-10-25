@@ -2,24 +2,36 @@
 // передний план и (реэкспорт) рельеф. Слои — бесшовные горизонтальные полосы, запечённые в offscreen-холсты;
 // каждый кадр — только drawImage и пара заливок (см. docs/research/04-visual.md §2–§5).
 //
+// API (контракт спецификации §3):
+//   new Background(theme).draw(ctx, view)  — небо и все слои фона на весь экран (экранные координаты);
+//   drawTerrain(ctx, terrain, theme, view) — рельеф в мире (реэкспорт из terrain.ts);
+//   drawForeground(ctx, theme, view)       — передний план (≤ 3 % высоты экрана);
+//   THEME_INFO                              — название и цвета темы для UI.
+// Дополнительно: Background.prewarm(view) и prewarmTerrain(terrain, theme) — построить кэши заранее
+// (экран загрузки / интро); Background.fastScaling — масштабирование без сглаживания для LOW-качества.
+//
 // Математика слоя (04 §3.1): sL = sRef·(s/sRef)^f, sRef = H/15;
 //   X = W/2 + (xL − camX·f)·sL;  Y = H/2 − (yL + baseY − camY·f)·sL.
 // Ниже полосы непрозрачный слой заливается своим нижним цветом — щелей нет при любом зуме и соотношении сторон.
 //
 // Производительность:
 //  • отсечение перерисовки: у каждого слоя известна «линия непрозрачности»; всё, что ниже линии следующих
-//    слоёв, не рисуется (каждый пиксель экрана закрашивается ≈ 1 раз + прозрачные края силуэтов);
-//  • полосы режутся на столбцы по высоте содержимого — прозрачный верх полосы не блитится;
-//  • при неподвижном зуме полосы и облака строятся ровно под текущий масштаб и рисуются 1:1 (быстрый путь
-//    и на CPU-растре); пока зум меняется — ближайшая готовая полоса с масштабированием, не больше
-//    одной перестройки за кадр.
+//    слоёв, не рисуется (прямоугольный клип), — каждый пиксель закрашивается ≈ 1 раз + прозрачные края силуэтов;
+//  • полоса = тайлы шириной ≤ 512 px без прозрачного верха; тайл рисуется целиком (drawImage без
+//    под-прямоугольника источника — на программном растре это вдвое быстрее), небо — столбец 1×h;
+//  • кэш по масштабу: при неподвижном зуме (250 мс) полосы и облака строятся ровно под текущий масштаб и
+//    рисуются 1:1; пока зум меняется или новая полоса не готова — ближайшая готовая с масштабированием.
+//    Полоса достраивается в фоне по тайлам (бюджет 2 мс за кадр + не больше одного тайла 0.3–3.5 мс сверх него),
+//    облака — по одному за кадр; без рывков после остановки зума;
+//    LRU на 2 масштаба (вид рогатки + последний другой); ≈ 20 МБ полос на масштаб при 1080p.
 
 import type { ThemeId } from '../../core/types';
 import { createCanvas, ctx2d, type AnyCanvas, type Ctx2D } from '../canvas';
 import type { ViewInfo } from '../view';
+import { CAMERA } from '../../config/constants';
 import { TAU, clamp, lerp, mix, rand, rgba } from './terrain';
 
-export { drawTerrain } from './terrain';
+export { drawTerrain, prewarmTerrain } from './terrain';
 
 // ───────────────────────── палитры ─────────────────────────
 
@@ -203,14 +215,22 @@ export const THEME_INFO: Record<ThemeId, { name: string; skyTop: string; skyBott
 
 /** Высота вида рогатки, м — масштаб, при котором слои рисуются «как задуманы». */
 const AIM_VIEW_H = 15;
-/** Максимальная ширина одного тайла полосы, px. */
-const TILE_MAX_PX = 2048;
+/** Ширина тайла полосы, px: тайл рисуется целиком (drawImage без под-прямоугольника — быстрый путь растра). */
+const TILE_PX = 512;
 /** Предел ширины полосы на период, px (память). */
 const STRIP_MAX_PX = 7168;
-/** Сколько полос держать на слой. */
+/** Сколько полос держать на слой (LRU: вид рогатки остаётся, пока к нему возвращаются, + последний другой масштаб). */
 const STRIPS_PER_LAYER = 2;
+/** Сколько спрайтов держать на облако (LRU). */
+const CLOUDS_PER_ITEM = 3;
+/** Высота «шва» внизу полосы, м слоя: плавный переход к сплошной заливке под слоем. */
+const SEAL_M = 0.4;
+/** Бюджет фоновой достройки полос за кадр, мс (минимум один тайл за кадр, пока есть работа). */
+const JOB_BUDGET_MS = 2;
 /** Новую полосу / облака строим, когда масштаб не менялся столько, мс (кроме самой первой). */
 const STABLE_MS = 250;
+/** Относительное расхождение масштаба, при котором полоса/облако рисуются 1:1 (сдвиг ≤ 1.5 px на 1000 px). */
+const EXACT_EPS = 1.5e-3;
 /** Ширина столбца для обрезки прозрачного верха полосы, м слоя. */
 const BIN_M = 1;
 
@@ -258,28 +278,42 @@ interface StripLayer {
   haze?: number;
 }
 
-/** Кусок полосы для блита: тайл, столбец [sx, sx+sw) и верх содержимого sy (px тайла). */
-interface Piece {
-  tile: number;
-  sx: number;
-  sw: number;
-  sy: number;
+/** Тайл полосы: столбец шириной ≤ TILE_PX без прозрачного верха; (x, y) — его левый верх в px полосы. */
+interface Tile {
+  c: AnyCanvas;
+  x: number;
+  y: number;
 }
 
 interface Strip {
-  tiles: AnyCanvas[];
-  /** Начало тайла в px полосы. */
-  tileX: number[];
+  tiles: Tile[];
   totalPx: number;
   ppm: number;
   hPx: number;
   fill: string | null;
   opaqueTop: number;
-  pieces: Piece[];
+}
+
+/**
+ * Построение полосы по тайлам: сухой прогон построителя (холст 1×1) даёт высоты содержимого и цвет заливки,
+ * затем каждый тайл рисуется сразу обрезанным сверху. Тайлы строятся по нескольку за кадр в пределах бюджета.
+ */
+interface StripJob {
+  L: StripLayer;
+  totalPx: number;
+  ppm: number;
+  hPx: number;
+  tops: Tops;
+  fill: string | null;
+  opaqueTop: number;
+  n: number;
+  tiles: Tile[];
 }
 
 interface LayerState {
   strips: Strip[];
+  /** Достраиваемая полоса под новый масштаб (до готовности рисуется ближайшая старая). */
+  job: StripJob | null;
 }
 
 interface CloudItem {
@@ -387,7 +421,17 @@ function strokeLine(c: Ctx2D, pts: Array<[number, number]>, dy: number): void {
 
 // ───────────────────────── построители полос ─────────────────────────
 
-/** Горный хребет: градиент, теневые склоны, снег, светлый гребень, дымка у подножия. Возвращает нижний цвет и минимум профиля. */
+/** Вертикальный градиент [y0 → y1] (м слоя) из N+1 стопов col(y) — для «запечённой» дымки без отдельного прохода. */
+function vGrad(c: Ctx2D, y0: number, y1: number, col: (y: number) => string, N = 12): CanvasGradient {
+  const g = c.createLinearGradient(0, y0, 0, y1);
+  for (let i = 0; i <= N; i++) g.addColorStop(i / N, col(lerp(y0, y1, i / N)));
+  return g;
+}
+
+/**
+ * Горный хребет: градиент, теневые склоны, снег, светлый гребень. Дымка у подножия сразу входит в цвета
+ * всех заливок (α(y) растёт книзу) — отдельный проход по всей полосе не нужен. Возвращает нижний цвет и минимум профиля.
+ */
 function drawRange(
   c: Ctx2D,
   L: StripLayer,
@@ -401,16 +445,21 @@ function drawRange(
   const pts = sample(P, 6, H);
   const minH = markProfile(tops, pts, 0.15);
   const bottomCol = mix(M.fill, fog, 0.5);
-  const g = c.createLinearGradient(0, L.height, 0, -L.depth);
-  g.addColorStop(0, M.light);
-  g.addColorStop(0.5, M.fill);
-  g.addColorStop(1, bottomCol);
+  const y0 = L.height;
+  const y1 = -L.depth;
+  const fogAt = (y: number): number => opt.fogA * clamp((opt.fogTop - y) / (opt.fogTop + 0.3 * L.depth), 0, 1);
+  const fogged = (col: string, a = 1) => (y: number): string => rgba(mix(col, fog, fogAt(y)), a);
+  const t = (y: number): number => (y0 - y) / (y0 - y1);
   silhouette(c, pts, -L.depth);
-  c.fillStyle = g;
+  c.fillStyle = vGrad(c, y0, y1, (y) => {
+    const u = t(y);
+    const base = u < 0.5 ? mix(M.light, M.fill, u / 0.5) : mix(M.fill, bottomCol, (u - 0.5) / 0.5);
+    return mix(base, fog, fogAt(y));
+  });
   c.fill();
   c.save();
   c.clip();
-  c.fillStyle = rgba(M.shade, 0.55);
+  c.fillStyle = vGrad(c, y0, y1, fogged(M.shade, 0.55));
   slopeShade(c, pts, 0.55, 0.9);
   c.fill();
   if (M.snow) {
@@ -427,25 +476,20 @@ function drawRange(
     }
     snow.lineTo(P, L.height + 1);
     snow.closePath();
-    c.fillStyle = M.snow;
+    c.fillStyle = vGrad(c, y0, y1, fogged(M.snow), 6);
     c.fill(snow);
     c.save();
     c.clip(snow);
-    c.fillStyle = M.snowShade ?? M.shade;
+    c.fillStyle = vGrad(c, y0, y1, fogged(M.snowShade ?? M.shade), 6);
     slopeShade(c, pts, 0.55, 0.9);
     c.fill();
     c.restore();
   }
-  // светлый гребень (контровой свет)
-  c.lineWidth = 0.14;
-  c.strokeStyle = rgba(M.snow ?? M.light, 0.7);
-  strokeLine(c, pts, 0);
-  const fg = c.createLinearGradient(0, opt.fogTop, 0, -L.depth * 0.3);
-  fg.addColorStop(0, rgba(fog, 0));
-  fg.addColorStop(1, rgba(fog, opt.fogA));
-  c.fillStyle = fg;
-  c.fillRect(0, -L.depth, P, opt.fogTop + L.depth);
   c.restore();
+  // светлый гребень (контровой свет) — вне клипа: половина линии над силуэтом и есть «кайма»
+  c.lineWidth = 0.07;
+  c.strokeStyle = rgba(M.snow ?? M.light, 0.7);
+  strokeLine(c, pts, -0.035);
   return [mix(bottomCol, fog, opt.fogA), minH];
 }
 
@@ -1255,43 +1299,43 @@ function renderGlow(color: string, a: number, size: number): AnyCanvas {
 
 // ───────────────────────── Background ─────────────────────────
 
-let probe: CanvasRenderingContext2D | null = null;
+/** Холст 1×1 для сухих прогонов построителей полос и «прогрева» готовых холстов. */
+let dryCtx: Ctx2D | null = null;
 
-/** Цвет пикселя полосы (низ) — точная заливка «под слоем». */
-function sampleColor(src: AnyCanvas, x: number, y: number): string | null {
-  if (!probe) {
-    const pc = createCanvas(1, 1);
-    probe = pc.getContext('2d', { willReadFrequently: true });
-  }
-  if (!probe) return null;
-  probe.clearRect(0, 0, 1, 1);
-  probe.drawImage(src, x, y, 1, 1, 0, 0, 1, 1);
-  const d = probe.getImageData(0, 0, 1, 1).data;
-  if (d[3] < 250) return null;
-  return `rgb(${d[0]},${d[1]},${d[2]})`;
+/**
+ * Растеризовать отложенные команды холста сейчас (снимок через drawImage в холст 1×1): иначе браузер
+ * растеризует их при первом показе, и стоимость построения всплывёт рывком в кадре отрисовки, а не в бюджете.
+ */
+function prime(c: AnyCanvas): void {
+  if (!dryCtx) dryCtx = ctx2d(createCanvas(1, 1));
+  dryCtx.drawImage(c, 0, 0, 1, 1, 0, 0, 1, 1);
 }
 
-/** Столбцы с близкой высотой содержимого объединяются (меньше вызовов drawImage). */
-function runsOf(t: Tops, period: number): Array<[number, number, number]> {
-  const out: Array<[number, number, number]> = [];
-  let i = 0;
-  while (i < t.n) {
-    let lo = t.v[i];
-    let hi = t.v[i];
-    let j = i + 1;
-    while (j < t.n) {
-      const v = t.v[j];
-      const nlo = Math.min(lo, v);
-      const nhi = Math.max(hi, v);
-      if (nhi - nlo > 0.8) break;
-      lo = nlo;
-      hi = nhi;
-      j++;
-    }
-    out.push([i * BIN_M, Math.min(period, j * BIN_M), hi]);
-    i = j;
+/** LRU: отметить элемент списка как недавно использованный (в конец). */
+function touch<T>(list: T[], item: T): T {
+  const i = list.indexOf(item);
+  if (i >= 0 && i !== list.length - 1) {
+    list.splice(i, 1);
+    list.push(item);
   }
-  return out;
+  return item;
+}
+
+/** Максимальная высота содержимого (м слоя) на отрезке [x0, x1] м. */
+function topIn(t: Tops, x0: number, x1: number): number {
+  let hi = -1e9;
+  const i0 = Math.max(0, Math.floor(x0 / BIN_M) - 1);
+  const i1 = Math.min(t.n - 1, Math.floor(x1 / BIN_M) + 1);
+  for (let i = i0; i <= i1; i++) hi = Math.max(hi, t.v[i]);
+  return hi;
+}
+
+/** Применить прямоугольный клип [0, W] × [0, y) — дёшево и для GPU, и для программного растра. */
+function clipAbove(ctx: Ctx2D, W: number, y: number): void {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, W, y);
+  ctx.clip();
 }
 
 /**
@@ -1310,12 +1354,24 @@ export class Background {
   private readonly states = new Map<string, LayerState>();
   private readonly clouds = new Map<number, CloudSprite[]>();
   private glow: AnyCanvas | null = null;
-  private skyBand: { c: AnyCanvas; W: number; H: number } | null = null;
-  private buildsLeft = 1;
-  private cloudBuildsLeft = 2;
-  private lastScale = -1;
+  /** Отражение солнца в море (beach) — запечённое под размер экрана. */
+  private reflect: AnyCanvas | null = null;
+  /** Градиент неба — столбец 1×h, растягиваемый по ширине (дешевле полосы во весь экран, не зависит от W). */
+  private skyCol: AnyCanvas | null = null;
+  /** Слои с незавершённой достройкой полосы в этом кадре. */
+  private pending: LayerState[] = [];
+  /** В этом кадре уже начато новое задание (сухой прогон — не больше одного за кадр). */
+  private jobStarted = false;
+  private cloudBuildsLeft = 1;
+  /** Масштаб, от которого отсчитывается «неподвижность» зума (дрожание < EXACT_EPS не сбрасывает таймер). */
+  private anchorScale = -1;
   private lastH = -1;
   private scaleSince = 0;
+  /**
+   * Быстрое масштабирование полос и облаков без сглаживания, пока зум меняется (для LOW-качества на программном
+   * растре: масштабированный drawImage со сглаживанием там в ~4 раза дороже). При неподвижном зуме всё рисуется 1:1.
+   */
+  fastScaling = false;
   /** Отладка: вызывается после каждой фазы draw() (замер растеризации по фазам в предпросмотре). */
   _phase: ((label: string) => void) | null = null;
 
@@ -1460,7 +1516,7 @@ export class Background {
   /** Построить все полосы и облака для данного вида заранее (экран загрузки). */
   prewarm(view: ViewInfo): void {
     const sRef = view.screenH / AIM_VIEW_H;
-    this.lastScale = view.scale;
+    this.anchorScale = view.scale;
     this.lastH = view.screenH;
     this.scaleSince = nowMs() - STABLE_MS;
     for (const L of this.strips) this.stripFor(L, view, sRef, true);
@@ -1476,14 +1532,14 @@ export class Background {
     if (W <= 0 || H <= 0 || view.scale <= 0) return;
     const sRef = H / AIM_VIEW_H;
     const now = nowMs();
-    if (view.scale !== this.lastScale || H !== this.lastH) {
-      if (this.lastScale < 0) this.scaleSince = now - STABLE_MS;
-      else this.scaleSince = now;
-      this.lastScale = view.scale;
+    if (this.anchorScale < 0 || H !== this.lastH || Math.abs(view.scale / this.anchorScale - 1) > EXACT_EPS) {
+      // первый кадр строит всё сразу; дальше — только после STABLE_MS неподвижного зума
+      this.scaleSince = this.anchorScale < 0 ? now - STABLE_MS : now;
+      this.anchorScale = view.scale;
       this.lastH = H;
     }
-    this.buildsLeft = 1;
-    this.cloudBuildsLeft = 2;
+    this.cloudBuildsLeft = 1;
+    this.jobStarted = false;
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = 1;
@@ -1541,6 +1597,7 @@ export class Background {
     if (this.P.snowfall) this.drawSnowfall(ctx, view, sRef);
     ph?.('snowfall');
     ctx.restore();
+    if (this.pending.length) this.runJobs();
   }
 
   // ── небо и солнце ──
@@ -1549,16 +1606,16 @@ export class Background {
     const W = v.screenW;
     const H = v.screenH;
     const sky = this.P.sky;
-    // полоса градиента высотой 0.62·H, «привязанная» к горизонту; выше — сплошной верхний цвет, ниже — нижний
+    // градиент высотой 0.62·H, «привязанный» к горизонту; выше — сплошной верхний цвет, ниже — нижний
     const gH = Math.max(2, Math.round(H * 0.62));
-    if (!this.skyBand || this.skyBand.W !== W || this.skyBand.H !== H) {
-      const c = createCanvas(W, gH);
+    if (!this.skyCol || this.skyCol.height !== gH) {
+      const c = createCanvas(1, gH);
       const cx = ctx2d(c);
       const g = cx.createLinearGradient(0, 0, 0, gH);
       for (const [o, col] of sky) g.addColorStop(o, col);
       cx.fillStyle = g;
-      cx.fillRect(0, 0, W, gH);
-      this.skyBand = { c, W, H };
+      cx.fillRect(0, 0, 1, gH);
+      this.skyCol = c;
     }
     const top = Math.round(horizonY) - gH;
     const bot = top + gH;
@@ -1566,9 +1623,13 @@ export class Background {
       ctx.fillStyle = sky[0][1];
       ctx.fillRect(0, 0, W, Math.min(top, limit));
     }
-    const y0 = Math.max(0, top);
-    const y1 = Math.min(limit, bot);
-    if (y1 > y0) ctx.drawImage(this.skyBand.c, 0, y0 - top, W, y1 - y0, 0, y0, W, y1 - y0);
+    if (top < limit && bot > 0) {
+      // столбец целиком (без под-прямоугольника источника), низ режет прямоугольный клип
+      const clip = bot > limit;
+      if (clip) clipAbove(ctx, W, limit);
+      ctx.drawImage(this.skyCol, 0, top, W, gH);
+      if (clip) ctx.restore();
+    }
     if (bot < limit) {
       ctx.fillStyle = sky[sky.length - 1][1];
       ctx.fillRect(0, Math.max(0, bot), W, limit - Math.max(0, bot));
@@ -1581,11 +1642,16 @@ export class Background {
     const sx = S.x * v.screenW - v.camX * 0.02 * sRef;
     const sy = S.onHorizon ? horizonY - R * 0.35 : S.y * v.screenH + v.camY * 0.02 * sRef;
     const gr = Math.round(R * 4.8);
-    if (!this.glow || this.glow.width !== gr * 2) this.glow = renderGlow(S.glow, S.glowA, gr * 2);
-    if (sy - gr < limit && sy + gr > 0) {
-      const y0 = Math.round(sy) - gr;
-      const h = Math.min(gr * 2, limit - y0);
-      if (h > 0) ctx.drawImage(this.glow, 0, 0, gr * 2, h, Math.round(sx) - gr, y0, gr * 2, h);
+    if (!this.glow || this.glow.width !== gr * 2) {
+      this.glow = renderGlow(S.glow, S.glowA, gr * 2);
+      this.reflect = null;
+    }
+    const y0 = Math.round(sy) - gr;
+    if (y0 < limit && y0 + gr * 2 > 0) {
+      const clip = y0 + gr * 2 > limit;
+      if (clip) clipAbove(ctx, v.screenW, limit);
+      ctx.drawImage(this.glow, Math.round(sx) - gr, y0);
+      if (clip) ctx.restore();
     }
     if (sy + R < 0 || sy - R > limit) return;
     const core = ctx.createRadialGradient(sx - R * 0.3, sy - R * 0.3, R * 0.1, sx, sy, R);
@@ -1605,11 +1671,21 @@ export class Background {
     const bottom = Math.min(limit, horizonY + v.screenH * 0.32);
     if (bottom <= horizonY) return;
     if (this.glow) {
-      const gw = R * 5;
-      const gh = Math.min(R * 2.8, bottom - horizonY + R * 0.4);
-      ctx.globalAlpha = 0.7;
-      ctx.drawImage(this.glow, 0, this.glow.height / 2, this.glow.width, this.glow.height / 2, sx - gw, horizonY - R * 0.1, gw * 2, gh);
-      ctx.globalAlpha = 1;
+      // отражённое свечение: нижняя половина ореола, сплющенная по высоте (запекается один раз на размер)
+      const gw = Math.round(R * 5);
+      const gh = Math.max(2, Math.round(R * 2.8));
+      if (!this.reflect || this.reflect.width !== gw * 2 || this.reflect.height !== gh) {
+        const c = createCanvas(gw * 2, gh);
+        const cx = ctx2d(c);
+        cx.globalAlpha = 0.7;
+        cx.drawImage(this.glow, 0, this.glow.height / 2, this.glow.width, this.glow.height / 2, 0, 0, gw * 2, gh);
+        this.reflect = c;
+      }
+      const y0 = Math.round(horizonY - R * 0.1);
+      const clip = y0 + gh > bottom;
+      if (clip) clipAbove(ctx, v.screenW, bottom);
+      ctx.drawImage(this.reflect, Math.round(sx) - gw, y0);
+      if (clip) ctx.restore();
     }
     const r = rand(5);
     const t = v.time;
@@ -1647,16 +1723,17 @@ export class Background {
         best = s;
       }
     }
-    if (best && err < 1e-4) return best;
+    if (best && err < EXACT_EPS) return touch(list, best);
     const stable = nowMs() - this.scaleSince >= STABLE_MS;
     if (!best || force || (stable && this.cloudBuildsLeft > 0)) {
       if (best) this.cloudBuildsLeft--;
       const s = renderCloud(c.seed, c.w, sL, this.P.cloud);
+      prime(s.canvas);
       list.push(s);
-      if (list.length > 2) list.shift();
+      if (list.length > CLOUDS_PER_ITEM) list.shift();
       return s;
     }
-    return best;
+    return touch(list, best);
   }
 
   private drawClouds(ctx: Ctx2D, v: ViewInfo, sRef: number, L: CloudLayer, limit: number): void {
@@ -1664,6 +1741,7 @@ export class Background {
     const periodPx = L.period * sL;
     const drift = L.drift * v.time;
     ctx.globalAlpha = this.P.cloud.alpha;
+    if (this.fastScaling) ctx.imageSmoothingEnabled = false;
     for (const c of L.items) {
       const yb = v.screenH / 2 - (L.baseY + c.y - v.camY * L.f) * sL;
       const hPx = c.w * 0.6 * sL;
@@ -1675,11 +1753,12 @@ export class Background {
         if (X + wPx < 0) continue;
         const s = this.cloudFor(c, sL, false);
         const k = sL / s.ppm;
-        if (Math.abs(k - 1) < 1e-3) ctx.drawImage(s.canvas, Math.round(X - s.ox), Math.round(yb - s.oy));
+        if (Math.abs(k - 1) < EXACT_EPS) ctx.drawImage(s.canvas, Math.round(X - s.ox), Math.round(yb - s.oy));
         else ctx.drawImage(s.canvas, X - s.ox * k, yb - s.oy * k, s.canvas.width * k, s.canvas.height * k);
       }
     }
     ctx.globalAlpha = 1;
+    ctx.imageSmoothingEnabled = true;
   }
 
   // ── снегопад (snow): дальние хлопья за миром ──
@@ -1711,11 +1790,15 @@ export class Background {
 
   // ── полосы ──
 
-  /** Полоса под текущий масштаб: точная (1:1) при неподвижном зуме, иначе ближайшая готовая. */
+  /**
+   * Полоса под текущий масштаб: точная (1:1), если готова; иначе ближайшая готовая (масштабируется), а точная
+   * достраивается в фоне по тайлам, когда зум неподвижен STABLE_MS. Без готовых полос (первый кадр) или с force —
+   * строится сразу целиком.
+   */
   private stripFor(L: StripLayer, v: ViewInfo, sRef: number, force: boolean): Strip {
     let st = this.states.get(L.id);
     if (!st) {
-      st = { strips: [] };
+      st = { strips: [], job: null };
       this.states.set(L.id, st);
     }
     const res = v.dpr > 1.25 ? L.res : 1;
@@ -1724,99 +1807,138 @@ export class Background {
     let best: Strip | null = null;
     let err = Infinity;
     for (const s of st.strips) {
-      if (s.totalPx === totalWant) return s;
       const e = Math.abs(Math.log(totalWant / s.totalPx));
       if (e < err) {
         err = e;
         best = s;
       }
     }
-    const stable = nowMs() - this.scaleSince >= STABLE_MS;
-    if (!best || force || (stable && this.buildsLeft > 0)) {
-      if (best) this.buildsLeft--;
-      const s = this.buildStrip(L, totalWant);
-      st.strips.push(s);
-      while (st.strips.length > STRIPS_PER_LAYER) st.strips.shift();
-      return s;
+    if (best && err < EXACT_EPS) {
+      st.job = null;
+      return touch(st.strips, best);
     }
-    return best;
+    if (!best || force) {
+      const job = this.startJob(L, totalWant);
+      while (job.tiles.length < job.n) this.buildTile(job);
+      st.job = null;
+      return this.finishJob(st, job);
+    }
+    // задание под устаревший масштаб — отменить; новое — только при неподвижном зуме
+    if (st.job && Math.abs(Math.log(totalWant / st.job.totalPx)) > EXACT_EPS) st.job = null;
+    if (!st.job && !this.jobStarted && nowMs() - this.scaleSince >= STABLE_MS) {
+      st.job = this.startJob(L, totalWant);
+      this.jobStarted = true;
+    }
+    if (st.job) this.pending.push(st);
+    return touch(st.strips, best);
   }
 
-  private buildStrip(L: StripLayer, totalPx: number): Strip {
+  /** Сухой прогон построителя: высоты содержимого (для обрезки тайлов) и цвет заливки под слоем. */
+  private startJob(L: StripLayer, totalPx: number): StripJob {
     const ppm = totalPx / L.period;
     const hPx = Math.max(2, Math.ceil((L.height + L.depth) * ppm));
-    const nTiles = Math.ceil(totalPx / TILE_MAX_PX);
-    const tilePx = Math.ceil(totalPx / nTiles);
-    const tiles: AnyCanvas[] = [];
-    const tileX: number[] = [];
-    let out: BuildOut = { fill: null, opaqueTop: -1e9 };
-    let tops: Tops | null = null;
-    for (let i = 0; i < nTiles; i++) {
-      const x0 = i * tilePx;
-      const w = Math.min(tilePx, totalPx - x0);
-      const c = createCanvas(w, hPx);
-      const cx = ctx2d(c);
-      cx.setTransform(ppm, 0, 0, -ppm, -x0, L.height * ppm);
-      cx.lineJoin = 'round';
-      const t = new Tops(L.period);
-      out = L.build(cx, L, this.P, t);
-      if (!tops) tops = t;
-      if (L.haze) {
-        cx.setTransform(1, 0, 0, 1, 0, 0);
-        cx.globalCompositeOperation = 'source-atop';
-        cx.fillStyle = rgba(this.P.fog, L.haze);
-        cx.fillRect(0, 0, w, hPx);
-        cx.globalCompositeOperation = 'source-over';
-      }
-      tiles.push(c);
-      tileX.push(x0);
-    }
-    let fill: string | null = null;
-    if (out.fill !== null) fill = sampleColor(tiles[0], Math.floor(tiles[0].width / 2), hPx - 1) ?? out.fill;
-    // куски для блита: столбцы с общей высотой содержимого, разрезанные по тайлам
-    const pieces: Piece[] = [];
-    for (const [x0m, x1m, topM] of runsOf(tops!, L.period)) {
-      const a = Math.round(x0m * ppm);
-      const b = Math.round(x1m * ppm);
-      const sy = clamp(Math.floor((L.height - topM - 0.12) * ppm), 0, hPx - 1);
-      for (let i = 0; i < tiles.length; i++) {
-        const t0 = tileX[i];
-        const t1 = t0 + tiles[i].width;
-        const lo = Math.max(a, t0);
-        const hi = Math.min(b, t1);
-        if (hi > lo) pieces.push({ tile: i, sx: lo - t0, sw: hi - lo, sy });
-      }
-    }
-    return { tiles, tileX, totalPx, ppm, hPx, fill, opaqueTop: out.opaqueTop, pieces };
+    if (!dryCtx) dryCtx = ctx2d(createCanvas(1, 1));
+    const tops = new Tops(L.period);
+    dryCtx.save();
+    dryCtx.setTransform(ppm, 0, 0, -ppm, 0, L.height * ppm);
+    const out = L.build(dryCtx, L, this.P, tops);
+    dryCtx.restore();
+    const fill = out.fill && L.haze ? mix(out.fill, this.P.fog, L.haze) : out.fill;
+    return { L, totalPx, ppm, hPx, tops, fill, opaqueTop: out.opaqueTop, n: Math.ceil(totalPx / TILE_PX), tiles: [] };
   }
 
-  /** Блит полосы: периодические копии, куски по столбцам, обрезка снизу по limit, заливка ниже полосы. */
+  /** Следующий тайл задания: столбец ≤ TILE_PX без прозрачного верха, с дымкой и «швом» внизу. */
+  private buildTile(job: StripJob): void {
+    const { L, ppm, hPx, totalPx, n } = job;
+    const i = job.tiles.length;
+    const x0 = Math.round((i * totalPx) / n);
+    const x1 = Math.round(((i + 1) * totalPx) / n);
+    const y = clamp(Math.floor((L.height - topIn(job.tops, x0 / ppm, x1 / ppm) - 0.15) * ppm), 0, hPx - 1);
+    const w = x1 - x0;
+    const h = hPx - y;
+    const c = createCanvas(w, h);
+    const cx = ctx2d(c);
+    cx.setTransform(ppm, 0, 0, -ppm, -x0, L.height * ppm - y);
+    cx.lineJoin = 'round';
+    L.build(cx, L, this.P, new Tops(L.period));
+    cx.setTransform(1, 0, 0, 1, 0, 0);
+    if (L.haze) {
+      cx.globalCompositeOperation = 'source-atop';
+      cx.fillStyle = rgba(this.P.fog, L.haze);
+      cx.fillRect(0, 0, w, h);
+      cx.globalCompositeOperation = 'source-over';
+    }
+    if (job.fill) {
+      // «шов»: низ полосы плавно переходит ровно в цвет заливки под слоем (без чтения пикселей)
+      const sh = Math.min(h, Math.max(2, Math.round(SEAL_M * ppm)));
+      const g = cx.createLinearGradient(0, h - sh, 0, h - 1);
+      g.addColorStop(0, rgba(job.fill, 0));
+      g.addColorStop(1, job.fill);
+      cx.fillStyle = g;
+      cx.fillRect(0, h - sh, w, sh);
+    }
+    prime(c);
+    job.tiles.push({ c, x: x0, y });
+  }
+
+  private finishJob(st: LayerState, job: StripJob): Strip {
+    const s: Strip = { tiles: job.tiles, totalPx: job.totalPx, ppm: job.ppm, hPx: job.hPx, fill: job.fill, opaqueTop: job.opaqueTop };
+    st.strips.push(s);
+    while (st.strips.length > STRIPS_PER_LAYER) st.strips.shift();
+    return s;
+  }
+
+  /** Достроить отложенные полосы в пределах бюджета кадра; готовая полоса используется со следующего кадра. */
+  private runJobs(): void {
+    const t0 = nowMs();
+    let first = true;
+    for (const st of this.pending) {
+      const job = st.job;
+      if (!job) continue;
+      while (job.tiles.length < job.n && (first || nowMs() - t0 < JOB_BUDGET_MS)) {
+        this.buildTile(job);
+        first = false;
+      }
+      if (job.tiles.length === job.n) {
+        this.finishJob(st, job);
+        st.job = null;
+      }
+      if (nowMs() - t0 >= JOB_BUDGET_MS) break;
+    }
+    this.pending.length = 0;
+  }
+
+  /** Блит полосы: периодические копии тайлов целиком, низ — прямоугольный клип по limit, ниже полосы — заливка. */
   private blitStrip(ctx: Ctx2D, v: ViewInfo, L: StripLayer, s: Strip, sL: number, yTopF: number, limit: number): void {
     const W = v.screenW;
     let k = sL / s.ppm;
-    const exact = Math.abs(k - 1) < 2e-3;
+    const exact = Math.abs(k - 1) < EXACT_EPS;
     if (exact) k = 1;
     const yTop = exact ? Math.round(yTopF) : yTopF;
     const yBot = yTop + s.hPx * k;
     const y1 = Math.min(yBot, limit);
     if (y1 > yTop && yTop < v.screenH) {
+      const clip = yBot > limit + 0.5;
+      if (clip) clipAbove(ctx, W, limit);
+      if (!exact && this.fastScaling) ctx.imageSmoothingEnabled = false;
       const periodPx = s.totalPx * k;
       let x0 = W / 2 - v.camX * L.f * sL;
       x0 = (((x0 % periodPx) + periodPx) % periodPx) - periodPx;
       if (exact) x0 = Math.round(x0);
       for (let px = x0; px < W; px += periodPx) {
-        for (const p of s.pieces) {
-          const sx0 = s.tileX[p.tile] + p.sx;
-          const xl = Math.round(px + sx0 * k);
-          const xr = Math.round(px + (sx0 + p.sw) * k);
+        for (const t of s.tiles) {
+          // края тайлов округлены: соседние копии стыкуются без щелей и при масштабировании
+          const xl = Math.round(px + t.x * k);
+          const xr = Math.round(px + (t.x + t.c.width) * k);
           if (xr <= 0 || xl >= W || xr <= xl) continue;
-          const dy0 = yTop + p.sy * k;
-          if (dy0 >= y1) continue;
-          const sh = Math.min(s.hPx - p.sy, (y1 - dy0) / k);
-          if (sh <= 0) continue;
-          ctx.drawImage(s.tiles[p.tile], p.sx, p.sy, p.sw, sh, xl, dy0, xr - xl, sh * k);
+          const dy = yTop + t.y * k;
+          if (dy >= y1) continue;
+          if (exact) ctx.drawImage(t.c, xl, dy);
+          else ctx.drawImage(t.c, xl, dy, xr - xl, t.c.height * k);
         }
       }
+      ctx.imageSmoothingEnabled = true;
+      if (clip) ctx.restore();
     }
     if (s.fill && limit > yBot - 1) {
       const yb = Math.max(0, Math.floor(yBot - 1));
@@ -1828,19 +1950,24 @@ export class Background {
 
 // ───────────────────────── передний план ─────────────────────────
 
+/** Доля высоты экрана, которую передний план может занять снизу в покое камеры. */
+const FG_MAX_FRAC = 0.03;
+
 /**
  * Передний план: пучки травы, широколистные кустики и цветы (meadow / beach), сугробы с сухими травинками (snow),
- * поднимающиеся из-за нижнего края кадра. Основания — на мировой Y = −1.5 м (камера ниже не опускается, 01 §6.1),
- * верхушки не выше −0.1 м: игровую зону (над землёй) передний план не перекрывает. X — параллакс 1.2, лёгкое
- * покачивание от ветра.
+ * поднимающиеся из-за нижнего края кадра. Основания — чуть ниже нижнего края кадра камеры в покое
+ * (мировая Y = −GROUND_MARGIN, 00 §1.10), по Y — вместе с миром: при подъёме камеры передний план уходит вниз.
+ * Высота — не больше FG_MAX_FRAC высоты экрана (масштаб ×1.1 мира, ограниченный сверху). X — параллакс 1.2,
+ * лёгкое покачивание от ветра.
  */
 export function drawForeground(ctx: CanvasRenderingContext2D, theme: ThemeId, view: ViewInfo): void {
   const P = PAL[theme];
-  const s0 = view.scale * 1.15;
+  // самые высокие элементы ≈ 0.76·s0 от основания, основание на 0.1·s0 ниже края → видно ≤ 0.66·s0
+  const s0 = Math.min(view.scale * 1.1, (FG_MAX_FRAC * view.screenH) / 0.66);
   if (s0 <= 0) return;
   const f = 1.2;
-  const yb = view.screenH / 2 - (-1.5 - view.camY) * view.scale;
-  if (yb - 1.3 * s0 > view.screenH) return;
+  const yb = view.screenH / 2 + (CAMERA.GROUND_MARGIN + view.camY) * view.scale + 0.1 * s0;
+  if (yb - s0 > view.screenH) return;
   const Pm = 18;
   const periodPx = Pm * s0;
   let x0 = view.screenW / 2 - view.camX * f * s0;
@@ -1856,6 +1983,7 @@ export function drawForeground(ctx: CanvasRenderingContext2D, theme: ThemeId, vi
   const leaves = new Path2D();
   const leavesLit = new Path2D();
   const twigs = new Path2D();
+  const shadow = new Path2D();
   const flowers: Array<[number, number, number, string]> = [];
   for (let px = x0; px < view.screenW + periodPx; px += periodPx) {
     const r = rand(8 + theme.length);
@@ -1916,7 +2044,7 @@ export function drawForeground(ctx: CanvasRenderingContext2D, theme: ThemeId, vi
       }
       for (let j = 0; j < nb; j++) {
         const u = j / (nb - 1) - 0.5;
-        const h = s * lerp(0.35, theme === 'beach' ? 0.85 : 0.72, hs[j]) * (1 - Math.abs(u) * 0.6);
+        const h = s * lerp(0.35, theme === 'beach' ? 0.74 : 0.72, hs[j]) * (1 - Math.abs(u) * 0.6);
         const lean = u * 0.9 * s * 0.5 + (hs[j] - 0.5) * 0.12 * s + sway * h * 1.5;
         const bx = cx + u * 0.35 * s;
         const bw = (theme === 'beach' ? 0.045 : 0.07) * s;

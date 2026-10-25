@@ -1,4 +1,5 @@
-// След полёта: точки по пройденному пути до первого контакта; крупные — в месте способности и удара (01 §3.3).
+// След полёта (00 §1.2): точки по пройденному пути до первого контакта; крупные — в месте способности и удара.
+// Кольцевой буфер TRAIL.MAX_POINTS: при переполнении уходят две самые старые точки (чётность размеров не «мигает»).
 
 import { TRAIL } from '../../config/constants';
 import type { TrailPoint } from '../api';
@@ -33,6 +34,7 @@ export class Trail {
   }
 
   private push(x: number, y: number, big: boolean): void {
-    if (this.points.length < TRAIL.MAX_POINTS) this.points.push({ x, y, big });
+    if (this.points.length >= TRAIL.MAX_POINTS) this.points.splice(0, 2);
+    this.points.push({ x, y, big });
   }
 }

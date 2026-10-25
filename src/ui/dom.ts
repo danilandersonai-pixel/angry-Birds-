@@ -1,6 +1,7 @@
 // Мелкие DOM-хелперы и компоненты: элемент, кнопка, звёзды, лента.
 
 import { icon, ribbonSvg, starSvg, type IconName } from './icons';
+import { fitScale, ribbonTextScale } from './layout';
 
 type Attrs = Record<string, string | number | boolean | null | undefined>;
 
@@ -70,12 +71,82 @@ export function starsRow(n: number, cls = ''): HTMLElement {
   return row;
 }
 
-/** Лента-заголовок с текстом. */
+/** Лента-заголовок с текстом. Шрифт сам ужимается, если текст не влезает в тело ленты с отступами. */
 export function ribbon(kind: 'win' | 'lose' | 'info', text: string, id?: string): HTMLElement {
   const r = h('div', { class: `ribbon ribbon--${kind}` });
   r.insertAdjacentHTML('beforeend', ribbonSvg(kind));
   r.append(h('h2', { class: 'ribbon-text ts', text, id }));
+  watchRibbon(r);
   return r;
+}
+
+// Подгонка текста лент: один ResizeObserver на все ленты + повтор после загрузки шрифтов.
+const ribbons = new Set<HTMLElement>();
+let ribbonRO: ResizeObserver | null = null;
+
+/** Ужать шрифт ленты (CSS-переменная --rk), чтобы текст не наезжал на кайму. */
+export function fitRibbon(r: HTMLElement): void {
+  const txt = r.querySelector<HTMLElement>('.ribbon-text');
+  const w = r.clientWidth;
+  if (!txt || !w) return;
+  const cur = Number(txt.style.getPropertyValue('--rk')) || 1;
+  const k = ribbonTextScale(w, txt.offsetWidth / cur); // ширина текста линейна по размеру шрифта
+  if (Math.abs(k - cur) > 0.004) txt.style.setProperty('--rk', k.toFixed(3));
+}
+
+function watchRibbon(r: HTMLElement): void {
+  if (typeof ResizeObserver === 'undefined') return;
+  if (!ribbonRO) {
+    ribbonRO = new ResizeObserver((entries) => {
+      for (const e of entries) {
+        const el = e.target as HTMLElement;
+        if (!el.isConnected) {
+          ribbonRO?.unobserve(el);
+          ribbons.delete(el);
+        } else fitRibbon(el);
+      }
+    });
+    document.fonts?.addEventListener?.('loadingdone', () => ribbons.forEach((el) => el.isConnected && fitRibbon(el)));
+  }
+  ribbons.add(r);
+  ribbonRO.observe(r);
+}
+
+/**
+ * Вписать блок в контейнер (за вычетом его padding) через CSS scale — для панелей результатов на низких экранах.
+ * ResizeObserver следит за обоими; fit() — подогнать синхронно (например, перед FLIP-замером).
+ */
+export function fitInto(box: HTMLElement, container: HTMLElement, onFit?: () => void): { fit(): void; dispose(): void } {
+  const fit = (): void => {
+    if (!box.isConnected) return;
+    const cs = getComputedStyle(container);
+    const aw = container.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+    const ah = container.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+    const k = fitScale(aw, ah, box.offsetWidth, box.offsetHeight);
+    const v = k < 0.999 ? k.toFixed(4) : '';
+    if (box.style.scale !== v) box.style.scale = v;
+    onFit?.();
+  };
+  const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(fit) : null;
+  ro?.observe(box);
+  ro?.observe(container);
+  return { fit, dispose: () => ro?.disconnect() };
+}
+
+/** Добавить детей, пропуская null/false (как в h()). */
+export function appendAll(el: HTMLElement, ...children: Array<Node | string | null | undefined | false>): HTMLElement {
+  for (const c of children) if (c !== null && c !== undefined && c !== false) el.append(c);
+  return el;
+}
+
+/** Текст, где символ ★ заменён значком звезды (в шрифте Rubik такого глифа нет). */
+export function withStarIcons(el: HTMLElement, text: string): HTMLElement {
+  el.textContent = '';
+  text.split('★').forEach((part, i) => {
+    if (i > 0) el.insertAdjacentHTML('beforeend', starSvg('full', 'inl-star'));
+    if (part) el.append(part);
+  });
+  return el;
 }
 
 /** Пилюля со звездой и счётчиком «47/90». */

@@ -1,6 +1,18 @@
-// Сохранение прогресса: рекорды и звёзды уровней, настройки звука.
-// Хранилище — localStorage (ключ STORAGE_KEY), внутри — версия схемы.
+// Сохранение прогресса (07 §17, 00-summary §1.14): рекорды и звёзды уровней, серии поражений,
+// флаги «уже видел», настройки. Хранилище — localStorage (ключ STORAGE_KEY), внутри — версия схемы.
 // Любые ошибки доступа/квоты/битые данные не роняют игру: работаем в памяти.
+//
+// API:
+//   new ProgressStore(storage?: StorageLike | null)  — undefined: window.localStorage; null: только память
+//   record(id) → {best, stars} | undefined            — запись уровня (копия)
+//   saveResult(id, score, stars) → {newRecord, prevBest}  — победа (stars ≥ 1); худшее не снижает
+//   saveLoss(id) → failStreak                          — поражение: серия поражений подряд +1
+//   failStreak(id) → number
+//   isUnlocked(id, order) / starsTotal(ids?)
+//   settings / setSettings(partial) / reset()          — reset стирает уровни, настройки остаются
+//   hasSeen(key) / markSeen(key)                        — одноразовые подсказки («ability:chuck», «aimTutorial»)
+//   onChange(fn) → отписка; bindStorageEvents() → отписка (синхронизация вкладок)
+//   persistent, readOnly, unlockAll
 
 export const STORAGE_KEY = 'angrybirds.progress.v1';
 /** Ключ, куда откладывается нечитаемая запись (для отладки), прежде чем начать с чистого листа. */
@@ -12,9 +24,23 @@ export interface LevelRecord {
   stars: number;
 }
 
+export type MotionPref = 'system' | 'reduce' | 'full';
+export type QualityPref = 'auto' | 'high' | 'med' | 'low';
+export type AimAssistPref = 'off' | 'short';
+
 export interface Settings {
   sfx: boolean;
   music: boolean;
+  /** Анимации интерфейса: как в системе / уменьшить / полные. */
+  motion: MotionPref;
+  /** Тряска камеры. */
+  shake: boolean;
+  /** Вибрация (navigator.vibrate) на тач-устройствах. */
+  haptics: boolean;
+  /** Качество графики (04 §11). */
+  quality: QualityPref;
+  /** Подсказка траектории при прицеливании. */
+  aimAssist: AimAssistPref;
 }
 
 export type StorageLike = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
@@ -24,14 +50,35 @@ interface SaveData {
   schema: number;
   updatedAt: number;
   levels: Record<string, LevelRecord>;
+  /** Поражений подряд по уровням (совет после трёх). */
+  fails: Record<string, number>;
+  /** Флаги «уже показывали». */
+  seen: string[];
   settings: Settings;
 }
 
-const DEFAULT_SETTINGS: Readonly<Settings> = Object.freeze({ sfx: true, music: true });
+export const DEFAULT_SETTINGS: Readonly<Settings> = Object.freeze({
+  sfx: true,
+  music: true,
+  motion: 'system',
+  shake: true,
+  haptics: true,
+  quality: 'auto',
+  aimAssist: 'off',
+} satisfies Settings);
+
+const MOTION: readonly MotionPref[] = ['system', 'reduce', 'full'];
+const QUALITY: readonly QualityPref[] = ['auto', 'high', 'med', 'low'];
+const AIM: readonly AimAssistPref[] = ['off', 'short'];
+
 /** Допустимый id уровня: «1-3», «bonus_2» и т. п. Неизвестные (будущие) id сохраняем. */
 const ID_RE = /^[A-Za-z0-9_.-]{1,40}$/;
+/** Ключ флага «уже видел». */
+const SEEN_RE = /^[A-Za-z0-9_.:-]{1,48}$/;
+const SEEN_MAX = 256;
 /** Защита от абсурдных значений (переполнение, ручная правка). */
 const MAX_SCORE = 1e9;
+const MAX_FAILS = 9999;
 
 /** Сколько звёзд нужно собрать в эпизоде, чтобы открыть следующий (01 §12.2): половина от максимума. */
 export function episodeStarsNeeded(levelCount: number): number {
@@ -45,13 +92,17 @@ export function episodeOfLevel(levelId: string): string | null {
 }
 
 function clampInt(v: unknown, lo: number, hi: number): number {
-  const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
+  const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
   if (!Number.isFinite(n)) return lo;
   return Math.min(hi, Math.max(lo, Math.floor(n)));
 }
 
 function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function oneOf<T extends string>(v: unknown, allowed: readonly T[], def: T): T {
+  return typeof v === 'string' && (allowed as readonly string[]).includes(v) ? (v as T) : def;
 }
 
 function sanitizeRecord(v: unknown): LevelRecord | null {
@@ -62,17 +113,21 @@ function sanitizeRecord(v: unknown): LevelRecord | null {
   return { best, stars };
 }
 
-function sanitizeSettings(v: unknown): Settings {
-  const s: Settings = { ...DEFAULT_SETTINGS };
-  if (isObj(v)) {
-    if (typeof v.sfx === 'boolean') s.sfx = v.sfx;
-    if (typeof v.music === 'boolean') s.music = v.music;
-  }
+function sanitizeSettings(v: unknown, base: Readonly<Settings> = DEFAULT_SETTINGS): Settings {
+  const s: Settings = { ...base };
+  if (!isObj(v)) return s;
+  if (typeof v.sfx === 'boolean') s.sfx = v.sfx;
+  if (typeof v.music === 'boolean') s.music = v.music;
+  if (typeof v.shake === 'boolean') s.shake = v.shake;
+  if (typeof v.haptics === 'boolean') s.haptics = v.haptics;
+  if (v.motion !== undefined) s.motion = oneOf(v.motion, MOTION, base.motion);
+  if (v.quality !== undefined) s.quality = oneOf(v.quality, QUALITY, base.quality);
+  if (v.aimAssist !== undefined) s.aimAssist = oneOf(v.aimAssist, AIM, base.aimAssist);
   return s;
 }
 
 function emptyData(): SaveData {
-  return { schema: SCHEMA_VERSION, updatedAt: 0, levels: {}, settings: { ...DEFAULT_SETTINGS } };
+  return { schema: SCHEMA_VERSION, updatedAt: 0, levels: {}, fails: {}, seen: [], settings: { ...DEFAULT_SETTINGS } };
 }
 
 /** Миграции: MIGRATIONS[n] переводит объект схемы n в схему n+1. Пока схема одна. */
@@ -86,9 +141,8 @@ function sanitize(raw: unknown): { data: SaveData; schema: number } | null {
   if (!isObj(raw)) return null;
   let o = raw;
   let schema = typeof o.schema === 'number' && Number.isInteger(o.schema) ? o.schema : 0;
-  if (schema > SCHEMA_VERSION) {
-    // Сохранение из будущей версии: читаем то, что понимаем, но не перезаписываем.
-  } else {
+  if (schema < 0) return null;
+  if (schema <= SCHEMA_VERSION) {
     while (schema < SCHEMA_VERSION) {
       const m = MIGRATIONS[schema];
       if (!m) return null;
@@ -96,6 +150,7 @@ function sanitize(raw: unknown): { data: SaveData; schema: number } | null {
       schema++;
     }
   }
+  // schema > SCHEMA_VERSION — сохранение из будущей версии: читаем то, что понимаем, но не перезаписываем.
   const data = emptyData();
   if (isObj(o.levels)) {
     for (const [id, rec] of Object.entries(o.levels)) {
@@ -103,6 +158,17 @@ function sanitize(raw: unknown): { data: SaveData; schema: number } | null {
       const r = sanitizeRecord(rec);
       if (r) data.levels[id] = r;
     }
+  }
+  if (isObj(o.fails)) {
+    for (const [id, n] of Object.entries(o.fails)) {
+      const k = clampInt(n, 0, MAX_FAILS);
+      if (ID_RE.test(id) && k > 0) data.fails[id] = k;
+    }
+  }
+  if (Array.isArray(o.seen)) {
+    const set = new Set<string>();
+    for (const k of o.seen) if (typeof k === 'string' && SEEN_RE.test(k) && set.size < SEEN_MAX) set.add(k);
+    data.seen = [...set];
   }
   data.settings = sanitizeSettings(o.settings);
   data.updatedAt = clampInt(o.updatedAt, 0, Number.MAX_SAFE_INTEGER);
@@ -123,12 +189,13 @@ export class ProgressStore {
   /** true — данные пишутся в хранилище; false — только в памяти (нет доступа, квота, ошибка). */
   persistent: boolean;
   /** true — в хранилище запись более новой схемы: читаем, но не перезаписываем. */
-  readonly readOnly: boolean;
+  readOnly: boolean;
   /** Отладка: открыть все уровни без записи в хранилище (?unlockAll=1). */
   unlockAll = false;
 
   private readonly storage: StorageLike | null;
   private data: SaveData;
+  private readonly listeners = new Set<() => void>();
 
   /**
    * storage: undefined — взять window.localStorage (если доступен); null — работать только в памяти.
@@ -136,6 +203,7 @@ export class ProgressStore {
   constructor(storage?: StorageLike | null) {
     this.storage = storage === undefined ? defaultStorage() : storage;
     this.persistent = this.storage !== null;
+    this.readOnly = false;
     const { data, readOnly } = this.load();
     this.data = data;
     this.readOnly = readOnly;
@@ -152,6 +220,16 @@ export class ProgressStore {
   /** Текущие настройки (снимок, только для чтения). */
   get settings(): Readonly<Settings> {
     return { ...this.data.settings };
+  }
+
+  /** Поражений подряд на уровне (сбрасывается победой). */
+  failStreak(levelId: string): number {
+    return this.data.fails[levelId] ?? 0;
+  }
+
+  /** Показывали ли одноразовую подсказку/обучение с этим ключом. */
+  hasSeen(key: string): boolean {
+    return this.data.seen.includes(key);
   }
 
   /**
@@ -189,8 +267,8 @@ export class ProgressStore {
   // ───────────── запись ─────────────
 
   /**
-   * Записать результат уровня. stars ≤ 0 — поражение: рекорды не меняются.
-   * Худший результат не снижает ни звёзд, ни рекорда.
+   * Записать победу. stars ≤ 0 — не победа: ничего не меняется (для поражения — saveLoss).
+   * Худший результат не снижает ни звёзд, ни рекорда. Серия поражений обнуляется.
    * newRecord — только если рекорд уже был (prevBest > 0) и побит (07 §12.3): первое прохождение — не «новый рекорд».
    */
   saveResult(levelId: string, score: number, stars: number): { newRecord: boolean; prevBest: number } {
@@ -199,40 +277,85 @@ export class ProgressStore {
     const s = clampInt(stars, 0, 3);
     const sc = clampInt(score, 0, MAX_SCORE);
     if (s <= 0 || !ID_RE.test(levelId)) return { newRecord: false, prevBest };
-    const next: LevelRecord = { best: Math.max(prevBest, sc), stars: Math.max(prev?.stars ?? 0, s) };
-    this.data.levels[levelId] = next;
-    this.write();
+    this.data.levels[levelId] = { best: Math.max(prevBest, sc), stars: Math.max(prev?.stars ?? 0, s) };
+    delete this.data.fails[levelId];
+    this.commit();
     return { newRecord: prevBest > 0 && sc > prevBest, prevBest };
   }
 
-  setSettings(s: Partial<Settings>): void {
-    const cur = this.data.settings;
-    let changed = false;
-    if (typeof s.sfx === 'boolean' && s.sfx !== cur.sfx) {
-      cur.sfx = s.sfx;
-      changed = true;
-    }
-    if (typeof s.music === 'boolean' && s.music !== cur.music) {
-      cur.music = s.music;
-      changed = true;
-    }
-    if (changed) this.write();
+  /** Записать поражение. Возвращает число поражений подряд на этом уровне. */
+  saveLoss(levelId: string): number {
+    if (!ID_RE.test(levelId)) return 0;
+    const n = Math.min(MAX_FAILS, (this.data.fails[levelId] ?? 0) + 1);
+    this.data.fails[levelId] = n;
+    this.commit();
+    return n;
   }
 
-  /** Сбросить прогресс (звёзды и рекорды). Настройки звука сохраняются. */
+  /** Отметить одноразовую подсказку как показанную. */
+  markSeen(key: string): void {
+    if (!SEEN_RE.test(key) || this.data.seen.includes(key) || this.data.seen.length >= SEEN_MAX) return;
+    this.data.seen.push(key);
+    this.commit();
+  }
+
+  setSettings(s: Partial<Settings>): void {
+    const next = sanitizeSettings(s, this.data.settings);
+    const cur = this.data.settings;
+    const changed = (Object.keys(next) as Array<keyof Settings>).some((k) => next[k] !== cur[k]);
+    if (!changed) return;
+    this.data.settings = next;
+    this.commit();
+  }
+
+  /** Сбросить прогресс (звёзды, рекорды, серии, флаги подсказок). Настройки сохраняются. */
   reset(): void {
     const settings = { ...this.data.settings };
     this.data = emptyData();
     this.data.settings = settings;
-    this.write();
+    this.commit();
   }
 
   /** Перечитать хранилище (например, по событию `storage` из другой вкладки). */
   reload(): void {
-    this.data = this.load().data;
+    const { data, readOnly } = this.load();
+    this.data = data;
+    this.readOnly = readOnly;
+    this.emit();
+  }
+
+  /** Подписка на любые изменения прогресса. Возвращает отписку. */
+  onChange(fn: () => void): () => void {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+
+  /** Слушать запись другой вкладки (событие `storage`). Возвращает отписку. */
+  bindStorageEvents(target: Pick<Window, 'addEventListener' | 'removeEventListener'> | null = typeof window !== 'undefined' ? window : null): () => void {
+    if (!target || !this.storage) return () => undefined;
+    const h = (e: StorageEvent): void => {
+      if (e.key === STORAGE_KEY || e.key === null) this.reload();
+    };
+    target.addEventListener('storage', h);
+    return () => target.removeEventListener('storage', h);
   }
 
   // ───────────── внутреннее ─────────────
+
+  private commit(): void {
+    this.write();
+    this.emit();
+  }
+
+  private emit(): void {
+    for (const fn of [...this.listeners]) {
+      try {
+        fn();
+      } catch {
+        /* подписчик не должен ломать сохранение */
+      }
+    }
+  }
 
   private load(): { data: SaveData; readOnly: boolean } {
     if (!this.storage) return { data: emptyData(), readOnly: false };

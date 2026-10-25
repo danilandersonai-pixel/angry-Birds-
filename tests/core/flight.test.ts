@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { LAUNCH, TRAIL } from '../../src/config/constants';
-import type { BirdType } from '../../src/core/types';
-import { hutLevel, openField } from '../fixtures/levels';
+import { LAUNCH, RETIRE, TRAIL } from '../../src/config/constants';
+import type { BirdType, TerrainDef } from '../../src/core/types';
+import { hutLevel, level, openField, pigOn } from '../fixtures/levels';
 import { ofType, readySession, runUntil, shoot } from './helpers';
 
 /** Точка первого контакта птицы с землёй после выстрела. */
@@ -14,21 +14,23 @@ function landing(bird: BirdType, angle: number): { x: number; t: number } {
 }
 
 describe('полёт', () => {
-  it('максимальная дальность Red при полной силе — в пределах ±10% от 03 (40.5 м)', () => {
+  it('максимальная дальность Red из оттянутого кармашка ≈ 37.7 м (±10 %), полёт ≈ 2.3 с', () => {
     let best = { x: 0, t: 0 };
-    for (let a = 38; a <= 50; a += 2) {
+    for (let a = 38; a <= 50; a += 1) {
       const r = landing('red', a);
       if (r.x > best.x) best = r;
     }
-    expect(best.x).toBeGreaterThan(40.5 * 0.9);
-    expect(best.x).toBeLessThan(40.5 * 1.1);
-    expect(best.t).toBeGreaterThan(2.0); // 03: полёт ≈ 2.35 с
+    expect(best.x).toBeGreaterThan(37.7 * 0.9);
+    expect(best.x).toBeLessThan(37.7 * 1.1);
+    expect(best.t).toBeGreaterThan(2.0);
     expect(best.t).toBeLessThan(2.6);
   });
 
-  it('тяжёлые птицы летят ближе (launchScale)', () => {
-    expect(landing('terence', 44).x).toBeLessThan(landing('bomb', 44).x);
-    expect(landing('bomb', 44).x).toBeLessThan(landing('red', 44).x);
+  it('тяжёлые птицы летят ближе (launchScale): Matilda 35.5, Bomb 34.0, Terence 29.1 м (±5 %)', () => {
+    const far = (bird: BirdType) => Math.max(...[42, 44, 46].map((a) => landing(bird, a).x));
+    for (const [bird, x] of [['matilda', 35.5], ['bomb', 34.0], ['terence', 29.1]] as const) {
+      expect(Math.abs(far(bird) / x - 1)).toBeLessThan(0.05);
+    }
   });
 
   it('предсказание траектории совпадает с полётом тела planck', () => {
@@ -90,11 +92,31 @@ describe('полёт', () => {
     expect(ofType(events, 'birdRemoved').map((e) => e.id)).toEqual([id]);
   });
 
-  it('птица, улетевшая за границы мира, уходит', () => {
+  it('птица, улетевшая за границы мира (bounds ± 8 м), уходит', () => {
     const s = readySession(hutLevel(['red', 'red']));
-    s.launch(180, 1); // назад, влево за minX
+    s.launch(150, 1); // назад-вверх, влево за minX
+    const events = runUntil(s, () => s.state !== 'flying', 15);
+    const removed = ofType(events, 'birdRemoved');
+    expect(removed).toHaveLength(1);
+    expect(removed[0].x).toBeLessThan(s.level.bounds.minX - RETIRE.OUT_MARGIN);
+    expect(removed[0].x).toBeGreaterThan(s.level.bounds.minX - RETIRE.OUT_MARGIN - 1);
+    expect(s.state).toBe('settling');
+  });
+
+  it('над бездонной пропастью птица уходит через 10 с после запуска; след — кольцевой буфер', () => {
+    const pit: TerrainDef[] = [
+      { kind: 'ground', points: [[-40, -10], [10, -10], [10, 0], [-40, 0]] },
+      { kind: 'rock', points: [[-40, -1010], [400, -1010], [400, -1000], [-40, -1000]] },
+    ];
+    const s = readySession(level({ birds: ['red'], bounds: { minX: -12, maxX: 400, maxY: 40 }, terrain: pit, pigs: [pigOn('small', 0, 0)] }));
+    s.launch(45, 1);
+    const t0 = s.time;
     const events = runUntil(s, () => s.state !== 'flying', 15);
     expect(ofType(events, 'birdRemoved')).toHaveLength(1);
-    expect(s.state).toBe('settling');
+    expect(s.time - t0).toBeCloseTo(RETIRE.FLIGHT_MAX, 6);
+    const pts = s.trail();
+    expect(pts.length).toBeLessThanOrEqual(TRAIL.MAX_POINTS);
+    expect(pts.length).toBeGreaterThanOrEqual(TRAIL.MAX_POINTS - 2);
+    expect(pts[0].x).toBeGreaterThan(30); // старые точки вытеснены
   });
 });

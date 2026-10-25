@@ -2,28 +2,33 @@
 // категории и таблицы громкости/приоритетов/кулдаунов, пул голосов (лимит, кулдаун, кража),
 // «ведро токенов» для ударов, отбор ударов кадра, громкость/панорама по положению относительно камеры.
 
-/** Категория голоса: свой лимит, громкость, приоритет кражи, кулдаун по умолчанию. */
-export type Cat = 'impact' | 'break' | 'birdVox' | 'pigVox' | 'explosion' | 'sling' | 'ability' | 'ui' | 'reward' | 'loop';
+/**
+ * Категория голоса: свой лимит, громкость, приоритет кражи, кулдаун по умолчанию.
+ * 'jingle' — расширение таблицы 05-audio §6.1: джинглы победы/поражения (шина музыки) в отдельной категории
+ * на 1 голос, чтобы колокольчики наград не отнимали у них место.
+ */
+export type Cat = 'impact' | 'break' | 'birdVox' | 'pigVox' | 'explosion' | 'sling' | 'ability' | 'ui' | 'reward' | 'loop' | 'jingle';
 
-/** Общий лимит одновременных голосов (десктоп / мобильные). */
-export const MAX_VOICES = 24;
-export const MAX_VOICES_MOBILE = 16;
+/** Общий лимит одновременных голосов (десктоп / мобильные), 05-audio §6.1, 00-summary §1.14. */
+export const MAX_VOICES = 32;
+export const MAX_VOICES_MOBILE = 20;
 
-/** Лимит голосов по категориям (десктоп). Сумма > MAX_VOICES: в шторме решает общий лимит и кража. */
+/** Лимит голосов по категориям (десктоп), 05-audio §6.1. Сумма > MAX_VOICES: в шторме решает общий лимит и кража. */
 export const CAT_LIMIT: Readonly<Record<Cat, number>> = {
-  impact: 6,
-  break: 5,
+  impact: 8,
+  break: 6,
   birdVox: 2,
   pigVox: 3,
-  explosion: 3,
+  explosion: 4,
   sling: 2,
-  ability: 2,
-  ui: 3,
+  ability: 3,
+  ui: 4,
   reward: 6,
   loop: 3,
+  jingle: 1,
 };
 
-/** Мобильные лимиты: ×0.6 с округлением вверх. */
+/** Мобильные лимиты: ×0.6 с округлением вверх — ровно колонка «моб.» таблицы 05-audio §6.1. */
 export function mobileLimits(l: Readonly<Record<Cat, number>> = CAT_LIMIT): Record<Cat, number> {
   const out = {} as Record<Cat, number>;
   for (const k of Object.keys(l) as Cat[]) out[k] = Math.ceil(l[k] * 0.6);
@@ -40,25 +45,32 @@ export interface CatMix {
 }
 
 export const CAT_MIX: Readonly<Record<Cat, CatMix>> = {
-  impact: { gain: 0.9, prio: 1, cooldown: 45 },
-  break: { gain: 1.0, prio: 1.5, cooldown: 45 },
+  impact: { gain: 0.9, prio: 1, cooldown: 30 },
+  break: { gain: 1.0, prio: 1.5, cooldown: 40 },
   birdVox: { gain: 1.0, prio: 3, cooldown: 150 },
   pigVox: { gain: 0.9, prio: 2, cooldown: 150 },
-  explosion: { gain: 1.0, prio: 5, cooldown: 50 },
+  explosion: { gain: 1.0, prio: 5, cooldown: 0 },
   sling: { gain: 0.9, prio: 4, cooldown: 50 },
   ability: { gain: 1.0, prio: 4, cooldown: 100 },
   ui: { gain: 1.0, prio: 10, cooldown: 40 },
   reward: { gain: 1.0, prio: 10, cooldown: 0 },
   loop: { gain: 1.0, prio: 100, cooldown: 0 },
+  jingle: { gain: 1.0, prio: 10, cooldown: 0 },
 };
 
-/** Кулдаун по префиксу ключа (до «:»), мс. Нет в таблице — берётся из CAT_MIX. */
+/**
+ * Категории, где при равной важности новый голос вытесняет самый старый той же категории:
+ * отклик кнопок и тики счёта важнее хвоста предыдущего такого же звука.
+ */
+export const STEAL_OLDEST_ON_TIE: ReadonlySet<Cat> = new Set<Cat>(['ui', 'reward', 'jingle']);
+
+/** Кулдаун по префиксу ключа (до «:»), мс (05-audio §6.1, 00-summary §1.14). Нет в таблице — берётся из CAT_MIX. */
 export const KEY_COOLDOWN_MS: Readonly<Record<string, number>> = {
   slingStretch: 60, slingGrab: 60, slingRelease: 60, slingCancel: 60, hop: 60,
   launch: 150, select: 150, hurt: 250, feather: 60, puff: 80,
-  woodHit: 45, iceHit: 45, stoneHit: 45, ground: 60, pigBump: 60,
-  woodCrack: 50, iceCrack: 50, stoneCrack: 50, woodBreak: 40, iceShatter: 40, stoneBreak: 40,
-  rubble: 250, boom: 50, helmet: 100, pigHurt: 150, pigPop: 40, pigPopQuiet: 40, pigLaugh: 1500, pigGrunt: 2000,
+  woodHit: 30, iceHit: 30, stoneHit: 30, ground: 50, pigBump: 60,
+  woodCrack: 50, iceCrack: 50, stoneCrack: 50, woodBreak: 35, iceShatter: 35, stoneBreak: 35,
+  rubble: 250, boom: 0, helmet: 100, pigHurt: 150, pigPop: 40, pigPopQuiet: 40, pigLaugh: 1500, pigGrunt: 2000,
   tick: 45, ui: 40, star: 60, bonus: 60, jingle: 4000, ab: 100, fuse: 0,
 };
 
@@ -91,7 +103,8 @@ export interface PoolStats {
 
 /**
  * Пул голосов: кулдаун одного ключа, лимит категории и общий лимит.
- * Если места нет — «крадём» самый неважный голос (минимальный score), но только если новый важнее.
+ * Если места нет — «крадём» самый неважный голос (минимальный score), но только если новый важнее
+ * (в ui/reward/jingle при равной важности — самый старый голос той же категории).
  * Время передаётся снаружи (now, секунды) — логика детерминирована и тестируется без Web Audio.
  */
 export class VoicePool {
@@ -127,11 +140,11 @@ export class VoicePool {
     }
     this.prune(now);
     const inCat = this.active.filter((v) => v.cat === cat);
-    if (inCat.length >= this.limits[cat] && !this.stealFrom(inCat, score, now)) {
+    if (inCat.length >= this.limits[cat] && !this.stealFrom(inCat, cat, score, now)) {
       this.stats.limited++;
       return null;
     }
-    if (this.active.length >= this.maxTotal && !this.stealFrom(this.active, score, now)) {
+    if (this.active.length >= this.maxTotal && !this.stealFrom(this.active, cat, score, now)) {
       this.stats.limited++;
       return null;
     }
@@ -156,10 +169,16 @@ export class VoicePool {
     for (const v of [...this.active]) this.release(v, now);
   }
 
-  private stealFrom(pool: VoiceSlot[], score: number, now: number): boolean {
+  /**
+   * Вытеснить самый неважный голос (минимальный score; при равенстве — самый старый).
+   * Новый голос должен быть важнее; при равной важности — только внутри своей категории из STEAL_OLDEST_ON_TIE.
+   */
+  private stealFrom(pool: VoiceSlot[], cat: Cat, score: number, now: number): boolean {
     let victim: VoiceSlot | null = null;
-    for (const v of pool) if (!victim || v.score < victim.score) victim = v;
-    if (!victim || victim.score >= score) return false;
+    for (const v of pool) if (!victim || v.score < victim.score || (v.score === victim.score && v.start < victim.start)) victim = v;
+    if (!victim) return false;
+    const tie = victim.score === score && victim.cat === cat && STEAL_OLDEST_ON_TIE.has(cat);
+    if (victim.score >= score && !tie) return false;
     this.release(victim, now);
     this.stats.stolen++;
     return true;

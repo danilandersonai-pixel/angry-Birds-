@@ -25,9 +25,15 @@ export const S = {
   episodesTitle: 'Выберите эпизод',
   episodeNum: 'Эпизод {n}',
   starsOf: '{got}/{total}',
-  episodeLockedReq: 'Пройдите «{prev}» и соберите {n} {stars}',
   episodeLockedShort: 'Эпизод закрыт',
-  episodeLockedCard: 'Нужно {n} {stars} в эпизоде {prev}',
+  // причина блокировки эпизода (rules.ts): ★ в карточке и подвале заменяется значком звезды
+  gateCardStars: 'Ещё {n}\u00A0★ в\u00A0эпизоде\u00A0{prev}',
+  gateCardLevel: 'Пройдите уровень\u00A0{id}',
+  gateCardBoth: 'Пройдите {id} и\u00A0наберите ещё\u00A0{n}\u00A0★',
+  gateFullStars: 'Соберите ещё {n} {stars} в эпизоде «{prev}»',
+  gateFullLevel: 'Пройдите уровень {id}, чтобы открыть «{name}»',
+  gateFullBoth: 'Пройдите уровень {id} и соберите ещё {n} {stars} в эпизоде «{prev}»',
+  gateFootBoth: 'Пройдите уровень {id} и наберите ещё {n}\u00A0★',
   episodeUnlocked: 'Открыт эпизод «{name}»!',
   episodeAria: 'Эпизод {n} «{name}»: {got} из {total} звёзд',
   episodeAriaLocked: 'Эпизод {n} «{name}», закрыт. {req}',
@@ -35,7 +41,7 @@ export const S = {
   levelsBest: 'Рекорд: {score}',
   levelsNotCleared: 'Ещё не пройден',
   levelsLocked: 'Сначала пройдите уровень {prev}',
-  levelsToNextEp: 'До следующего эпизода: ещё {n} {stars}',
+  levelsToNextEp: 'До следующего эпизода: ещё {n}\u00A0★',
   levelsEpDone: 'Эпизод пройден!',
   levelsFinishLast: 'Пройдите уровень {id}, чтобы открыть следующий эпизод',
   levelsEpPerfect: 'Все звёзды эпизода собраны!',
@@ -49,6 +55,9 @@ export const S = {
   hudBest: 'Рекорд',
   hudScore: 'Счёт',
   hudPigs: 'Свиней осталось: {n}',
+  hudToSling: 'К рогатке',
+  hudSkip: 'Коснитесь, чтобы пропустить',
+  hudBirds: 'Птиц осталось: {n}',
 
   pauseTitle: 'Пауза',
   pauseResume: 'Продолжить',
@@ -68,10 +77,46 @@ export const S = {
   winLockedNext: 'Соберите ещё {n} {stars}, чтобы открыть «{name}»',
   winAllDone: 'Вы прошли все уровни!',
   winTapSkip: 'Коснитесь, чтобы пропустить',
+  winOneShot: 'Одним выстрелом!',
+  winClean: 'Чистая работа!',
 
   loseBanner: 'Уровень не пройден',
   loseRetry: 'Ещё раз',
   loseMenu: 'Меню',
+  loseTipPrefix: 'Совет:',
+
+  settings: 'Настройки',
+  settingsTitle: 'Настройки',
+  setMusic: 'Музыка',
+  setSfx: 'Звуки',
+  setQuality: 'Качество графики',
+  qAuto: 'Авто',
+  qHigh: 'Высокое',
+  qMed: 'Среднее',
+  qLow: 'Низкое',
+  setAim: 'Подсказка траектории',
+  aimOff: 'Выкл',
+  aimShort: 'Короткая',
+  setMotion: 'Анимации',
+  motionSystem: 'Как в системе',
+  motionReduce: 'Уменьшить',
+  motionFull: 'Полные',
+  setShake: 'Тряска экрана',
+  setHaptics: 'Вибрация',
+  setReset: 'Сбросить прогресс',
+  confirmResetTitle: 'Сбросить прогресс?',
+  confirmResetBody: 'Все звёзды и рекорды будут удалены. Это нельзя отменить.',
+  confirmCancel: 'Отмена',
+  confirmResetOk: 'Сбросить',
+  toastResetDone: 'Прогресс сброшен',
+  creditsTitle: 'Об игре',
+  creditsBody: 'Сердитые Птицы — фанатский ремейк. Не связан с Rovio Entertainment. Графика, музыка и звуки созданы кодом.',
+  controlsTitle: 'Управление',
+  controlsMouse: 'Мышь: тяните птицу — прицел, тяните фон — обзор, колесо — масштаб',
+  controlsTouch: 'Касание: тяните птицу — прицел, один палец — обзор, два пальца — масштаб',
+  controlsKeys: 'R — заново · Esc — пауза · Пробел — способность · F — во весь экран · M — музыка',
+  on: 'Вкл',
+  off: 'Выкл',
 
   rotateTitle: 'Поверните устройство',
   rotateBody: 'Игра рассчитана на горизонтальный экран',
@@ -134,6 +179,25 @@ export const TIPS: readonly string[] = [
   'Три звезды — это меньше птиц и больше разрушений.',
   'Лёд хрупкий, камень — самый прочный.',
   'Падающие брёвна и камни тоже давят свиней.',
+];
+
+/** Подсказки способностей (07 §10.4, §18). У Реда и Теренса способности нет. */
+export const ABILITY_HINTS: Readonly<Partial<Record<string, string>>> = {
+  blues: 'Коснитесь — и Синие разделятся на троих!',
+  chuck: 'Коснитесь — и Чак рванёт вперёд!',
+  bomb: 'Коснитесь — и Бомб взорвётся!',
+  matilda: 'Коснитесь — и Матильда сбросит яйцо!',
+  hal: 'Коснитесь — и Хэл развернётся бумерангом!',
+  silver: 'Коснитесь — и Сильвер сделает петлю и ударит вниз!',
+};
+export const ABILITY_KEY = 'или нажмите Пробел';
+
+/** Советы после трёх поражений подряд (07 §18). */
+export const LOSE_TIPS: readonly string[] = [
+  'Бейте в опоры: без них башня рухнет сама.',
+  'Стекло — Синими, дерево — Чаком, камень — Бомбом.',
+  'Иногда выгоднее попасть в TNT, чем в свинью.',
+  'Попробуйте выстрел по высокой дуге — сверху конструкции слабее.',
 ];
 
 /** Дразнилки экрана поражения. */

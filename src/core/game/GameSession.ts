@@ -1,49 +1,36 @@
-// Игровая сессия: конечный автомат уровня (01 §13), рогатка, птицы и способности, очки, события
+// Игровая сессия: конечный автомат уровня с таймингами 00 §1.12, рогатка, птицы и способности, очки, события
 // и снимки для отрисовки. Время идёт только в step() — ровно 1/60 с; случайность — только Rng(seed).
 
-import { ABILITY, BIRD_FLIGHT, IMPACT_FX, LAUNCH, PIG_MOOD, SCORE, SETTLE, SLINGSHOT, TIMING, WORLD } from '../../config/constants';
-import type { CreateSession, EntityView, GameSession, QueuedBirdView, SlingshotView, TrailPoint } from '../api';
+import { ABILITY, BIRD_FLIGHT, CAMERA, LAUNCH, PIG_MOOD, RETIRE, SCORE, SETTLE, TIMING, WORLD } from '../../config/constants';
+import type { BirdPose, CreateSession, EntityView, GameSession, QueuedBirdView, SlingshotView, TrailPoint } from '../api';
 import { BIRD_DEFS } from '../characters';
-import type { GameEvent, ImpactSurface, SessionState } from '../events';
+import type { GameEvent, SessionState } from '../events';
 import { isDestructible, type BirdEnt, type Destructible, type Ent, type Hit } from '../physics/entities';
 import { PhysicsWorld } from '../physics/PhysicsWorld';
 import { Rng } from '../rng';
-import type { BirdType, LevelDef, Vec } from '../types';
+import type { BirdType, LevelDef, PigType, Vec } from '../types';
 import { silverSlam, useAbility, type AbilityHost } from './abilities';
-import { createFlyer, updateRetire, type Flyer } from './Flyer';
+import { BirdQueue } from './BirdQueue';
+import { canTrigger, createFlyer, hasAbility, updateRetire, type Flyer } from './Flyer';
+import { ImpactFilter } from './impacts';
+import { PigMoods, type Threat } from './moods';
 import { Scoring, starsFor } from './Scoring';
 import { Slingshot } from './Slingshot';
 import { Trail } from './Trail';
-import { birdView, entityView, View } from './views';
+import { birdView, centroidInto, entityView, frozenCopy, View } from './views';
 
 const DT = WORLD.DT;
+const EPS = 1e-9;
 const SLEEP_STEPS = Math.round(SETTLE.SLEEP_HOLD / DT);
-
-interface PigMood {
-  laughFrom: number;
-  laughUntil: number;
-  scaredUntil: number;
-}
-
-function surfaceOf(e: Ent): ImpactSurface {
-  switch (e.kind) {
-    case 'block':
-      return e.material;
-    case 'terrain':
-      return 'ground';
-    default:
-      return e.kind;
-  }
-}
-
-function easeInOutSine(t: number): number {
-  return 0.5 - 0.5 * Math.cos(Math.PI * t);
-}
 
 /** Кратчайшая разность углов в (−π, π]. */
 function angleDelta(from: number, to: number): number {
   const d = (to - from) % (2 * Math.PI);
   return d > Math.PI ? d - 2 * Math.PI : d <= -Math.PI ? d + 2 * Math.PI : d;
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v));
 }
 
 class Session implements GameSession {
@@ -57,8 +44,11 @@ class Session implements GameSession {
   private readonly physics: PhysicsWorld;
   private readonly host: AbilityHost;
   private readonly sling: Slingshot;
+  private readonly birdQueue: BirdQueue;
   private readonly scoring = new Scoring();
   private readonly path = new Trail();
+  private readonly impacts = new ImpactFilter();
+  private readonly moods = new PigMoods();
   private readonly views = new Map<number, View>();
   private viewList: View[] = [];
   private viewsDirty = true;
@@ -67,20 +57,30 @@ class Session implements GameSession {
   private readonly birds: BirdType[];
   /** Птица в кармашке: вид без тела, тело создаётся при выстреле с тем же id. */
   private loaded: View | null = null;
+  /** Птицы текущего выстрела (у Синих после разделения — три). */
   private flyers: Flyer[] = [];
   private eggId: number | null = null;
+  /** Цель камеры: птица, центроид Синих, яйцо или точка его взрыва. */
+  private focus: View | null = null;
+  private groupView: View | null = null;
+  private eggHold: View | null = null;
+  private lastFocusX = 0;
+  private shots = 0;
   private pigs = 0;
   private pigsAtLaunch = 0;
+  /** Все свиньи погибли: новый захват запрещён, ждём доигрыша и покоя (VICTORY_DELAY). */
+  private victoryPending = false;
   private victoryTime = 0;
   private quietSteps = 0;
+  /** Последнее учтённое значение PhysicsWorld.supportLost. */
+  private seenSupportLost = 0;
+  /** Время (от входа в settling) конца задержки камеры на месте событий; null — ещё задерживается. */
+  private lingerEnd: number | null = null;
+  /** Время возврата камеры к рогатке перед следующей птицей. */
+  private returnTime = 0;
   private bonusAwarded = 0;
   private aimAngle = 0;
-  private stretchBucket = -1;
-  private readonly moods = new Map<number, PigMood>();
-  private readonly impacts: Hit[] = [];
-  private readonly pairTime = new Map<string, number>();
-  /** Высота земли под местами очереди. */
-  private readonly spotGround: number[];
+  private lastStretch = 0;
   /** События и очки идут только после усадки уровня. */
   private live = false;
 
@@ -103,12 +103,12 @@ class Session implements GameSession {
       physics: this.physics,
       now: () => this.now,
       spawnBird: (parent, type, pos, vel, angle, spin) => {
-        const ent = this.physics.addBird(type, this.physics.allocId(), this.rng.next(), pos, vel, angle);
+        const ent = this.physics.addBird(type, this.physics.allocId(), this.rng.next(), pos, vel, angle, parent.group);
         ent.body.setAngularVelocity(spin);
-        this.flyers.push(createFlyer(ent, parent.launchTime, false));
+        this.flyers.push(createFlyer(ent, parent.launchTime, false, parent.group));
       },
-      spawnEgg: (pos, vel) => {
-        this.eggId = this.physics.addEgg(pos, vel).id;
+      spawnEgg: (parent, pos, vel) => {
+        this.eggId = this.physics.addEgg(pos, vel, parent.group).id;
       },
       explodeBomb: (f) => {
         const { x, y } = f.ent.body.getPosition();
@@ -117,15 +117,12 @@ class Session implements GameSession {
         this.physics.detonate(x, y, 'bomb');
       },
     };
+    this.birdQueue = new BirdQueue(this.sling.base, (x) => this.physics.groundBelow(x, level.bounds.maxY));
     this.physics.presettle();
     for (const v of this.views.values()) {
       if (v.ent) v.readBody(v.ent.body);
       v.savePrev();
     }
-    this.spotGround = this.birds.map((_, i) => {
-      const y = this.physics.groundBelow(this.spotX(i), level.bounds.maxY);
-      return Number.isNaN(y) ? this.sling.base.y : y;
-    });
     this.live = true;
     if (this.birds.length === 0) this.st = 'settling';
   }
@@ -166,7 +163,7 @@ class Session implements GameSession {
     this.stepCount++;
     this.now = this.stepCount * DT;
     this.physics.step();
-    this.flushImpacts();
+    this.impacts.flush(this.now, (e) => this.emit(e));
     this.updateFlyers();
     this.sling.update(DT, this.loaded !== null, this.carryTarget());
     this.updateLoaded();
@@ -177,14 +174,24 @@ class Session implements GameSession {
 
   private updateFlyers(): void {
     for (const f of this.flyers.slice()) {
-      if (f.fuseAt !== null && this.now >= f.fuseAt) {
+      // усиление Чака действует весь шаг первого контакта (урон считается после колбэка hit) и снимается после него
+      if (f.multAfterHit && f.hitTime !== null) {
+        f.ent.mult = f.multAfterHit;
+        f.multAfterHit = null;
+      }
+      if (f.fuseAt !== null && this.now >= f.fuseAt - EPS) {
         this.triggerAbility(f); // автоподрыв Бомба
         continue;
       }
       if (f.hitTime === null) this.path.follow(f);
-      const p = f.ent.body.getPosition();
-      if (this.physics.outOfBounds(p.x, p.y) || updateRetire(f, this.now)) this.retire(f);
+      if (this.birdOut(f.ent.body.getPosition()) || updateRetire(f, this.now)) this.retire(f);
     }
+  }
+
+  /** Птица «уходит» раньше, чем тело удалила бы физика: за bounds ± OUT_MARGIN или ниже границы мира. */
+  private birdOut(p: Vec): boolean {
+    const b = this.level.bounds;
+    return p.y < this.physics.killY || p.x < b.minX - RETIRE.OUT_MARGIN || p.x > b.maxX + RETIRE.OUT_MARGIN;
   }
 
   private retire(f: Flyer): void {
@@ -212,65 +219,94 @@ class Session implements GameSession {
     this.loaded.birdPose = this.st === 'aiming' ? 'aim' : 'idle';
   }
 
-  /** Детектор покоя; после SLEEP_HOLD тишины — принудительный сон (иначе ползущие тела не засыпают, 03 §2.7). */
+  /**
+   * Детектор покоя (00 §1.9): тихий шаг — все тела медленные, нет фитилей, дуг, отложенных взрывов и яйца.
+   * После SLEEP_HOLD тишины без птиц и снарядов — принудительный сон (иначе ползущие тела не засыпают).
+   */
   private updateCalm(): void {
     const busy = this.flyers.some((f) => f.control !== null || f.fuseAt !== null);
-    this.quietSteps = !busy && this.physics.isQuiet() ? this.quietSteps + 1 : 0;
-    if (this.quietSteps >= SLEEP_STEPS && this.physics.anyAwake()) this.physics.sleepAll();
+    // удаление (уход птицы, взрыв Бомба, гибель тела) лишило кого-то опоры: покоя ещё нет
+    const shaken = this.physics.supportLost !== this.seenSupportLost;
+    this.seenSupportLost = this.physics.supportLost;
+    this.quietSteps = !busy && !shaken && this.physics.isQuiet() ? this.quietSteps + 1 : 0;
+    if (this.quietSteps >= SLEEP_STEPS && this.flyers.length === 0 && this.eggId === null && this.physics.anyAwake()) {
+      this.physics.sleepAll();
+    }
   }
 
   private calm(seconds: number): boolean {
-    return this.quietSteps * DT >= seconds - 1e-9;
+    return this.quietSteps * DT >= seconds - EPS;
   }
 
   private updateState(): void {
+    if (this.pigs === 0 && !this.victoryPending && !this.ended()) {
+      this.victoryPending = true;
+      this.victoryTime = this.now;
+    }
     const t = this.now - this.stateTime;
     switch (this.st) {
       case 'loading':
-        if (t >= TIMING.BIRD_HOP_TIME - 1e-9) {
+        if (t >= TIMING.BIRD_HOP_TIME - EPS) {
           this.landBird();
-          this.go(this.pigs > 0 ? 'ready' : 'settling');
+          this.go('ready');
         }
-        break;
-      case 'ready':
-        if (this.pigs === 0) this.go('settling'); // новый захват после победы запрещён (01 §8)
         break;
       case 'flying':
         if (this.flyers.length === 0 && this.eggId === null) this.endShot();
         break;
       case 'settling':
-        this.updateSettling(t);
+        if (!this.victoryPending) this.updateSettling(t);
         break;
       case 'bonus':
         this.updateBonus(t);
-        break;
+        return;
+    }
+    if (this.victoryPending && this.victoryReady()) {
+      this.victoryPending = false;
+      this.go('bonus');
     }
   }
 
+  private ended(): boolean {
+    return this.st === 'bonus' || this.st === 'won' || this.st === 'lost';
+  }
+
+  /** VICTORY_DELAY: начатый прицел и полёт доигрываются, затем не меньше 1.2 с и покой 0.4 с (или 3.5 с). */
+  private victoryReady(): boolean {
+    if (this.st === 'loading' || this.st === 'aiming' || this.flyers.length > 0 || this.eggId !== null) return false;
+    const since = this.now - this.victoryTime;
+    return since >= TIMING.VICTORY_MIN - EPS && (this.calm(TIMING.VICTORY_HOLD) || since >= TIMING.VICTORY_MAX - EPS);
+  }
+
+  /** После ухода птицы: задержка камеры (LINGER) и её возврат — затем следующая птица; без птиц — ждём итог. */
   private updateSettling(t: number): void {
-    if (this.pigs === 0) {
-      const since = this.now - this.victoryTime;
-      if (since >= TIMING.VICTORY_MIN && (this.calm(TIMING.VICTORY_HOLD) || since >= TIMING.VICTORY_MAX)) this.go('bonus');
-    } else if (this.birds.length > 0) {
-      if (t >= TIMING.TURN_MAX || (t >= TIMING.TURN_MIN && this.calm(TIMING.CALM_HOLD))) this.go('loading');
-    } else if (t >= TIMING.LOSE_TIMEOUT || this.calm(TIMING.LOSE_HOLD)) {
+    if (this.birds.length > 0) {
+      if (this.lingerEnd === null && (t >= TIMING.LINGER_MAX - EPS || this.calm(TIMING.CALM_HOLD))) this.lingerEnd = t;
+      if (this.lingerEnd !== null && t >= this.lingerEnd + this.returnTime - EPS) this.go('loading');
+    } else if (t >= TIMING.LOSE_TIMEOUT - EPS || this.calm(TIMING.LOSE_HOLD)) {
       this.finish(false);
     }
   }
 
-  /** Подсчёт оставшихся птиц: сначала из кармашка, затем очередь справа налево (01 §10). */
+  /** Баннер, затем по птице: сначала из кармашка, потом очередь справа налево (00 §1.12). */
   private updateBonus(t: number): void {
     const start = TIMING.CLEARED_BANNER + TIMING.BONUS_PRE;
     const n = this.birds.length;
-    while (this.bonusAwarded < n && t >= start + this.bonusAwarded * TIMING.BONUS_PER_BIRD - 1e-9) {
+    while (this.bonusAwarded < n && t >= start + this.bonusAwarded * TIMING.BONUS_PER_BIRD - EPS) {
       this.awardBird(this.bonusAwarded++);
     }
-    if (t >= start + n * TIMING.BONUS_PER_BIRD - 1e-9) this.finish(true);
+    const end = n > 0 ? start + n * TIMING.BONUS_PER_BIRD + TIMING.BONUS_POST : TIMING.CLEARED_BANNER + TIMING.BONUS_NONE;
+    if (t >= end - EPS) this.finish(true);
   }
 
   private awardBird(i: number): void {
     const type = this.birds[i];
-    const pos = this.loaded && i === 0 ? this.sling.pocket : this.spot(this.loaded ? i - 1 : i, type);
+    let pos: Vec;
+    if (this.loaded && i === 0) pos = this.sling.pocket;
+    else {
+      const waiting = this.loaded ? this.birds.slice(1) : this.birds;
+      pos = this.birdQueue.layout(waiting)[this.loaded ? i - 1 : i];
+    }
     const points = SCORE.UNUSED_BIRD;
     this.scoring.bonus(points);
     this.emit({ type: 'birdBonus', bird: type, x: pos.x, y: pos.y, points });
@@ -288,7 +324,7 @@ class Session implements GameSession {
     if (from === to) return;
     this.st = to;
     this.stateTime = this.now;
-    if (to === 'bonus') this.scoring.locked = true; // очки физики замораживаются (01 §10)
+    if (to === 'bonus') this.scoring.locked = true; // очки физики замораживаются, сцена идёт визуально
     this.emit({ type: 'stateChanged', from, to });
   }
 
@@ -305,36 +341,23 @@ class Session implements GameSession {
     this.emit({ type: 'birdLoaded', bird: type });
   }
 
+  /** Все птицы выстрела ушли: смех после промаха, время возврата камеры от места ухода к рогатке. */
   private endShot(): void {
     if (this.pigs > 0 && this.pigs === this.pigsAtLaunch) {
-      this.emit({ type: 'pigsLaugh' });
-      for (const m of this.moods.values()) {
-        m.laughFrom = this.now + this.rng.range(0, PIG_MOOD.LAUGH_JITTER);
-        m.laughUntil = m.laughFrom + PIG_MOOD.LAUGH_TIME;
-      }
+      this.emit({ type: 'pigsLaugh', pigs: this.livePigs() });
+      this.moods.laugh(this.now, this.rng);
     }
+    const C = CAMERA;
+    this.returnTime = clamp(C.RETURN_BASE + Math.abs(this.lastFocusX - this.sling.anchor.x) * C.RETURN_PER_M, C.RETURN_MIN, C.RETURN_MAX);
+    this.lingerEnd = null;
+    this.eggHold = null;
     this.go('settling');
   }
 
-  /** Самые сильные удары шага, не чаще PAIR_COOLDOWN для одной пары тел. */
-  private flushImpacts(): void {
-    if (this.impacts.length > 0) {
-      this.impacts.sort((p, q) => q.J - p.J);
-      let sent = 0;
-      for (const h of this.impacts) {
-        if (sent >= IMPACT_FX.MAX_PER_STEP) break;
-        const key = h.a.id < h.b.id ? `${h.a.id}:${h.b.id}` : `${h.b.id}:${h.a.id}`;
-        const last = this.pairTime.get(key);
-        if (last !== undefined && this.now - last < IMPACT_FX.PAIR_COOLDOWN) continue;
-        this.pairTime.set(key, this.now);
-        this.emit({ type: 'impact', x: h.x, y: h.y, impulse: h.J, a: surfaceOf(h.a), b: surfaceOf(h.b) });
-        sent++;
-      }
-      this.impacts.length = 0;
-    }
-    if (this.stepCount % 60 === 0) {
-      for (const [key, t] of this.pairTime) if (this.now - t >= IMPACT_FX.PAIR_COOLDOWN) this.pairTime.delete(key);
-    }
+  private livePigs(): PigType[] {
+    const out: PigType[] = [];
+    for (const e of this.physics.ents.values()) if (e.kind === 'pig' && !e.dead) out.push(e.type);
+    return out;
   }
 
   private syncViews(): void {
@@ -348,34 +371,46 @@ class Session implements GameSession {
         if (e.kind === 'pig') v.hasHelmet = e.helmetHp > 0;
       }
     }
+    const threats: Threat[] = [];
     for (const f of this.flyers) {
       const v = this.views.get(f.ent.id);
       if (!v) continue;
-      v.birdPose = f.hitTime === null ? 'fly' : this.now - f.hitTime < BIRD_FLIGHT.HURT_TIME ? 'hurt' : 'idle';
+      v.birdPose = this.birdPose(f);
       v.abilityUsed = f.abilityUsed;
+      threats.push({ p: { x: v.x, y: v.y }, v: { x: v.vx, y: v.vy } });
     }
-    this.updatePigMoods();
+    for (const v of this.views.values()) {
+      if (v.kind === 'pig') v.pigPose = this.moods.pose(v.id, v, this.now, threats, this.st === 'lost');
+    }
+    this.updateFocus();
   }
 
-  /** Свиньи пугаются приближающейся птицы и смеются после промаха (02 §4.3). */
-  private updatePigMoods(): void {
-    const r2 = PIG_MOOD.SCARED_DIST * PIG_MOOD.SCARED_DIST;
-    for (const [id, m] of this.moods) {
-      const v = this.views.get(id);
-      if (!v) continue;
-      for (const f of this.flyers) {
-        const p = f.ent.body.getPosition();
-        const vel = f.ent.body.getLinearVelocity();
-        const dx = v.x - p.x;
-        const dy = v.y - p.y;
-        if (dx * dx + dy * dy < r2 && dx * vel.x + dy * vel.y > 0) m.scaredUntil = this.now + PIG_MOOD.SCARED_HOLD;
+  private birdPose(f: Flyer): BirdPose {
+    if (this.now < f.frownUntil) return 'aim';
+    if (f.hitTime === null) return 'fly';
+    return this.now - f.hitTime < BIRD_FLIGHT.HURT_TIME ? 'hurt' : 'idle';
+  }
+
+  /** Камера: яйцо Матильды до взрыва, затем точка взрыва; Синие — центроид живых сестёр; иначе птица. */
+  private updateFocus(): void {
+    let f: View | null = null;
+    if (this.eggId !== null) f = this.views.get(this.eggId) ?? null;
+    else if (this.eggHold) f = this.eggHold;
+    else {
+      const members: View[] = [];
+      for (const g of this.flyers) {
+        const v = this.views.get(g.ent.id);
+        if (v) members.push(v);
       }
-      v.pigPose =
-        this.st === 'lost' ? 'laugh'
-        : this.now < m.scaredUntil ? 'scared'
-        : this.now >= m.laughFrom && this.now < m.laughUntil ? 'laugh'
-        : 'idle';
+      if (members.length === 1) f = members[0];
+      else if (members.length > 1) {
+        this.groupView ??= birdView(members[0].id, members[0].birdType!, members[0].seed);
+        centroidInto(this.groupView, members);
+        f = this.groupView;
+      }
     }
+    this.focus = f;
+    if (f) this.lastFocusX = f.x;
   }
 
   // ── Обратные вызовы физики ───────────────────────────────────
@@ -391,61 +426,62 @@ class Session implements GameSession {
     this.viewsDirty = true;
     if (e.kind === 'pig') {
       this.pigs++;
-      this.moods.set(e.id, { laughFrom: 0, laughUntil: 0, scaredUntil: 0 });
+      this.moods.add(e.id);
     }
   }
 
   private onRemoved(e: Ent): void {
+    const v = this.views.get(e.id);
     this.views.delete(e.id);
-    this.moods.delete(e.id);
+    this.moods.remove(e.id);
     this.viewsDirty = true;
-    if (e.id === this.eggId) this.eggId = null;
+    if (e.id !== this.eggId) return;
+    this.eggId = null;
+    if (v && this.flyers.length > 0) {
+      const p = e.body.getPosition();
+      this.eggHold = frozenCopy(v, p.x, p.y); // камера держит точку взрыва, пока Матильда улетает
+    }
   }
 
   private onHit(h: Hit): void {
     if (!this.live) return;
-    if (h.J >= IMPACT_FX.MIN_J && h.vn >= IMPACT_FX.MIN_VN) this.impacts.push(h);
+    this.impacts.add(h);
+    if (h.pierced) return; // пробитие — не первый контакт: окно способности и след не закрываются
     if (h.a.kind === 'bird') this.birdContact(h.a, h);
     if (h.b.kind === 'bird') this.birdContact(h.b, h);
   }
 
-  /** Контакт птицы: первый закрывает окно способности, обрывает след и запускает фитиль Бомба. */
+  /** Первый контакт птицы: закрывает окно способности, обрывает след и дуги, запускает фитиль Бомба (00 §1.3). */
   private birdContact(bird: BirdEnt, h: Hit): void {
     const f = this.flyers.find((g) => g.ent === bird);
-    if (!f) return;
-    if (f.hitTime === null) {
-      f.hitTime = this.now;
+    if (!f || f.hitTime !== null) return;
+    f.hitTime = this.now;
+    if (f.control) {
       f.control = null;
       bird.body.setGravityScale(1);
-      const p = bird.body.getPosition();
-      this.path.mark(p.x, p.y);
-      if (f.diving) silverSlam(this.host, p.x, p.y);
-      if (bird.type === 'bomb' && !f.abilityUsed) f.fuseAt = this.now + ABILITY.BOMB.FUSE;
     }
-    if (!h.pierced && !f.solidHit) {
-      f.solidHit = true;
-      if (f.multAfterHit) bird.mult = f.multAfterHit;
-      f.multAfterHit = null;
-    }
-    if (!f.strongHit && (h.pierced || h.J >= IMPACT_FX.BIRD_IMPACT_J)) {
-      f.strongHit = true;
-      this.emit({ type: 'birdImpact', id: bird.id, bird: bird.type, x: h.x, y: h.y, speed: h.vn });
-    }
+    const p = bird.body.getPosition();
+    this.path.mark(p.x, p.y);
+    if (f.diving) silverSlam(this.host, p.x, p.y);
+    if (bird.type === 'bomb' && !f.abilityUsed) f.fuseAt = this.now + ABILITY.BOMB.FUSE;
+    this.emit({ type: 'birdImpact', id: bird.id, bird: bird.type, x: h.x, y: h.y, speed: h.vn });
   }
 
+  /** Урон: очки начисляются молча; смертельный удар уходит в очки уничтожения, но слетевшая каска видна всегда. */
   private onDamaged(e: Destructible, applied: number, stageChanged: boolean, helmetLost: boolean): void {
-    if (!this.live || e.hp <= 0) return; // смертельный удар уходит в очки уничтожения
-    this.scoring.damage(e, applied);
+    if (!this.live) return;
+    const lethal = e.hp <= 0;
+    if (!lethal) this.scoring.damage(e, applied);
     const { x, y } = e.body.getPosition();
-    if (e.kind === 'block' && stageChanged && e.stage > 0) {
-      this.emit({ type: 'blockDamaged', id: e.id, material: e.material, x, y, stage: e.stage });
-    } else if (e.kind === 'pig' && (stageChanged || helmetLost)) {
+    if (e.kind === 'block') {
+      if (!lethal && stageChanged && e.stage > 0) this.emit({ type: 'blockDamaged', id: e.id, material: e.material, x, y, stage: e.stage });
+    } else if (e.kind === 'pig' && (helmetLost || (!lethal && (stageChanged || applied >= PIG_MOOD.FLINCH_DMG)))) {
       this.emit({ type: 'pigDamaged', id: e.id, pig: e.type, x, y, stage: e.stage, helmetLost });
     }
   }
 
   private onKilled(e: Destructible): void {
-    if (e.kind === 'pig' && --this.pigs === 0) this.victoryTime = this.now;
+    if (e.kind === 'pig') this.pigs--;
     if (!this.live) return;
     const points = this.scoring.destroy(e);
     const { x, y } = e.body.getPosition();
@@ -465,7 +501,7 @@ class Session implements GameSession {
         this.emit({ type: 'pigDestroyed', id: e.id, pig: e.type, x, y, radius: e.radius, points });
         break;
     }
-    if (points > 0) this.emit({ type: 'score', points, x, y, kind: e.kind === 'tnt' ? 'tnt' : e.kind });
+    if (points > 0) this.emit({ type: 'score', points, x, y, kind: e.kind });
   }
 
   private emit(e: GameEvent): void {
@@ -474,16 +510,18 @@ class Session implements GameSession {
 
   // ── Управление ───────────────────────────────────────────────
 
+  private canAim(): boolean {
+    return this.st === 'ready' && this.loaded !== null && !this.victoryPending;
+  }
+
   canGrab(p: Vec): boolean {
-    if (this.st !== 'ready' || !this.loaded || this.pigs === 0) return false;
-    const r = Math.max(LAUNCH.GRAB_RADIUS, BIRD_DEFS[this.birds[0]].radius + LAUNCH.GRAB_MARGIN);
-    return Math.hypot(p.x - this.sling.pocket.x, p.y - this.sling.pocket.y) <= r;
+    return this.canAim() && Math.hypot(p.x - this.sling.pocket.x, p.y - this.sling.pocket.y) <= LAUNCH.GRAB_RADIUS;
   }
 
   beginAim(): void {
-    if (this.st !== 'ready' || !this.loaded || this.pigs === 0) return;
+    if (!this.canAim()) return;
     this.sling.beginAim();
-    this.stretchBucket = -1;
+    this.lastStretch = 0;
     this.go('aiming');
     this.emit({ type: 'aimStart', bird: this.birds[0] });
   }
@@ -492,14 +530,10 @@ class Session implements GameSession {
     if (this.st !== 'aiming' || !this.loaded) return;
     this.sling.aimAt(p, BIRD_DEFS[this.birds[0]].radius);
     this.loaded.place(this.sling.pocket.x, this.sling.pocket.y, this.aimAngle);
-    if (this.sling.pull < LAUNCH.R_CANCEL) {
-      this.stretchBucket = -1; // ниже порога отмены резина «не натянута»
-      return;
-    }
+    if (this.sling.pull < LAUNCH.R_CANCEL) return; // ниже порога отмены резина «не скрипит»
     const power = this.sling.power;
-    const bucket = Math.floor(power / LAUNCH.STRETCH_STEP + 1e-9);
-    if (bucket !== this.stretchBucket) {
-      this.stretchBucket = bucket;
+    if (Math.abs(power - this.lastStretch) >= LAUNCH.STRETCH_STEP - EPS) {
+      this.lastStretch = power;
       this.emit({ type: 'aimStretch', power });
     }
   }
@@ -518,7 +552,7 @@ class Session implements GameSession {
   }
 
   launch(angleDeg: number, power: number): void {
-    if (this.st !== 'ready' || !this.loaded) return;
+    if (!this.canAim()) return;
     this.sling.pullTo(angleDeg, power, BIRD_DEFS[this.birds[0]].radius);
     const dir = this.sling.direction;
     this.aimAngle = power > 0 ? Math.atan2(dir.y, dir.x) : 0;
@@ -534,22 +568,45 @@ class Session implements GameSession {
     view.place(shot.pos.x, shot.pos.y, this.aimAngle);
     view.birdPose = 'fly';
     this.physics.damageEnabled = true;
-    const ent = this.physics.addBird(type, view.id, view.seed, shot.pos, shot.vel, this.aimAngle);
-    this.flyers = [createFlyer(ent, this.now, true)];
+    this.shots++;
+    const group = -this.shots; // свой groupIndex на выстрел
+    const ent = this.physics.addBird(type, view.id, view.seed, shot.pos, shot.vel, this.aimAngle, group);
+    this.flyers = [createFlyer(ent, this.now, true, group)];
     this.path.clear();
+    this.groupView = null;
+    this.eggHold = null;
     this.pigsAtLaunch = this.pigs;
     this.sling.release();
     this.go('flying');
     this.emit({ type: 'birdLaunched', id: view.id, bird: type, x: shot.pos.x, y: shot.pos.y, power: shot.power });
+    this.updateFocus();
   }
 
+  /**
+   * Тап в полёте: способность (окно 00 §1.4); у птицы без способности — только сведённые брови;
+   * если способности нет или она израсходована и с первого контакта прошло ≥ 1 с — быстрый пропуск (00 §1.9).
+   */
   activateAbility(): boolean {
-    if (this.st !== 'flying') return false;
+    if (this.st !== 'flying' || this.flyers.length === 0) return false;
+    if (this.now - this.flyers[0].launchTime < BIRD_FLIGHT.ABILITY_MIN_DELAY - EPS) return false; // дребезг пальца
     const f = this.flyers.find((g) => g.primary);
-    if (!f || f.abilityUsed || this.now - f.launchTime < BIRD_FLIGHT.ABILITY_MIN_DELAY - 1e-9) return false;
-    if (f.hitTime !== null && f.ent.type !== 'bomb') return false; // окно — до первого контакта (у Бомба — до взрыва)
-    this.triggerAbility(f);
-    return true;
+    let used = false;
+    if (f && canTrigger(f, this.now)) {
+      this.triggerAbility(f);
+      used = true;
+    } else if (f && !hasAbility(f.ent.type) && f.hitTime === null) {
+      f.frownUntil = this.now + BIRD_FLIGHT.FROWN_TIME;
+    } else if (this.canQuickSkip()) {
+      for (const g of this.flyers.slice()) this.retire(g);
+    }
+    this.updateFocus();
+    return used;
+  }
+
+  private canQuickSkip(): boolean {
+    return this.eggId === null && this.flyers.every(
+      (g) => g.hitTime !== null && this.now - g.hitTime >= RETIRE.QUICK_SKIP_AFTER_HIT - EPS && !canTrigger(g, this.now),
+    );
   }
 
   private triggerAbility(f: Flyer): void {
@@ -557,7 +614,7 @@ class Session implements GameSession {
     f.fuseAt = null;
     const { x, y } = f.ent.body.getPosition();
     this.emit({ type: 'ability', id: f.ent.id, bird: f.ent.type, x, y });
-    this.path.mark(x, y);
+    if (f.hitTime === null) this.path.mark(x, y); // след идёт только до первого контакта (Бомб после удара — без отметки)
     useAbility(f, this.host);
   }
 
@@ -571,37 +628,10 @@ class Session implements GameSession {
     return this.viewList;
   }
 
-  private spotX(i: number): number {
-    return this.sling.base.x - SLINGSHOT.QUEUE_X0 - i * SLINGSHOT.QUEUE_DX;
-  }
-
-  private spot(i: number, type: BirdType): Vec {
-    return { x: this.spotX(i), y: this.spotGround[i] + BIRD_DEFS[type].radius };
-  }
-
-  /** Очередь у рогатки; в состоянии loading первая птица прыгает в кармашек, остальные сдвигаются (01 §5.3). */
+  /** Очередь у рогатки; в состоянии loading первая птица прыгает в кармашек, остальные сдвигаются. */
   queue(): readonly QueuedBirdView[] {
     const waiting = this.loaded ? this.birds.slice(1) : this.birds;
-    const t = this.now - this.stateTime;
-    const hopping = this.st === 'loading';
-    return waiting.map((type, i) => {
-      const radius = BIRD_DEFS[type].radius;
-      if (!hopping) return { type, radius, ...this.spot(i, type) };
-      if (i === 0) {
-        const u = Math.min(1, t / TIMING.BIRD_HOP_TIME);
-        const from = this.spot(0, type);
-        const to = this.sling.anchor;
-        return {
-          type, radius,
-          x: from.x + (to.x - from.x) * u,
-          y: from.y + (to.y - from.y) * u + 4 * TIMING.BIRD_HOP_HEIGHT * u * (1 - u),
-        };
-      }
-      const k = easeInOutSine(Math.min(1, t / TIMING.QUEUE_SHIFT_TIME));
-      const from = this.spot(i, type);
-      const to = this.spot(i - 1, type);
-      return { type, radius, x: from.x + (to.x - from.x) * k, y: from.y + (to.y - from.y) * k };
-    });
+    return this.birdQueue.view(waiting, this.st === 'loading' ? this.now - this.stateTime : null, this.sling.anchor);
   }
 
   slingshot(): SlingshotView {
@@ -619,11 +649,8 @@ class Session implements GameSession {
     return this.path.points;
   }
 
-  /** Камера следит за яйцом Матильды, пока оно летит, иначе — за птицей из рогатки (или её сестрой). */
   focusBird(): EntityView | null {
-    if (this.eggId !== null) return this.views.get(this.eggId) ?? null;
-    const f = this.flyers.find((g) => g.primary) ?? this.flyers[0];
-    return f ? (this.views.get(f.ent.id) ?? null) : null;
+    return this.focus;
   }
 
   /** Тем же интегратором, что planck (полунеявный Эйлер, шаг 1/60): точка каждые PREDICT_STRIDE шагов. */

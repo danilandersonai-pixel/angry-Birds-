@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   CORRUPT_KEY,
+  DEFAULT_SETTINGS,
   ProgressStore,
   SCHEMA_VERSION,
   STORAGE_KEY,
@@ -33,7 +34,8 @@ describe('ProgressStore: базовое', () => {
   it('пустое хранилище — нет записей, настройки по умолчанию', () => {
     const p = new ProgressStore(new FakeStorage());
     expect(p.record('1-1')).toBeUndefined();
-    expect(p.settings).toEqual({ sfx: true, music: true });
+    expect(p.settings).toEqual(DEFAULT_SETTINGS);
+    expect(p.settings).toMatchObject({ sfx: true, music: true, motion: 'system' });
     expect(p.starsTotal()).toBe(0);
     expect(p.persistent).toBe(true);
   });
@@ -141,8 +143,8 @@ describe('ProgressStore: настройки и сброс', () => {
     const st = new FakeStorage();
     const p = new ProgressStore(st);
     p.setSettings({ music: false });
-    expect(p.settings).toEqual({ sfx: true, music: false });
-    expect(new ProgressStore(st).settings).toEqual({ sfx: true, music: false });
+    expect(p.settings).toEqual({ ...DEFAULT_SETTINGS, sfx: true, music: false });
+    expect(new ProgressStore(st).settings).toEqual({ ...DEFAULT_SETTINGS, sfx: true, music: false });
     p.setSettings({ sfx: 'да' as unknown as boolean });
     expect(p.settings.sfx).toBe(true);
   });
@@ -213,7 +215,7 @@ describe('ProgressStore: битые данные и отказы хранили�
     expect(p.record('1-3')).toBeUndefined();
     expect(p.record('1-4')).toBeUndefined();
     expect(p.starsTotal()).toBe(5);
-    expect(p.settings).toEqual({ sfx: true, music: false });
+    expect(p.settings).toEqual({ ...DEFAULT_SETTINGS, sfx: true, music: false, quality: 'auto' });
   });
 
   it('старый формат без schema мигрирует', () => {
@@ -277,5 +279,110 @@ describe('ProgressStore: битые данные и отказы хранили�
     expect(b.record('1-1')).toBeUndefined();
     b.reload();
     expect(b.record('1-1')).toEqual({ best: 777, stars: 2 });
+  });
+});
+
+describe('ProgressStore: расширенные настройки', () => {
+  it('перечисления санитайзятся, допустимые — сохраняются', () => {
+    const st = new FakeStorage();
+    const p = new ProgressStore(st);
+    p.setSettings({ motion: 'reduce', quality: 'low', aimAssist: 'short', shake: false, haptics: false });
+    const p2 = new ProgressStore(st);
+    expect(p2.settings).toEqual({ sfx: true, music: true, motion: 'reduce', quality: 'low', aimAssist: 'short', shake: false, haptics: false });
+    p2.setSettings({ motion: 'дёргано' as never, quality: 'ultra' as never });
+    expect(p2.settings.motion).toBe('reduce');
+    expect(p2.settings.quality).toBe('low');
+  });
+
+  it('setSettings без изменений не пишет в хранилище', () => {
+    const st = new FakeStorage();
+    const p = new ProgressStore(st);
+    p.setSettings({ sfx: true, motion: 'system' });
+    expect(st.map.has(STORAGE_KEY)).toBe(false);
+  });
+});
+
+describe('ProgressStore: поражения, флаги, подписки', () => {
+  it('saveLoss копит серию, победа её обнуляет, переживает перезапуск', () => {
+    const st = new FakeStorage();
+    const p = new ProgressStore(st);
+    expect(p.failStreak('1-2')).toBe(0);
+    expect(p.saveLoss('1-2')).toBe(1);
+    expect(p.saveLoss('1-2')).toBe(2);
+    expect(p.saveLoss('1-2')).toBe(3);
+    expect(new ProgressStore(st).failStreak('1-2')).toBe(3);
+    expect(p.record('1-2')).toBeUndefined(); // поражение не создаёт запись уровня
+    p.saveResult('1-2', 5000, 1);
+    expect(p.failStreak('1-2')).toBe(0);
+    expect(new ProgressStore(st).failStreak('1-2')).toBe(0);
+  });
+
+  it('markSeen / hasSeen; мусорные ключи игнорируются; reset стирает флаги', () => {
+    const st = new FakeStorage();
+    const p = new ProgressStore(st);
+    expect(p.hasSeen('ability:chuck')).toBe(false);
+    p.markSeen('ability:chuck');
+    p.markSeen('ability:chuck');
+    p.markSeen('плохой ключ');
+    expect(new ProgressStore(st).hasSeen('ability:chuck')).toBe(true);
+    expect(JSON.parse(st.map.get(STORAGE_KEY)!).seen).toEqual(['ability:chuck']);
+    p.reset();
+    expect(p.hasSeen('ability:chuck')).toBe(false);
+  });
+
+  it('мусор в fails и seen санитайзится', () => {
+    const st = new FakeStorage();
+    st.map.set(STORAGE_KEY, JSON.stringify({ schema: 1, fails: { '1-1': 2, '1-2': -4, '1-3': 'x', 'плохой': 3 }, seen: ['aimTutorial', 5, 'a b'] }));
+    const p = new ProgressStore(st);
+    expect(p.failStreak('1-1')).toBe(2);
+    expect(p.failStreak('1-2')).toBe(0);
+    expect(p.failStreak('1-3')).toBe(0);
+    expect(p.hasSeen('aimTutorial')).toBe(true);
+    expect(p.hasSeen('a b')).toBe(false);
+  });
+
+  it('onChange срабатывает на запись, сброс и reload; отписка работает', () => {
+    const st = new FakeStorage();
+    const p = new ProgressStore(st);
+    let n = 0;
+    const off = p.onChange(() => n++);
+    p.saveResult('1-1', 10, 1);
+    p.setSettings({ music: false });
+    p.reset();
+    p.reload();
+    expect(n).toBe(4);
+    off();
+    p.saveResult('1-1', 10, 1);
+    expect(n).toBe(4);
+  });
+
+  it('bindStorageEvents: запись другой вкладки → reload + onChange', () => {
+    const st = new FakeStorage();
+    const a = new ProgressStore(st);
+    const b = new ProgressStore(st);
+    const handlers: Array<(e: StorageEvent) => void> = [];
+    const target = {
+      addEventListener: (_t: string, h: (e: StorageEvent) => void) => handlers.push(h),
+      removeEventListener: (_t: string, h: (e: StorageEvent) => void) => handlers.splice(handlers.indexOf(h), 1),
+    } as unknown as Window;
+    let changed = 0;
+    b.onChange(() => changed++);
+    const off = b.bindStorageEvents(target);
+    a.saveResult('1-1', 300, 2);
+    handlers.forEach((h) => h({ key: 'другой.ключ' } as StorageEvent));
+    expect(b.record('1-1')).toBeUndefined();
+    handlers.forEach((h) => h({ key: STORAGE_KEY } as StorageEvent));
+    expect(b.record('1-1')).toEqual({ best: 300, stars: 2 });
+    expect(changed).toBe(1);
+    off();
+    expect(handlers.length).toBe(0);
+  });
+
+  it('ProgressStore(null): поражения и флаги тоже работают в памяти', () => {
+    const p = new ProgressStore(null);
+    expect(p.saveLoss('1-1')).toBe(1);
+    p.markSeen('aimTutorial');
+    expect(p.hasSeen('aimTutorial')).toBe(true);
+    expect(p.bindStorageEvents(null)).toBeTypeOf('function');
   });
 });

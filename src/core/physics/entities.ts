@@ -22,11 +22,15 @@ interface DestructibleBase extends EntBase {
   readonly target: DamageTarget;
   hp: number;
   readonly maxHp: number;
+  /** Полный запас прочности для очков за урон: HP тела + HP каски. */
+  readonly scoreHp: number;
   /** Порог урона: J0 = масса · v0. */
   readonly v0: number;
   readonly blastMult: number;
   /** Текущая стадия повреждений (блоки 0..3, свиньи 0..2). */
   stage: number;
+  /** До какого шага тело остаётся bullet после разгона выше FAST_BULLET_V (0 — не bullet). */
+  fastUntil: number;
 }
 
 export interface BlockEnt extends DestructibleBase {
@@ -60,6 +64,8 @@ export interface BirdEnt extends EntBase {
   mult: DamageMults;
   /** Демпфирование «после удара» уже включено. */
   damped: boolean;
+  /** Доля скорости после пробитий за шаг (1 — пробитий не было); применяется после world.step. */
+  keep: number;
 }
 
 export interface EggEnt extends EntBase {
@@ -101,6 +107,6 @@ export interface Hit {
   /** Точка контакта (в момент максимального vn). */
   x: number;
   y: number;
-  /** Птица прошла насквозь (контакт отключён). */
+  /** Птица прошла насквозь (контакт отключён) — это не «первый контакт». */
   pierced: boolean;
 }

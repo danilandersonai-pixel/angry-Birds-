@@ -1,5 +1,5 @@
-// Обёртка над planck World: тела из LevelDef, урон из импульсов контактов (03 §3.6), пробитие (03 §2.8),
-// взрывы (03 §3.7), очередь удаления с пробуждением соседей, границы мира и детектор покоя.
+// Обёртка над planck World: тела из LevelDef, урон из импульсов контактов (00 §1.7), пробитие,
+// взрывы (00 §1.8), очередь удаления с пробуждением соседей, границы мира и детектор покоя.
 // Внутри колбэков planck мир заблокирован — всё создание/удаление идёт после world.step().
 
 import {
@@ -7,17 +7,20 @@ import {
   Circle,
   Polygon,
   Settings,
+  Transform,
   Vec2,
   World,
   WorldManifold,
+  testOverlap,
   type Body,
   type BodyDef,
   type Contact,
   type ContactImpulse,
+  type FixtureDef,
   type RayCastOutput,
   type Shape,
 } from 'planck';
-import { ABILITY, BIRD_FLIGHT, DAMAGE, EXPLOSION, PIG_PHYS, SETTLE, TNT, WORLD } from '../../config/constants';
+import { ABILITY, BIRD_FLIGHT, COLLISION, DAMAGE, EXPLOSION, PIG_PHYS, SETTLE, TNT, WORLD } from '../../config/constants';
 import { BIRD_DEFS, PIG_DEFS, pigStage } from '../characters';
 import type { ExplosionSource } from '../events';
 import { blockStage, MATERIAL_DEFS } from '../materials';
@@ -35,8 +38,9 @@ import {
   type PigEnt,
   type TntEnt,
 } from './entities';
-import { convexPieces, insetPolygon, normalizePolygon, shapeArea, shapeOutline } from './geometry';
+import { insetPolygon, shapeArea, shapeOutline, terrainPieces } from './geometry';
 
+/** Причина гибели: удар, взрыв или вылет свиньи за границы мира. */
 export type KillCause = 'impact' | 'blast' | 'culled';
 
 /** Обратные вызовы мира для игрового слоя (очки, события, отрисовка). */
@@ -44,7 +48,7 @@ export interface PhysicsListener {
   added(e: Ent): void;
   /** Контакт за шаг с J > 0 или пробитием. */
   hit(h: Hit): void;
-  /** Нанесён урон: applied — снятая часть HP (не больше остатка). */
+  /** Нанесён урон: applied — снятая часть HP тела и каски (не больше остатка). */
   damaged(e: Destructible, applied: number, stageChanged: boolean, helmetLost: boolean): void;
   /** Разрушаемое тело погибло; тело ещё в мире (можно читать позицию и скорость). */
   killed(e: Destructible, cause: KillCause): void;
@@ -52,9 +56,9 @@ export interface PhysicsListener {
   exploded(x: number, y: number, radius: number, source: ExplosionSource): void;
 }
 
-/** Птицы и яйцо в одной отрицательной группе — друг с другом не сталкиваются. */
-const BIRD_GROUP = -1;
 const CHAIN_STEPS = Math.round(EXPLOSION.TNT_CHAIN_DELAY / WORLD.DT);
+const FAST_STEPS = Math.round(WORLD.FAST_BULLET_T / WORLD.DT);
+const FAST_V2 = WORLD.FAST_BULLET_V * WORLD.FAST_BULLET_V;
 
 function blockShape(def: BlockDef): Shape {
   const { shape, w, h } = def;
@@ -63,19 +67,31 @@ function blockShape(def: BlockDef): Shape {
   return new Polygon(insetPolygon(shapeOutline(shape, w, h), WORLD.INSET));
 }
 
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v));
+}
+
 export class PhysicsWorld {
   readonly world = new World({ gravity: { x: 0, y: WORLD.GRAVITY } });
   /** Живые сущности в порядке создания — от порядка обхода зависит детерминизм. */
   readonly ents = new Map<number, Ent>();
-  /** Урон включается с первым выстрелом (03 §3.1). */
+  /** Урон включается с первым выстрелом (00 §1.1). */
   damageEnabled = false;
+  /** Нижняя граница мира: ниже тела удаляются. */
+  readonly killY: number;
+  /**
+   * Растёт, когда удалённое тело касалось динамических: они разбужены, но ещё неподвижны — их скорость
+   * станет ненулевой только на следующем шаге, поэтому детектор покоя должен начать отсчёт заново.
+   */
+  supportLost = 0;
 
   private stepNo = 0;
   private nextId = 1;
   private readonly minX: number;
   private readonly maxX: number;
-  private readonly killY: number;
-  private readonly hits = new Map<Contact, Hit>();
+  /** Контакты шага: ключ Contact живёт ровно один шаг (пул planck), поэтому сами записи — в списке. */
+  private readonly hitOf = new Map<Contact, Hit>();
+  private readonly hitList: Hit[] = [];
   private readonly pierces: Array<{ bird: BirdEnt; target: Destructible; dmg: number }> = [];
   private readonly kills: Array<{ e: Destructible; cause: KillCause }> = [];
   private chain: Array<{ at: number; x: number; y: number }> = [];
@@ -117,25 +133,27 @@ export class PhysicsWorld {
     return this.world.createBody({ type: 'dynamic', position: { x, y }, angle, ...extra });
   }
 
+  /** Невыпуклый контур рельефа: нормализация, INSET, разбиение на выпуклые части одного статического тела. */
   private addTerrain(def: TerrainDef): void {
     const body = this.world.createBody({ type: 'static' });
-    const outline = normalizePolygon(def.points.map(([x, y]) => ({ x, y })));
-    const inner = normalizePolygon(insetPolygon(outline, WORLD.INSET));
-    for (const piece of convexPieces(inner, Settings.maxPolygonVertices)) {
-      body.createFixture({ shape: new Polygon(piece), friction: WORLD.GROUND_FRICTION, restitution: WORLD.GROUND_RESTITUTION });
-    }
+    const fd: Omit<FixtureDef, 'shape'> = {
+      friction: WORLD.GROUND_FRICTION, restitution: WORLD.GROUND_RESTITUTION, filterCategoryBits: COLLISION.GROUND,
+    };
+    for (const piece of terrainPieces(def.points, WORLD.INSET, Settings.maxPolygonVertices)) body.createFixture({ shape: new Polygon(piece), ...fd });
     this.register({ kind: 'terrain', id: this.allocId(), body, seed: 0, dead: false });
   }
 
   private addBlock(def: BlockDef): BlockEnt {
     const m = MATERIAL_DEFS[def.material];
     const body = this.dynamicBody(def.x, def.y, def.angle ?? 0);
-    body.createFixture({ shape: blockShape(def), density: m.density, friction: m.friction, restitution: m.restitution });
+    body.createFixture({
+      shape: blockShape(def), density: m.density, friction: m.friction, restitution: m.restitution, filterCategoryBits: COLLISION.BLOCK,
+    });
     const area = shapeArea(def.shape, def.w, def.h);
     const hp = m.hpPerKg * m.density * area; // HP по визуальной площади (03 §3.3)
     return this.register<BlockEnt>({
-      kind: 'block', id: this.allocId(), body, seed: this.rng.next(), dead: false,
-      target: def.material, hp, maxHp: hp, v0: m.v0, blastMult: m.blastMult, stage: 0,
+      kind: 'block', id: this.allocId(), body, seed: this.rng.next(), dead: false, fastUntil: 0,
+      target: def.material, hp, maxHp: hp, scoreHp: hp, v0: m.v0, blastMult: m.blastMult, stage: 0,
       material: def.material, shape: def.shape, w: def.w, h: def.h, area,
     });
   }
@@ -143,43 +161,57 @@ export class PhysicsWorld {
   private addTnt(def: TntDef): TntEnt {
     const size = def.size ?? TNT.SIZE;
     const body = this.dynamicBody(def.x, def.y, def.angle ?? 0);
-    body.createFixture({ shape: new Box(size / 2 - WORLD.INSET, size / 2 - WORLD.INSET), density: TNT.density, friction: TNT.friction, restitution: TNT.restitution });
+    body.createFixture({
+      shape: new Box(size / 2 - WORLD.INSET, size / 2 - WORLD.INSET),
+      density: TNT.density, friction: TNT.friction, restitution: TNT.restitution, filterCategoryBits: COLLISION.BLOCK,
+    });
     const hp = TNT.hpPerKg * TNT.density * size * size;
     return this.register<TntEnt>({
-      kind: 'tnt', id: this.allocId(), body, seed: this.rng.next(), dead: false,
-      target: 'tnt', hp, maxHp: hp, v0: TNT.v0, blastMult: TNT.blastMult, stage: 0, size,
+      kind: 'tnt', id: this.allocId(), body, seed: this.rng.next(), dead: false, fastUntil: 0,
+      target: 'tnt', hp, maxHp: hp, scoreHp: hp, v0: TNT.v0, blastMult: TNT.blastMult, stage: 0, size,
     });
   }
 
   private addPig(def: PigDef): PigEnt {
     const p = PIG_DEFS[def.type];
     const body = this.dynamicBody(def.x, def.y, 0, { angularDamping: PIG_PHYS.ANGULAR_DAMPING, linearDamping: PIG_PHYS.LINEAR_DAMPING });
-    body.createFixture({ shape: new Circle(p.radius), density: p.density, friction: p.friction, restitution: p.restitution });
+    body.createFixture({
+      shape: new Circle(p.radius), density: p.density, friction: p.friction, restitution: p.restitution, filterCategoryBits: COLLISION.PIG,
+    });
     const hp = p.hpPerKg * body.getMass();
     return this.register<PigEnt>({
-      kind: 'pig', id: this.allocId(), body, seed: this.rng.next(), dead: false,
-      target: 'pig', hp, maxHp: hp, v0: DAMAGE.PIG_V0, blastMult: DAMAGE.PIG_BLAST_MULT, stage: 0,
+      kind: 'pig', id: this.allocId(), body, seed: this.rng.next(), dead: false, fastUntil: 0,
+      target: 'pig', hp, maxHp: hp, scoreHp: hp + p.helmetHp, v0: DAMAGE.PIG_V0, blastMult: DAMAGE.PIG_BLAST_MULT, stage: 0,
       type: def.type, radius: p.radius, helmetHp: p.helmetHp,
     });
   }
 
-  /** Тело птицы в момент выстрела (bullet: CCD против туннелирования, 03 §2.5). */
-  addBird(type: BirdType, id: number, seed: number, pos: Vec, vel: Vec, angle: number): BirdEnt {
+  /**
+   * Тело птицы в момент выстрела (bullet: CCD против туннелирования). group — отрицательный groupIndex выстрела:
+   * сёстры Синих и яйцо Матильды друг с другом не сталкиваются.
+   */
+  addBird(type: BirdType, id: number, seed: number, pos: Vec, vel: Vec, angle: number, group: number): BirdEnt {
     const d = BIRD_DEFS[type];
     const body = this.dynamicBody(pos.x, pos.y, angle, { bullet: true, angularDamping: BIRD_FLIGHT.ANGULAR_DAMPING });
     const shape = d.outline
       ? new Polygon(insetPolygon(d.outline.map(([x, y]) => ({ x, y })), WORLD.INSET))
       : new Circle(d.radius);
-    body.createFixture({ shape, density: d.density, friction: d.friction, restitution: d.restitution, filterGroupIndex: BIRD_GROUP });
+    body.createFixture({
+      shape, density: d.density, friction: d.friction, restitution: d.restitution,
+      filterCategoryBits: COLLISION.BIRD, filterGroupIndex: group,
+    });
     body.setLinearVelocity(vel);
-    return this.register<BirdEnt>({ kind: 'bird', id, body, seed, dead: false, type, radius: d.radius, mult: d.mult, damped: false });
+    return this.register<BirdEnt>({ kind: 'bird', id, body, seed, dead: false, type, radius: d.radius, mult: d.mult, damped: false, keep: 1 });
   }
 
   /** Яйцо Матильды: тяжёлый снаряд, взрывается при первом касании. */
-  addEgg(pos: Vec, vel: Vec): EggEnt {
+  addEgg(pos: Vec, vel: Vec, group: number): EggEnt {
     const M = ABILITY.MATILDA;
     const body = this.dynamicBody(pos.x, pos.y, 0, { bullet: true });
-    body.createFixture({ shape: new Circle(M.EGG_RADIUS), density: M.EGG_DENSITY, friction: M.EGG_FRICTION, restitution: 0, filterGroupIndex: BIRD_GROUP });
+    body.createFixture({
+      shape: new Circle(M.EGG_RADIUS), density: M.EGG_DENSITY, friction: M.EGG_FRICTION, restitution: 0,
+      filterCategoryBits: COLLISION.EGG, filterGroupIndex: group,
+    });
     body.setLinearVelocity(vel);
     return this.register<EggEnt>({ kind: 'egg', id: this.allocId(), body, seed: this.rng.next(), dead: false, radius: M.EGG_RADIUS, touched: false });
   }
@@ -187,7 +219,8 @@ export class PhysicsWorld {
   // ── Цикл ─────────────────────────────────────────────────────
 
   step(): void {
-    this.hits.clear();
+    this.hitOf.clear();
+    this.hitList.length = 0;
     this.pierces.length = 0;
     this.world.step(WORLD.DT, WORLD.VEL_ITERS, WORLD.POS_ITERS);
     this.stepNo++;
@@ -196,10 +229,11 @@ export class PhysicsWorld {
     this.detonateEggs();
     this.runChain();
     this.cull();
+    this.updateFastBodies();
     this.flush();
   }
 
-  /** Усадка на старте без урона, затем принудительный сон (03 §2.3). */
+  /** Усадка на старте без урона, затем принудительный сон (00 §1.1). */
   presettle(): void {
     this.damageEnabled = false;
     for (let i = 0; i < WORLD.PRESETTLE_STEPS; i++) this.step();
@@ -215,7 +249,7 @@ export class PhysicsWorld {
     return false;
   }
 
-  /** Тишина: все бодрые тела медленнее порогов, нет летящих яиц и отложенных взрывов (03 §3.8). */
+  /** Тишина: все бодрые тела медленнее порогов, нет летящих яиц и отложенных взрывов (00 §1.9). */
   isQuiet(): boolean {
     if (this.chain.length > 0) return false;
     for (const e of this.ents.values()) {
@@ -242,21 +276,30 @@ export class PhysicsWorld {
     const a = bodyA.getUserData() as Ent;
     const b = bodyB.getUserData() as Ent;
     const wm = c.getWorldManifold(this.wm)!;
+    // скорость точки тела v + ω × (p − c) — без временных векторов (pre-solve вызывается на каждый контакт)
+    const va = bodyA.getLinearVelocity();
+    const vb = bodyB.getLinearVelocity();
+    const ca = bodyA.getWorldCenter();
+    const cb = bodyB.getWorldCenter();
+    const wa = bodyA.getAngularVelocity();
+    const wb = bodyB.getAngularVelocity();
     let vn = 0;
     let px = 0;
     let py = 0;
     for (let i = 0; i < count; i++) {
       const p = wm.points[i];
-      const va = bodyA.getLinearVelocityFromWorldPoint(p);
-      const vb = bodyB.getLinearVelocityFromWorldPoint(p);
-      vn = Math.max(vn, -((vb.x - va.x) * wm.normal.x + (vb.y - va.y) * wm.normal.y));
+      const rx = vb.x - wb * (p.y - cb.y) - (va.x - wa * (p.y - ca.y));
+      const ry = vb.y + wb * (p.x - cb.x) - (va.y + wa * (p.x - ca.x));
+      vn = Math.max(vn, -(rx * wm.normal.x + ry * wm.normal.y));
       px += p.x / count;
       py += p.y / count;
     }
-    let h = this.hits.get(c);
+    let h = this.hitOf.get(c);
     if (!h || h.a !== a || h.b !== b) {
+      // новый контакт шага (или объект пула достался другой паре)
       h = { a, b, J: 0, vn, x: px, y: py, pierced: false };
-      this.hits.set(c, h);
+      this.hitOf.set(c, h);
+      this.hitList.push(h);
     } else if (vn > h.vn) {
       h.vn = vn;
       h.x = px;
@@ -269,7 +312,7 @@ export class PhysicsWorld {
   };
 
   private readonly postSolve = (c: Contact, imp: ContactImpulse): void => {
-    const h = this.hits.get(c);
+    const h = this.hitOf.get(c);
     if (!h) return;
     const ni = imp.normalImpulses; // геттер перезаполняет общий массив — только читаем числа
     for (let i = 0; i < ni.length; i++) h.J += ni[i];
@@ -280,6 +323,7 @@ export class PhysicsWorld {
     const bird = h.a.kind === 'bird' ? h.a : h.b.kind === 'bird' ? h.b : null;
     if (!bird) return;
     const target = bird === h.a ? h.b : h.a;
+    // свинью в каске не прошить: каска держит удар
     if (!isDestructible(target) || target.dead || (target.kind === 'pig' && target.helmetHp > 0)) return;
     const mb = bird.body.getMass();
     const mt = target.body.getMass();
@@ -292,7 +336,7 @@ export class PhysicsWorld {
   }
 
   private resolveHits(): void {
-    for (const h of this.hits.values()) {
+    for (const h of this.hitList) {
       if (h.J <= 0 && !h.pierced) continue;
       if (!h.pierced) {
         this.dampBird(h.a);
@@ -328,24 +372,31 @@ export class PhysicsWorld {
     this.damage(target, mult * excess, share, 'impact');
   }
 
+  /** Урон пробитых целей и потеря скорости птицы: за шаг берётся минимальная доля (00 §1.7). */
   private resolvePierces(): void {
     for (const { bird, target, dmg } of this.pierces) {
       if (target.dead) continue;
-      const keep = Math.min(DAMAGE.PIERCE_KEEP_MAX, Math.max(DAMAGE.PIERCE_KEEP_MIN, 1 - (DAMAGE.PIERCE_KEEP_K * target.hp) / dmg));
+      bird.keep = Math.min(bird.keep, clamp(1 - (DAMAGE.PIERCE_KEEP_K * target.hp) / dmg, DAMAGE.PIERCE_KEEP_MIN, DAMAGE.PIERCE_KEEP_MAX));
       this.damage(target, dmg, 0, 'impact');
+    }
+    for (const { bird } of this.pierces) {
+      if (bird.keep >= 1) continue;
       const v = bird.body.getLinearVelocity();
-      bird.body.setLinearVelocity({ x: v.x * keep, y: v.y * keep });
+      bird.body.setLinearVelocity({ x: v.x * bird.keep, y: v.y * bird.keep });
+      bird.keep = 1;
     }
   }
 
   // ── Урон и удаление ──────────────────────────────────────────
 
-  /** Наносит урон; helmetShare — доля, которую берёт каска свиньи. */
+  /** Наносит урон; helmetShare — доля, которую берёт каска свиньи (лишний урон каски в тело не переходит). */
   private damage(e: Destructible, amount: number, helmetShare: number, cause: KillCause): void {
     if (e.dead || amount <= 0) return;
+    let applied = 0;
     let helmetLost = false;
     if (e.kind === 'pig' && e.helmetHp > 0 && helmetShare > 0) {
       const absorbed = amount * helmetShare;
+      applied += Math.min(absorbed, e.helmetHp);
       e.helmetHp -= absorbed;
       amount -= absorbed;
       if (e.helmetHp <= 0) {
@@ -353,7 +404,7 @@ export class PhysicsWorld {
         helmetLost = true;
       }
     }
-    const applied = Math.min(amount, e.hp);
+    applied += Math.min(amount, e.hp);
     e.hp -= amount;
     const frac = Math.max(0, e.hp / e.maxHp);
     const stage = e.kind === 'pig' ? pigStage(frac) : blockStage(frac);
@@ -369,13 +420,17 @@ export class PhysicsWorld {
     this.kills.push({ e, cause });
   }
 
-  /** Удаляет тело, предварительно разбудив всех, кто его касается (иначе они зависнут спящими). */
+  /** Удаляет тело, предварительно разбудив всех, кто его касается (иначе они зависнут спящими); касание — в supportLost. */
   remove(e: Ent): void {
     if (!this.ents.has(e.id)) return;
     e.dead = true;
+    let touched = false;
     for (let ce = e.body.getContactList(); ce; ce = ce.next) {
-      if (ce.other?.isDynamic()) ce.other.setAwake(true);
+      if (!ce.other?.isDynamic()) continue;
+      ce.other.setAwake(true);
+      touched ||= ce.contact.isTouching();
     }
+    if (touched) this.supportLost++;
     this.world.destroyBody(e.body);
     this.ents.delete(e.id);
     this.listener.removed(e);
@@ -388,23 +443,39 @@ export class PhysicsWorld {
       this.listener.killed(e, cause);
       const { x, y } = e.body.getPosition();
       this.remove(e);
-      if (e.kind !== 'tnt' || cause === 'culled') continue;
+      if (e.kind !== 'tnt') continue;
       if (cause === 'blast') this.chain.push({ at: this.stepNo + CHAIN_STEPS, x, y });
       else this.explode(x, y, 'tnt');
     }
     this.kills.length = 0;
   }
 
+  /** За границами мира: свинья считается убитой, блоки, TNT и яйца исчезают молча. Птиц убирает игровой слой. */
   private cull(): void {
-    const lost: EggEnt[] = [];
+    const lost: Ent[] = [];
     for (const e of this.ents.values()) {
-      if (e.dead || e.kind === 'terrain' || e.kind === 'bird') continue; // птиц убирает игровой слой
+      if (e.dead || e.kind === 'terrain' || e.kind === 'bird') continue;
       const p = e.body.getPosition();
       if (!this.outOfBounds(p.x, p.y)) continue;
-      if (e.kind === 'egg') lost.push(e);
-      else this.kill(e, 'culled');
+      if (e.kind === 'pig') this.kill(e, 'culled');
+      else lost.push(e);
     }
-    for (const egg of lost) this.remove(egg);
+    for (const e of lost) this.remove(e);
+  }
+
+  /** Быстрые обломки на время получают CCD, чтобы не проходить сквозь доски (00 §1.1). */
+  private updateFastBodies(): void {
+    for (const e of this.ents.values()) {
+      if (!isDestructible(e)) continue;
+      const b = e.body;
+      if (b.isAwake() && Vec2.lengthSquared(b.getLinearVelocity()) > FAST_V2) {
+        if (e.fastUntil === 0) b.setBullet(true);
+        e.fastUntil = this.stepNo + FAST_STEPS;
+      } else if (e.fastUntil !== 0 && this.stepNo >= e.fastUntil) {
+        e.fastUntil = 0;
+        b.setBullet(false);
+      }
+    }
   }
 
   private detonateEggs(): void {
@@ -432,7 +503,7 @@ export class PhysicsWorld {
     this.flush();
   }
 
-  /** Радиальный импульс с линейным спадом по расстоянию до поверхности тела и капом Δv (03 §3.7). */
+  /** Радиальный импульс с линейным спадом по расстоянию до поверхности тела и капом Δv (00 §1.8). */
   private explode(x: number, y: number, source: ExplosionSource): void {
     const P = EXPLOSION[source];
     this.listener.exploded(x, y, P.R, source);
@@ -461,7 +532,7 @@ export class PhysicsWorld {
     }
   }
 
-  /** Живые динамические сущности, чьи AABB пересекают квадрат ±r вокруг точки. */
+  /** Живые динамические сущности, чьи AABB пересекают квадрат ±r вокруг точки (без дублей — запрос идёт по фикстурам). */
   bodiesNear(x: number, y: number, r: number): Ent[] {
     const found = new Set<Ent>();
     this.world.queryAABB({ lowerBound: { x: x - r, y: y - r }, upperBound: { x: x + r, y: y + r } }, (f) => {
@@ -483,15 +554,17 @@ export class PhysicsWorld {
     return y;
   }
 
-  /** Точка внутри твёрдого тела (не птицы и не яйца). */
-  isSolidAt(x: number, y: number): boolean {
-    let solid = false;
-    const p = { x, y };
-    this.world.queryAABB({ lowerBound: { x: x - 1e-3, y: y - 1e-3 }, upperBound: { x: x + 1e-3, y: y + 1e-3 } }, (f) => {
-      const kind = (f.getBody().getUserData() as Ent).kind;
-      if (kind !== 'bird' && kind !== 'egg' && f.testPoint(p)) solid = true;
-      return !solid;
+  /** Круг радиуса r в точке p пересекает рельеф, блок, TNT или свинью. */
+  overlapsSolid(p: Vec, r: number): boolean {
+    const probe = new Circle(r);
+    const xf = new Transform(p, 0);
+    let hit = false;
+    this.world.queryAABB({ lowerBound: { x: p.x - r, y: p.y - r }, upperBound: { x: p.x + r, y: p.y + r } }, (f) => {
+      const e = f.getBody().getUserData() as Ent;
+      if (e.kind === 'bird' || e.kind === 'egg' || e.dead) return true;
+      hit = testOverlap(probe, 0, f.getShape(), 0, xf, f.getBody().getTransform());
+      return !hit;
     });
-    return solid;
+    return hit;
   }
 }

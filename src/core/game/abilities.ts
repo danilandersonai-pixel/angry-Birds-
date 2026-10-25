@@ -1,4 +1,4 @@
-// Способности птиц (02 §3, скорости — в долях V_MAX из 03). Вызываются вне шага физики: мир не заблокирован.
+// Способности птиц (00 §1.4, скорости — в долях V_MAX). Вызываются вне шага физики: мир не заблокирован.
 
 import { ABILITY, LAUNCH } from '../../config/constants';
 import type { PhysicsWorld } from '../physics/PhysicsWorld';
@@ -12,10 +12,13 @@ export interface AbilityHost {
   now(): number;
   /** Новая птица того же выстрела (сёстры Синих). */
   spawnBird(parent: Flyer, type: BirdType, pos: Vec, vel: Vec, angle: number, spin: number): void;
-  spawnEgg(pos: Vec, vel: Vec): void;
+  /** Яйцо Матильды — в группе выстрела, с самой Матильдой не сталкивается. */
+  spawnEgg(parent: Flyer, pos: Vec, vel: Vec): void;
   /** Удалить Бомба и взорвать на его месте. */
   explodeBomb(f: Flyer): void;
 }
+
+type Ability = (f: Flyer, host: AbilityHost) => void;
 
 const V = LAUNCH.V_MAX;
 const DEG = Math.PI / 180;
@@ -25,7 +28,7 @@ function speedOf(v: Vec): number {
   return Math.hypot(v.x, v.y);
 }
 
-/** Ред: боевой клич AB2 — толчок тел в конусе по курсу, без урона; сам слегка тормозит. */
+/** Ред (только при ABILITY.RED_BATTLE_CRY, P2): боевой клич AB2 — толчок тел в конусе по курсу, без урона. */
 function battleCry(f: Flyer, host: AbilityHost): void {
   const R = ABILITY.RED;
   const b = f.ent.body;
@@ -49,7 +52,7 @@ function battleCry(f: Flyer, host: AbilityHost): void {
   b.setLinearVelocity({ x: vx * R.SELF_SLOW, y: vy * R.SELF_SLOW });
 }
 
-/** Синие: средняя продолжает полёт, две сестры — с поворотом скорости ±SPREAD и сдвигом поперёк. */
+/** Синие: средняя продолжает полёт, две сестры — с поворотом скорости ±SPREAD и сдвигом поперёк курса. */
 function split(f: Flyer, host: AbilityHost): void {
   const B = ABILITY.BLUES;
   const b = f.ent.body;
@@ -59,17 +62,18 @@ function split(f: Flyer, host: AbilityHost): void {
   if (s < 1e-6) return;
   const nx = -v.y / s;
   const ny = v.x / s;
-  const off = B.OFFSET_R * f.ent.radius;
+  const r = f.ent.radius;
+  const off = B.OFFSET_R * r;
   for (const side of [1, -1]) {
     const ca = Math.cos(side * B.SPREAD_RAD);
     const sa = Math.sin(side * B.SPREAD_RAD);
     let pos = { x: p.x + nx * side * off, y: p.y + ny * side * off };
-    if (host.physics.isSolidAt(pos.x, pos.y)) pos = { x: p.x, y: p.y };
+    if (host.physics.overlapsSolid(pos, r)) pos = { x: p.x, y: p.y }; // сестра не рождается внутри рельефа или блока
     host.spawnBird(f, 'blues', pos, { x: v.x * ca - v.y * sa, y: v.x * sa + v.y * ca }, b.getAngle(), side * B.SPIN);
   }
 }
 
-/** Чак: рывок по текущему курсу, усиление по дереву до первого твёрдого контакта, нос по скорости. */
+/** Чак: рывок по текущему курсу, усиление по дереву до первого контакта, нос по скорости. */
 function boost(f: Flyer): void {
   const C = ABILITY.CHUCK;
   const b = f.ent.body;
@@ -79,12 +83,14 @@ function boost(f: Flyer): void {
   b.setLinearVelocity({ x: (v.x / s) * s2, y: (v.y / s) * s2 });
   f.multAfterHit = f.ent.mult;
   f.ent.mult = { ...f.ent.mult, wood: C.BOOSTED_WOOD };
-  f.control = () => {
+  const align = () => {
     const u = b.getLinearVelocity();
     b.setAngle(Math.atan2(u.y, u.x));
     b.setAngularVelocity(0);
     return true;
   };
+  align();
+  f.control = align;
 }
 
 /** Матильда: яйцо строго вниз, сама — вверх-вперёд под UP_DEG, легче и слабее, улетает. */
@@ -93,7 +99,7 @@ function dropEgg(f: Flyer, host: AbilityHost): void {
   const b = f.ent.body;
   const p = b.getPosition();
   const v = b.getLinearVelocity();
-  host.spawnEgg({ x: p.x, y: p.y - M.EGG_OFFSET_R * f.ent.radius }, { x: 0, y: M.EGG_VY_K * V });
+  host.spawnEgg(f, { x: p.x, y: p.y - M.EGG_OFFSET_R * f.ent.radius }, { x: 0, y: M.EGG_VY_K * V });
   const facing = Math.sign(v.x) || 1;
   const s = Math.max(speedOf(v), M.UP_MIN_K * V);
   b.setLinearVelocity({ x: facing * s * Math.cos(M.UP_DEG * DEG), y: s * Math.sin(M.UP_DEG * DEG) });
@@ -126,6 +132,7 @@ function boomerang(f: Flyer): void {
       left -= da;
       a += side * da;
       b.setLinearVelocity({ x: s * Math.cos(a), y: s * Math.sin(a) });
+      b.setAngularVelocity(side * H.SPIN);
       if (left <= 0) b.setGravityScale(1);
       return true;
     }
@@ -136,7 +143,7 @@ function boomerang(f: Flyer): void {
   };
 }
 
-/** Сильвер: петля 2π без гравитации, затем пике почти вертикально вниз с усилением по камню. */
+/** Сильвер: петля 2π без гравитации (спрайт по касательной), затем пике почти вертикально вниз с усилением по камню. */
 function loopDive(f: Flyer): void {
   const S = ABILITY.SILVER;
   const b = f.ent.body;
@@ -178,17 +185,17 @@ export function silverSlam(host: AbilityHost, x: number, y: number): void {
   }
 }
 
-const ABILITIES: Record<BirdType, (f: Flyer, host: AbilityHost) => void> = {
+/** Способности по птицам; у Теренса способности нет, клич Ред включается флагом (Flyer.hasAbility). */
+const ABILITIES: Partial<Record<BirdType, Ability>> = {
   red: battleCry,
   blues: split,
   chuck: boost,
   bomb: (f, host) => host.explodeBomb(f),
   matilda: dropEgg,
   hal: boomerang,
-  terence: () => {}, // только рык (звук по событию ability)
   silver: loopDive,
 };
 
 export function useAbility(f: Flyer, host: AbilityHost): void {
-  ABILITIES[f.ent.type](f, host);
+  ABILITIES[f.ent.type]?.(f, host);
 }

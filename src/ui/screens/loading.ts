@@ -1,9 +1,15 @@
-// Экран загрузки (07 §6): небо, земля, прыгающая Ред, мини-логотип, полосатый прогресс-бар и советы.
+// Экран загрузки (07 §6): тот же пейзаж, что у меню (paintScene, статично), прыгающая Ред, компактный объёмный логотип
+// (как на титуле — переход загрузка → титул без скачка стиля), полосатый прогресс-бар и советы.
 
-import { characterCanvas } from '../art';
+import { characterCanvas, paintScene } from '../art';
 import type { View } from '../ctx';
 import { h } from '../dom';
+import { logoLines } from '../logo';
 import { S, TIPS, t } from '../strings';
+
+/** Пейзаж загрузки: как фон меню в предпросмотре (зерно 3, земля 18 %). */
+const SCENE_SEED = 3;
+const SCENE_GROUND = 0.18;
 
 export class LoadingView implements View {
   readonly id = 'loading' as const;
@@ -19,6 +25,9 @@ export class LoadingView implements View {
   private tipTimer = 0;
   private tipIdx = -1;
   private fixedTip: string | null = null;
+  private readonly bg: HTMLCanvasElement;
+  private readonly ro: ResizeObserver | null = null;
+  private paintedFor = '';
 
   constructor() {
     this.fill = h('div', { class: 'bar-fill' });
@@ -33,22 +42,47 @@ export class LoadingView implements View {
     this.pct = h('div', { class: 'ld-pct ts', text: t('bootLoading', { p: 0 }) });
     this.tipEl = h('p', { class: 'ld-tip ts', 'aria-live': 'polite' });
     const bird = h('div', { class: 'ld-bird' }, h('div', { class: 'ld-shadow' }), characterCanvas('bird', 'red', 'idle', 58));
+    this.bg = h('canvas', { class: 'ld-bg', 'aria-hidden': 'true' });
     this.el = h(
       'section',
       { class: 'scr scr-loading', 'aria-label': S.appTitle },
-      h('div', { class: 'ld-cloud', style: 'left:8%;top:14%' }),
-      h('div', { class: 'ld-cloud', style: 'left:62%;top:8%;scale:1.25;animation-delay:-12s' }),
-      h('div', { class: 'ld-cloud', style: 'left:80%;top:34%;scale:.8;animation-delay:-25s' }),
-      h('div', { class: 'ld-ground' }),
+      this.bg,
       bird,
-      h('div', { class: 'ld-logo ts', text: S.appTitle, style: '--stroke: 0.2em; --stroke-c: #6a1408; color: #ffd23a' }),
+      h('div', { class: 'logo logo--compact', 'aria-hidden': 'true' }, ...logoLines(false)),
       this.bar,
       this.pct,
       this.tipEl,
     );
+    if (typeof ResizeObserver !== 'undefined') {
+      this.ro = new ResizeObserver(() => this.paint());
+      this.ro.observe(this.el);
+    }
+  }
+
+  /** Нарисовать пейзаж под размер экрана (только при смене размера). */
+  private paint(): void {
+    const w = this.el.clientWidth;
+    const hh = this.el.clientHeight;
+    if (!w || !hh) return;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const key = `${w}x${hh}@${dpr}`;
+    if (key === this.paintedFor) return;
+    this.paintedFor = key;
+    const cw = Math.round(w * dpr);
+    const ch = Math.round(hh * dpr);
+    this.bg.width = cw;
+    this.bg.height = ch;
+    const c = this.bg.getContext('2d');
+    if (!c) return;
+    try {
+      paintScene(c, cw, ch, 'meadow', SCENE_SEED, SCENE_GROUND);
+    } catch {
+      /* без пейзажа остаётся CSS-небо */
+    }
   }
 
   enter(): void {
+    this.paint();
     this.tipTimer = window.setTimeout(() => this.nextTip(), 500);
   }
 
@@ -104,5 +138,6 @@ export class LoadingView implements View {
   destroy(): void {
     cancelAnimationFrame(this.raf);
     window.clearTimeout(this.tipTimer);
+    this.ro?.disconnect();
   }
 }

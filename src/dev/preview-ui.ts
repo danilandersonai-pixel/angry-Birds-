@@ -1,8 +1,13 @@
 // Предпросмотр интерфейса: мок-эпизоды (3 × 10 уровней), мок-прогресс и мок-звук, фон-заглушка на canvas.
 // Параметры URL:
-//   ?screen=loading|title|episodes|levels|game|pause|win|win3|lose — сразу показать экран;
+//   ?screen=loading|title|episodes|levels|game|home|ability|banner|bannerwin|pause|settings|confirm|win|win3|winmsg|lose|lose3 — сразу показать экран;
+//     winmsg — победа в 1-10 без звёзд на эпизод 2 (сообщение под счётом); bannerwin — баннер, затем панель победы (FLIP ленты);
+//     home — игра с кнопкой «К рогатке» и подписью «Коснитесь, чтобы пропустить»; banner — лента «Уровень пройден!»;
+//     ability — подсказка способности Чака;
+//     settings/confirm — диалог настроек / подтверждение сброса; lose3 — третье поражение подряд (с советом);
 //   &ep=2 — эпизод для levels; &static=1 — анимации победы/поражения сразу в финале;
-//   &bg=css — запасной CSS-фон вместо canvas; &fresh=1 — «новый игрок» без прогресса.
+//   &bg=css — запасной CSS-фон вместо canvas; &fresh=1 — «новый игрок» без прогресса;
+//   &motion=reduce|full — принудительно уменьшить/включить движение; &all=1 — открыть все уровни.
 
 import type { BirdType, EpisodeDef, LevelDef, PigType, ThemeId } from '../core/types';
 import { renderBird } from '../render/sprites/birds';
@@ -53,6 +58,7 @@ const progress = new ProgressStore({
   setItem: (k, v) => void mem.set(k, v),
   removeItem: (k) => void mem.delete(k),
 });
+if (params.get('all') === '1') progress.unlockAll = true;
 if (params.get('fresh') !== '1') {
   const ep1 = [3, 3, 2, 3, 1, 2, 3, 1];
   ep1.forEach((s, i) => progress.saveResult(`1-${i + 1}`, 30000 + s * 9000 + i * 1234, s));
@@ -80,14 +86,35 @@ const sprites = {
 };
 
 function drawScene(): void {
-  const dpr = Math.min(2, window.devicePixelRatio || 1);
-  const w = Math.round(window.innerWidth * dpr);
-  const h = Math.round(window.innerHeight * dpr);
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w;
-    canvas.height = h;
-  }
   const c = canvas.getContext('2d')!;
+  c.save();
+  try {
+    drawSceneInner(c);
+  } finally {
+    c.restore();
+  }
+}
+
+function drawSceneInner(c: CanvasRenderingContext2D): void {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const fullW = Math.round(window.innerWidth * dpr);
+  const fullH = Math.round(window.innerHeight * dpr);
+  if (canvas.width !== fullW || canvas.height !== fullH) {
+    canvas.width = fullW;
+    canvas.height = fullH;
+  }
+  // «Играть так» в портрете: сцена — в полосе 16:9 по ширине, как и интерфейс
+  const lb = uiReady && ui.letterbox;
+  const w = fullW;
+  const h = lb ? Math.round((fullW * 9) / 16) : fullH;
+  if (lb) {
+    c.fillStyle = '#0b1a2b';
+    c.fillRect(0, 0, fullW, fullH);
+    c.translate(0, Math.round((fullH - h) / 2));
+    c.beginPath();
+    c.rect(0, 0, w, h);
+    c.clip();
+  }
   paintScene(c, w, h, sceneTheme, 3, 0.18);
   if (!sceneGame) return;
   // упрощённая «игровая» сцена: рогатка с птицей и домик со свиньями
@@ -138,6 +165,7 @@ window.addEventListener('resize', drawScene);
 // ───────────── UI ─────────────
 const stage = document.getElementById('stage')!;
 let ui!: UI;
+let uiReady = false;
 const levelById = (id: string): LevelDef | undefined => allLevels.find((l) => l.id === id);
 let current: LevelDef = levelById('1-3')!;
 
@@ -174,23 +202,28 @@ ui = new UI(stage, {
     const n = allLevels[i + 1];
     if (n) window.setTimeout(() => enterGame(n), 250);
   },
+  onSkip: () => {
+    console.debug('[app] skip');
+    ui.hideBanner();
+  },
+  onCameraHome: () => {
+    console.debug('[app] camera home');
+    ui.setCameraHome(false);
+  },
+  onScreenChange: (screen, theme) => {
+    console.debug('[app] screen', screen, theme);
+    sceneTheme = theme;
+    sceneGame = screen === 'game';
+    drawScene();
+  },
+  onSettingsChange: (st) => console.debug('[app] settings', st),
 });
+uiReady = true;
 if (params.get('bg') === 'css') ui.setMenuBackground('css');
+const motionParam = params.get('motion');
+if (motionParam === 'reduce' || motionParam === 'full') ui.setMotion(motionParam === 'reduce');
 (window as unknown as { __ui: UI; __progress: ProgressStore }).__ui = ui;
 (window as unknown as { __progress: ProgressStore }).__progress = progress;
-
-// следим за темой фона меню
-const syncTheme = (): void => {
-  const lv = document.querySelector<HTMLElement>('.scr-levels');
-  const t = (lv?.dataset.theme as ThemeId | undefined) ?? (ui.screen === 'game' ? current.theme : 'meadow');
-  const g = ui.screen === 'game';
-  if (t !== sceneTheme || g !== sceneGame) {
-    sceneTheme = t;
-    sceneGame = g;
-    drawScene();
-  }
-};
-new MutationObserver(syncTheme).observe(stage, { subtree: true, childList: true });
 
 function gameWith(score: number, pigs: number): void {
   enterGame(current);
@@ -211,11 +244,30 @@ switch (screenParam) {
   case 'game':
     gameWith(23450, 2);
     if (current.hint) ui.showHint(current.hint);
-    else ui.showHint('Синие делятся на троих — отлично бьют стекло!', 60000);
+    else ui.showHint('Синие делятся на троих — отлично бьют стекло!', 60000, { bird: 'blues' });
+    break;
+  case 'home':
+    gameWith(0, 3);
+    ui.setCameraHome(true);
+    ui.setSkipHint(true);
+    break;
+  case 'ability':
+    gameWith(5200, 3);
+    ui.abilityHint('chuck', 60000);
+    break;
+  case 'banner':
+    gameWith(48200, 0);
+    ui.showBanner('Уровень пройден!', 0, { kind: 'win', badge: 'Одним выстрелом!' });
     break;
   case 'pause':
     gameWith(23450, 2);
     ui.showPause();
+    break;
+  case 'settings':
+  case 'confirm':
+    ui.showTitle();
+    ui.openSettings();
+    if (screenParam === 'confirm') window.setTimeout(() => document.querySelector<HTMLButtonElement>('[data-testid="set-reset"]')?.click(), 50);
     break;
   case 'win':
   case 'win3': {
@@ -229,9 +281,29 @@ switch (screenParam) {
     if (isStatic) window.setTimeout(() => ui.finishAnimations(), 30);
     break;
   }
+  case 'winmsg': {
+    // последний уровень эпизода пройден, но звёзд на следующий эпизод не хватает — сообщение под счётом
+    progress.reset();
+    for (let i = 1; i <= 9; i++) progress.saveResult(`1-${i}`, 20000, 1);
+    current = levelById('1-10')!;
+    gameWith(31200, 0);
+    progress.saveResult('1-10', 31200, 2);
+    ui.showWin({ levelId: '1-10', score: 31200, best: 31200, stars: 2, newRecord: false, hasNext: progress.isUnlocked('2-1', allLevels.map((l) => l.id)) });
+    if (isStatic) window.setTimeout(() => ui.finishAnimations(), 30);
+    break;
+  }
+  case 'bannerwin': {
+    // баннер «Уровень пройден!», через 0.9 с — панель победы (лента перелетает из баннера)
+    gameWith(48200, 0);
+    ui.showBanner('Уровень пройден!', 0, { kind: 'win', badge: 'Одним выстрелом!' });
+    window.setTimeout(() => ui.showWin({ levelId: current.id, score: 48200, best: 50468, stars: 3, newRecord: false, hasNext: true }), 900);
+    break;
+  }
   case 'lose':
+  case 'lose3':
     gameWith(12340, 2);
-    ui.showLose({ levelId: current.id });
+    if (screenParam === 'lose3') for (let i = 0; i < 3; i++) progress.saveLoss(current.id);
+    ui.showLose({ levelId: current.id, score: 12340 });
     if (isStatic) window.setTimeout(() => ui.finishAnimations(), 30);
     break;
   default:

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { LAUNCH, SLINGSHOT } from '../../src/config/constants';
+import { BIRDS, LAUNCH, SLINGSHOT, TIMING } from '../../src/config/constants';
+import { createSession } from '../../src/core';
 import { hutLevel, openField } from '../fixtures/levels';
-import { ofType, readySession, runFor } from './helpers';
+import { ofType, readySession, runFor, runUntil } from './helpers';
 
 const dist = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, a.y - b.y);
 
@@ -11,7 +12,7 @@ describe('рогатка', () => {
     const { pocket } = s.slingshot();
     expect(s.canGrab(pocket)).toBe(true);
     expect(s.canGrab({ x: pocket.x + 0.9, y: pocket.y })).toBe(true);
-    expect(s.canGrab({ x: pocket.x + 3, y: pocket.y })).toBe(false);
+    expect(s.canGrab({ x: pocket.x + LAUNCH.GRAB_RADIUS + 0.05, y: pocket.y })).toBe(false);
     s.launch(30, 1);
     expect(s.canGrab(pocket)).toBe(false);
   });
@@ -117,16 +118,51 @@ describe('рогатка', () => {
     expect(Math.abs(v.pocket.x - v.anchor.x)).toBeLessThan(0.01);
   });
 
-  it('очередь стоит на земле слева от рогатки', () => {
-    const s = readySession(hutLevel(['red', 'blues', 'terence']));
+  it('очередь стоит на земле слева от рогатки с шагом max(1.1, r_i + r_{i+1} + 0.2)', () => {
+    const s = readySession(hutLevel(['red', 'blues', 'terence', 'bomb', 'blues']));
     const q = s.queue();
     const sl = s.slingshot();
     const baseX = sl.anchor.x - SLINGSHOT.ANCHOR.x;
-    expect(q.map((b) => b.type)).toEqual(['blues', 'terence']);
+    expect(q.map((b) => b.type)).toEqual(['blues', 'terence', 'bomb', 'blues']);
     expect(q[0].x).toBeCloseTo(baseX - SLINGSHOT.QUEUE_X0, 9);
-    expect(q[1].x).toBeCloseTo(baseX - SLINGSHOT.QUEUE_X0 - SLINGSHOT.QUEUE_DX, 9);
-    expect(q[0].y).toBeCloseTo(q[0].radius, 6);
-    expect(q[1].y).toBeCloseTo(q[1].radius, 6);
+    const r = (t: keyof typeof BIRDS) => BIRDS[t].radius;
+    const gaps = [
+      Math.max(SLINGSHOT.QUEUE_DX, r('blues') + r('terence') + LAUNCH.QUEUE_GAP), // 1.252
+      Math.max(SLINGSHOT.QUEUE_DX, r('terence') + r('bomb') + LAUNCH.QUEUE_GAP), // 1.585
+      SLINGSHOT.QUEUE_DX, // bomb + blues = 1.037 < 1.1
+    ];
+    gaps.forEach((g, i) => expect(q[i].x - q[i + 1].x).toBeCloseTo(g, 9));
+    for (const b of q) expect(b.y).toBeCloseTo(b.radius, 6);
     expect(s.slingshot().loaded).toBe('red');
+  });
+
+  it('загрузка: птица прыгает в кармашек за 0.45 с с пиком над прямой, очередь сдвигается за 0.3 с', () => {
+    const s = createSession(hutLevel(['red', 'blues', 'red']), { seed: 1 });
+    expect(s.state).toBe('loading');
+    const start = s.queue();
+    expect(start).toHaveLength(3);
+    runFor(s, 0.2);
+    const mid = s.queue();
+    const u = 0.5 - 0.5 * Math.cos(Math.PI * (0.2 / TIMING.BIRD_HOP_TIME));
+    const anchor = s.slingshot().anchor;
+    expect(mid[0].y).toBeGreaterThan(start[0].y + (anchor.y - start[0].y) * u); // выше хорды
+    runFor(s, 0.1);
+    expect(s.queue()[1].x).toBeCloseTo(start[0].x, 6); // вторая птица встала на первое место
+    const events = runUntil(s, () => s.state === 'ready', 1);
+    expect(s.time).toBeCloseTo(TIMING.BIRD_HOP_TIME, 6);
+    expect(ofType(events, 'birdLoaded').map((e) => e.bird)).toEqual(['red']);
+    expect(s.queue()).toHaveLength(2);
+    expect(s.slingshot().loaded).toBe('red');
+  });
+
+  it('прицел строится от точки захвата: птица не прыгает под палец', () => {
+    const s = readySession(hutLevel());
+    const sl = s.slingshot();
+    s.beginAim();
+    const grab = { x: sl.pocket.x + 0.4, y: sl.pocket.y - 0.3 }; // захват не по центру птицы
+    s.updateAim(grab);
+    expect(dist(s.slingshot().pocket, sl.pocket)).toBeLessThan(1e-9);
+    s.updateAim({ x: grab.x - 1, y: grab.y });
+    expect(s.slingshot().pocket.x).toBeCloseTo(sl.pocket.x - 1, 9);
   });
 });

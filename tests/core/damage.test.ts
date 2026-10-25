@@ -1,26 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { EXPLOSION, PIGS } from '../../src/config/constants';
+import { BIRD_FLIGHT, EXPLOSION, PIGS, WORLD } from '../../src/config/constants';
 import type { Ent, PigEnt } from '../../src/core/physics/entities';
 import type { PhysicsWorld } from '../../src/core/physics/PhysicsWorld';
 import type { LevelDef } from '../../src/core/types';
 import { level, pigOn, rect, tower } from '../fixtures/levels';
-import { physicsOf, stepWorld } from './helpers';
+import { lift, physicsOf, stepWorld } from './helpers';
 
 const blocks = (pw: PhysicsWorld) => [...pw.ents.values()].filter((e) => e.kind === 'block');
 const pigs = (pw: PhysicsWorld) => [...pw.ents.values()].filter((e): e is PigEnt => e.kind === 'pig');
 const pos = (e: Ent) => ({ x: e.body.getPosition().x, y: e.body.getPosition().y });
 
-/** Поднимает тело на высоту y (после усадки) и отпускает. */
-function lift(e: Ent, y: number): void {
-  e.body.setTransform({ x: e.body.getPosition().x, y }, 0);
-  e.body.setLinearVelocity({ x: 0, y: 0 });
-  e.body.setAwake(true);
-}
-
 /** Red летит горизонтально в тело слева (стартует вплотную, чтобы не успеть упасть). */
 function redInto(pw: PhysicsWorld, target: Ent, halfW: number, speed: number): void {
   const p = pos(target);
-  pw.addBird('red', pw.allocId(), 0, { x: p.x - halfW - 0.5, y: Math.max(0.47, p.y) }, { x: speed, y: 0 }, 0);
+  pw.addBird('red', pw.allocId(), 0, { x: p.x - halfW - 0.5, y: Math.max(0.47, p.y) }, { x: speed, y: 0 }, 0, -1);
 }
 
 describe('урон и разрушение', () => {
@@ -116,7 +109,7 @@ describe('урон и разрушение', () => {
     });
     const { pw, log } = physicsOf(L);
     const tnt = [...pw.ents.values()].find((e) => e.kind === 'tnt')!;
-    pw.addBird('red', pw.allocId(), 0, { x: 10, y: 3 }, { x: 0, y: -20 }, 0); // сверху в первый ящик
+    pw.addBird('red', pw.allocId(), 0, { x: 10, y: 3 }, { x: 0, y: -20 }, 0, -1); // сверху в первый ящик
     stepWorld(pw, 1.5);
     const kinds = log.killed.map((k) => k.e.kind);
     expect(kinds.filter((k) => k === 'tnt')).toHaveLength(2);
@@ -153,5 +146,62 @@ describe('урон и разрушение', () => {
     pw.step();
     expect(log.killed).toEqual([{ e: pig, cause: 'culled' }]);
     expect(pw.ents.has(pig.id)).toBe(false);
+  });
+  it('блоки всех форм (rect, circle, triangle, isoTriangle, зеркальный triangle) стоят встык без сдвига', () => {
+    const L = level({
+      blocks: [
+        rect('wood', 20, 0.5, 4, 1),
+        { material: 'stone', shape: 'triangle', x: 18.5, y: 1.5, w: 1, h: 1 },
+        { material: 'stone', shape: 'triangle', x: 21.5, y: 1.5, w: 1, h: 1, angle: Math.PI / 2 }, // зеркальный: w и h переставлены
+        { material: 'ice', shape: 'isoTriangle', x: 20, y: 1.75, w: 2, h: 1.5 },
+        { material: 'stone', shape: 'circle', x: 26, y: 0.5, w: 1, h: 1 },
+      ],
+    });
+    const { pw, log } = physicsOf(L);
+    for (const [i, b] of blocks(pw).entries()) {
+      const d = L.blocks[i];
+      expect(Math.hypot(pos(b).x - d.x, pos(b).y - d.y)).toBeLessThan(0.02);
+    }
+    for (const e of pw.ents.values()) e.body.setAwake(true);
+    stepWorld(pw, 5);
+    expect(log.damage).toBe(0);
+    // масса — по сжатому на INSET контуру, HP — по визуальной площади
+    const tri = blocks(pw)[1];
+    expect(tri.kind === 'block' && tri.maxHp).toBeCloseTo(27 * 2.2 * 0.5, 6);
+    expect(tri.body.getMass()).toBeLessThan(2.2 * 0.5);
+    expect(tri.body.getMass()).toBeGreaterThan(2.2 * 0.5 * 0.93);
+  });
+
+  it('после первого контакта птица демпфируется (lin 1.5 / ang 4), в полёте — нет', () => {
+    const { pw } = physicsOf(level({}));
+    const bird = pw.addBird('red', pw.allocId(), 0, { x: 0, y: 3 }, { x: 10, y: 0 }, 0, -1);
+    expect(bird.body.isBullet()).toBe(true);
+    expect(bird.body.getLinearDamping()).toBe(0);
+    expect(bird.body.getAngularDamping()).toBe(BIRD_FLIGHT.ANGULAR_DAMPING);
+    stepWorld(pw, 1);
+    expect(bird.body.getLinearDamping()).toBe(BIRD_FLIGHT.HIT_LINEAR_DAMPING);
+    expect(bird.body.getAngularDamping()).toBe(BIRD_FLIGHT.HIT_ANGULAR_DAMPING);
+  });
+
+  it('быстрый обломок (> 25 м/с) получает bullet на 1 с', () => {
+    const { pw } = physicsOf(level({ blocks: [rect('wood', 20, 5, 0.5, 0.5)] }));
+    const cube = blocks(pw)[0];
+    cube.body.setLinearVelocity({ x: 30, y: 10 });
+    pw.step();
+    expect(cube.body.isBullet()).toBe(true);
+    cube.body.setLinearVelocity({ x: 1, y: 0 });
+    stepWorld(pw, WORLD.FAST_BULLET_T - 0.1);
+    expect(cube.body.isBullet()).toBe(true);
+    stepWorld(pw, 0.2);
+    expect(cube.body.isBullet()).toBe(false);
+  });
+
+  it('блок за границей мира исчезает молча (без гибели и очков)', () => {
+    const { pw, log } = physicsOf(level({ blocks: [rect('wood', 20, 0.5, 1, 1)] }));
+    const b = blocks(pw)[0];
+    b.body.setTransform({ x: 20, y: -30 }, 0);
+    pw.step();
+    expect(pw.ents.has(b.id)).toBe(false);
+    expect(log.killed).toHaveLength(0);
   });
 });

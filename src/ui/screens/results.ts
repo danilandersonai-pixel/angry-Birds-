@@ -5,11 +5,11 @@
 import { characterCanvas } from '../art';
 import { CSS_EASE, Timeline, anim, done, motion, popIn } from '../anim';
 import type { OverlayView, UiCtx } from '../ctx';
-import { button, focusEl, h, ribbon } from '../dom';
+import { appendAll, button, fitInto, focusEl, h, ribbon } from '../dom';
 import { confetti, starBoom } from '../fx';
 import { starSvg } from '../icons';
-import { S, STARS, STARS_ACC, TAUNTS, fmt, plural, t } from '../strings';
-import { episodeStarsNeeded } from '../../storage/progress';
+import { S, STARS, TAUNTS, fmt, plural, t } from '../strings';
+import { episodeGate, gateText } from '../rules';
 
 export interface WinResult {
   levelId: string;
@@ -28,28 +28,79 @@ const WIN_T = {
 
 const STAR_SFX = ['star1', 'star2', 'star3'] as const;
 
-/** Общий каркас оверлея результата: затемнение + центр с лентой и панелью. */
-function frame(kind: 'win' | 'lose', title: string, testid: string): { el: HTMLElement; backdrop: HTMLElement; res: HTMLElement; rib: HTMLElement; panel: HTMLElement } {
+/** Как открыть оверлей результата. */
+export interface ResultOpts {
+  /** Где на экране была лента-баннер (07 §12.1–12.2): лента панели перелетит из этого места (FLIP), а не упадёт сверху. */
+  ribbonFrom?: DOMRect;
+}
+
+interface Frame {
+  el: HTMLElement;
+  backdrop: HTMLElement;
+  res: HTMLElement;
+  rib: HTMLElement;
+  panel: HTMLElement;
+  /** Вписать .res в окно (CSS scale) — синхронно; дальше следит ResizeObserver. */
+  fit: () => void;
+  unfit: () => void;
+}
+
+
+/**
+ * Общий каркас оверлея результата: затемнение + центр с лентой и панелью; панель с лентой вписывается в окно.
+ * below — подпись под панелью (например, «Коснитесь, чтобы пропустить»): видна, только если под панелью есть место.
+ */
+function frame(kind: 'win' | 'lose', title: string, testid: string, below?: HTMLElement): Frame {
   const backdrop = h('div', { class: 'ov-backdrop' });
   const rib = ribbon(kind, title, `abui-res-title`);
   const panel = h('div', { class: 'panel res-panel' });
   const res = h('div', { class: `res res--${kind}` }, rib, panel);
+  const center = h('div', { class: 'ov-center' }, res);
   const el = h(
     'div',
     { class: `ov ov-${kind}`, role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'abui-res-title', 'data-testid': testid },
     backdrop,
-    h('div', { class: 'ov-center' }, res),
+    center,
+    below,
   );
-  return { el, backdrop, res, rib, panel };
+  const fitter = fitInto(res, center, () => {
+    if (!below) return;
+    const cs = getComputedStyle(below);
+    const need = (parseFloat(cs.bottom) || 0) + parseFloat(cs.fontSize) * 1.25 + 6; // подпись прижата к низу окна
+    below.hidden = el.getBoundingClientRect().bottom - res.getBoundingClientRect().bottom < need;
+  });
+  return { el, backdrop, res, rib, panel, fit: fitter.fit, unfit: fitter.dispose };
 }
 
-function enterFrame(backdrop: HTMLElement, panel: HTMLElement, rib: HTMLElement): void {
+/** Подпись «1-3 · Название» вверху панели — одинаково на победе и поражении. */
+function levelCaption(ctx: UiCtx, levelId: string): HTMLElement | null {
+  const loc = ctx.loc(levelId);
+  return loc ? h('div', { class: 'res-level ts', 'data-testid': 'results-level' }, h('span', { class: 'num', text: loc.level.id }), ` · ${loc.level.name}`) : null;
+}
+
+function enterFrame(f: Frame, from?: DOMRect): void {
+  f.fit();
+  const { backdrop, panel, rib, res } = f;
   anim(backdrop, [{ opacity: 0 }, { opacity: 1 }], { duration: 250, fill: 'backwards' });
   if (motion.reduced) {
-    anim(panel.parentElement!, [{ opacity: 0 }, { opacity: 1 }], { duration: 150, fill: 'backwards' });
+    anim(res, [{ opacity: 0 }, { opacity: 1 }], { duration: 150, fill: 'backwards' });
     return;
   }
   anim(panel, [{ transform: 'translateY(110vh)' }, { transform: 'none' }], { duration: 420, easing: CSS_EASE.back, fill: 'backwards' });
+  if (from && from.width > 0) {
+    // FLIP: та же лента перелетает из баннера в заголовок панели (07 §12.2), 0.35 с ease-in-out
+    const to = rib.getBoundingClientRect();
+    const k = Number(res.style.scale) || 1; // смещение — в координатах ленты (внутри масштабированного .res)
+    const dx = (from.left + from.width / 2 - (to.left + to.width / 2)) / k;
+    const dy = (from.top + from.height / 2 - (to.top + to.height / 2)) / k;
+    const s = from.width / Math.max(1, to.width);
+    anim(rib, [{ transform: `translate(${dx.toFixed(1)}px, ${dy.toFixed(1)}px) scale(${s.toFixed(3)})` }, { transform: 'none' }], {
+      duration: 350,
+      easing: CSS_EASE.inout,
+      fill: 'backwards',
+    });
+    return;
+  }
   anim(
     rib,
     [
@@ -71,9 +122,8 @@ async function leaveFrame(el: HTMLElement): Promise<void> {
 export class WinView implements OverlayView {
   readonly kind = 'win' as const;
   readonly el: HTMLElement;
-  private readonly backdrop: HTMLElement;
+  private readonly f: Frame;
   private readonly panel: HTMLElement;
-  private readonly rib: HTMLElement;
   private readonly slots: HTMLElement[] = [];
   private readonly scoreEl: HTMLElement;
   private readonly bestEl: HTMLElement;
@@ -89,13 +139,14 @@ export class WinView implements OverlayView {
   constructor(
     private readonly ctx: UiCtx,
     r: WinResult,
+    private readonly opts: ResultOpts = {},
   ) {
     this.r = { ...r, stars: Math.max(0, Math.min(3, Math.round(r.stars))), score: Math.max(0, Math.floor(r.score)) };
-    const f = frame('win', S.winBanner, 'results-won');
+    this.skipHint = h('div', { class: 'res-skip ts', text: S.winTapSkip, 'aria-hidden': 'true' });
+    const f = frame('win', S.winBanner, 'results-won', this.skipHint);
+    this.f = f;
     this.el = f.el;
-    this.backdrop = f.backdrop;
     this.panel = f.panel;
-    this.rib = f.rib;
 
     const stars = h('div', { class: 'res-stars', role: 'img', 'aria-label': `${this.r.stars} ${plural(this.r.stars, STARS)} из 3` });
     for (let i = 0; i < 3; i++) {
@@ -125,17 +176,17 @@ export class WinView implements OverlayView {
       const nextLoc = nextId ? ctx.loc(nextId) : undefined;
       if (!nextLoc) msg = S.winAllDone;
       else if (nextLoc.episode.id !== loc.episode.id) {
-        const need = episodeStarsNeeded(loc.episode.levels.length);
-        const got = ctx.deps.progress.starsTotal(loc.episode.levels.map((l) => l.id));
-        const n = Math.max(1, need - got);
-        msg = t('winLockedNext', { n, stars: plural(n, STARS_ACC), name: nextLoc.episode.name });
+        // та же причина, что на карточке эпизода; если эпизод на деле открыт — сообщения нет
+        msg = gateText(episodeGate(ctx.deps.progress, ctx.deps.episodes, ctx.order, nextLoc.epIndex), 'win', nextLoc.episode.name);
       }
     }
     this.primary = next ?? again;
     for (const b of this.btns) b.setAttribute('aria-disabled', 'true');
 
-    this.panel.append(
+    appendAll(
+      this.panel,
       h('div', { class: 'res-rays-clip', 'aria-hidden': 'true' }, h('div', { class: 'res-glow' }), h('div', { class: 'res-rays' })),
+      levelCaption(ctx, this.r.levelId),
       stars,
       h('div', { class: 'res-label', text: S.winScore }),
       this.scoreEl,
@@ -143,8 +194,6 @@ export class WinView implements OverlayView {
       ...(msg ? [h('div', { class: 'res-msg', text: msg })] : []),
       h('div', { class: 'res-btns' }, ...this.btns),
     );
-    this.skipHint = h('div', { class: 'res-skip ts', text: S.winTapSkip, 'aria-hidden': 'true' });
-    this.el.append(this.skipHint);
     // тап мимо кнопок — пропустить анимацию
     this.el.addEventListener('click', (e) => {
       if ((e.target as HTMLElement).closest('.btn:not([aria-disabled="true"])')) return;
@@ -152,17 +201,15 @@ export class WinView implements OverlayView {
     });
   }
 
+  /** Нажатие кнопки во время анимации доводит таймлайн до конца и сразу выполняет действие (07 §12.3). */
   private act(fn: () => void, sound: 'click' | 'back' = 'click'): void {
-    if (!this.finished) {
-      this.skip();
-      return;
-    }
+    if (!this.finished) this.skip();
     this.ctx.sfx(sound);
     fn();
   }
 
   enter(): void {
-    enterFrame(this.backdrop, this.panel, this.rib);
+    enterFrame(this.f, this.opts.ribbonFrom);
     this.ctx.sfx('win');
     const T = motion.reduced ? WIN_T.reduced : WIN_T.full;
     const tl = new Timeline();
@@ -302,6 +349,10 @@ export class WinView implements OverlayView {
     return leaveFrame(this.el);
   }
 
+  relayout(): void {
+    this.f.fit();
+  }
+
   focus(): void {
     if (this.finished) {
       focusEl(this.primary);
@@ -340,6 +391,7 @@ export class WinView implements OverlayView {
 
   destroy(): void {
     this.tl?.stop();
+    this.f.unfit();
   }
 }
 
@@ -347,12 +399,19 @@ export class WinView implements OverlayView {
 
 const TEAR = '<svg class="tear" viewBox="-1 -1 14 20"><path d="M6 0C6 0 0 7 0 10.5a6 6 0 0 0 12 0C12 7 6 0 6 0z"/></svg>';
 
+/** Данные поражения для панели (07 §13.2). */
+export interface LoseResult {
+  levelId: string;
+  /** Совет (после трёх поражений подряд); при совете дразнилку не показываем — экономим высоту. */
+  tip?: string;
+  /** Счёт попытки: «Счёт: 23 450». */
+  score?: number;
+}
+
 export class LoseView implements OverlayView {
   readonly kind = 'lose' as const;
   readonly el: HTMLElement;
-  private readonly backdrop: HTMLElement;
-  private readonly panel: HTMLElement;
-  private readonly rib: HTMLElement;
+  private readonly f: Frame;
   private readonly pigBox: HTMLElement;
   private readonly retry: HTMLButtonElement;
   private readonly menu: HTMLButtonElement;
@@ -361,15 +420,13 @@ export class LoseView implements OverlayView {
 
   constructor(
     private readonly ctx: UiCtx,
-    levelId: string,
+    r: LoseResult,
+    private readonly opts: ResultOpts = {},
   ) {
     const f = frame('lose', S.loseBanner, 'results-lost');
+    this.f = f;
     this.el = f.el;
-    this.backdrop = f.backdrop;
-    this.panel = f.panel;
-    this.rib = f.rib;
     this.pigBox = h('div', { class: 'lose-pig', 'aria-hidden': 'true' }, h('div', { class: 'lose-shadow' }), characterCanvas('pig', 'medium', 'laugh', 82));
-    const taunt = TAUNTS[Math.floor(Math.random() * TAUNTS.length)]!;
     this.menu = button({
       color: 'blue',
       size: 'm',
@@ -393,17 +450,21 @@ export class LoseView implements OverlayView {
         ctx.restart();
       },
     });
-    const loc = ctx.loc(levelId);
-    this.panel.append(
+    const tip = r.tip;
+    const score = r.score !== undefined && Number.isFinite(r.score) ? Math.max(0, Math.floor(r.score)) : null;
+    appendAll(
+      f.panel,
+      levelCaption(ctx, r.levelId),
       this.pigBox,
-      h('div', { class: 'lose-taunt', text: taunt }),
-      ...(loc ? [h('div', { class: 'res-msg', text: `${loc.level.id} · ${loc.level.name}` })] : []),
+      tip ? null : h('div', { class: 'lose-taunt', text: TAUNTS[Math.floor(Math.random() * TAUNTS.length)]! }),
+      score !== null ? h('div', { class: 'lose-score', 'data-testid': 'results-score' }, `${S.winScore}: `, h('span', { class: 'num', text: fmt(score) })) : null,
+      tip ? h('div', { class: 'lose-tip', 'data-testid': 'lose-tip' }, h('b', { text: `${S.loseTipPrefix} ` }), tip) : null,
       h('div', { class: 'res-btns' }, this.menu, this.retry),
     );
   }
 
   enter(): void {
-    enterFrame(this.backdrop, this.panel, this.rib);
+    enterFrame(this.f, this.opts.ribbonFrom);
     this.ctx.sfx('lose');
     this.ctx.announce(S.a11yLost);
     const pig = this.pigBox.querySelector('.char');
@@ -450,6 +511,10 @@ export class LoseView implements OverlayView {
     return leaveFrame(this.el);
   }
 
+  relayout(): void {
+    this.f.fit();
+  }
+
   finish(): void {
     for (const a of this.el.getAnimations({ subtree: true })) if (a.effect?.getTiming().iterations !== Infinity) a.finish();
     this.retry.classList.add('pulse');
@@ -473,5 +538,6 @@ export class LoseView implements OverlayView {
 
   destroy(): void {
     window.clearTimeout(this.tearTimer);
+    this.f.unfit();
   }
 }

@@ -1,12 +1,13 @@
 // Общие помощники тестов ядра.
 
+import type { DamageMults } from '../../src/core/characters';
 import type { GameSession } from '../../src/core/api';
 import type { GameEvent } from '../../src/core/events';
 import { createSession } from '../../src/core/game/GameSession';
-import type { Destructible } from '../../src/core/physics/entities';
+import type { BirdEnt, Destructible, Ent } from '../../src/core/physics/entities';
 import { PhysicsWorld, type KillCause } from '../../src/core/physics/PhysicsWorld';
 import { Rng } from '../../src/core/rng';
-import type { LevelDef } from '../../src/core/types';
+import type { BirdType, LevelDef } from '../../src/core/types';
 
 export const STEPS_PER_SECOND = 60;
 
@@ -70,4 +71,36 @@ export function physicsOf(level: LevelDef) {
 
 export function stepWorld(pw: PhysicsWorld, seconds: number): void {
   for (let i = 0; i < Math.round(seconds * STEPS_PER_SECOND); i++) pw.step();
+}
+
+/** Разрушаемые тела мира в порядке создания. */
+export function destructibles(pw: PhysicsWorld): Destructible[] {
+  return [...pw.ents.values()].filter((e): e is Destructible => e.kind === 'block' || e.kind === 'tnt' || e.kind === 'pig');
+}
+
+/** Снятое HP тела (после гибели hp уходит в минус — это и есть полный урон удара). */
+export const dealt = (e: Destructible): number => e.maxHp - e.hp;
+
+/** Поднимает тело на высоту y (после усадки) и отпускает. */
+export function lift(e: Ent, y: number): void {
+  e.body.setTransform({ x: e.body.getPosition().x, y }, 0);
+  e.body.setLinearVelocity({ x: 0, y: 0 });
+  e.body.setAwake(true);
+}
+
+/**
+ * Птица летит в тело горизонтально (слева, на высоте центра цели, но не ниже земли) или сверху,
+ * стартуя в 0.3 м от поверхности, чтобы не успеть упасть. mult — множители (рывок Чака, пике Сильвера).
+ */
+export function birdInto(
+  pw: PhysicsWorld, type: BirdType, target: Destructible, speed: number, opts: { fromAbove?: boolean; mult?: DamageMults } = {},
+): BirdEnt {
+  const p = target.body.getPosition();
+  const half = target.kind === 'pig' ? { w: target.radius, h: target.radius } : target.kind === 'block' ? { w: target.w / 2, h: target.h / 2 } : { w: target.size / 2, h: target.size / 2 };
+  const r = type === 'blues' ? 0.252 : type === 'terence' ? 0.8 : type === 'chuck' ? 0.495 : 0.45;
+  const bird = opts.fromAbove
+    ? pw.addBird(type, pw.allocId(), 0, { x: p.x, y: p.y + half.h + r + 0.3 }, { x: 0, y: -speed }, 0, -1)
+    : pw.addBird(type, pw.allocId(), 0, { x: p.x - half.w - r - 0.3, y: Math.max(r + 0.03, p.y) }, { x: speed, y: 0 }, 0, -1);
+  if (opts.mult) bird.mult = opts.mult;
+  return bird;
 }
