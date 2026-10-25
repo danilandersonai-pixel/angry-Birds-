@@ -49,6 +49,14 @@ export interface GameHooks {
   /** Мировая точка → CSS-пиксели окна. */
   toScreen(x: number, y: number): { x: number; y: number };
   stats(): Record<string, unknown>;
+  /**
+   * Кадр вида рогатки против контента уровня (плейтест №2): насколько правый край контента + 1 м и верх + 0.8 м
+   * не влезли (м, ≤ 0 — влезли), упёрся ли вид в жёсткий потолок, сколько тел заходят под HUD справа сверху
+   * (по настоящему прямоугольнику .hud-right), размер Реда в CSS px. Считает по aimView(), а не по текущей камере.
+   */
+  framing(): { cutRight: number; cutTop: number; atCap: boolean; viewH: number; hudHits: number; redPx: number; slingFrac: number };
+  /** Видна ли кнопка «К рогатке». */
+  homeVisible(): boolean;
 }
 
 export function installHooks(app: App): void {
@@ -120,6 +128,42 @@ export function installHooks(app: App): void {
       const p = g.camera.worldToScreen(x, y);
       return { x: r.left + p.x, y: r.top + p.y };
     },
+    framing: () => {
+      const cam = g.camera;
+      const a = cam.aimView();
+      const f = cam.level;
+      const w = a.viewH * cam.aspect;
+      const left = a.x - w / 2;
+      const right = a.x + w / 2;
+      const top = a.y + a.viewH / 2;
+      const ppm = cam.cssH / a.viewH;
+      // HUD справа сверху: настоящий прямоугольник в координатах холста
+      let hudHits = 0;
+      const hud = document.querySelector('.hud-right');
+      const cr = app.host.canvas.getBoundingClientRect();
+      if (hud && g.session) {
+        const r = hud.getBoundingClientRect();
+        const hl = r.left - cr.left;
+        const hb = r.bottom - cr.top;
+        for (const e of g.session.entities()) {
+          if (e.kind !== 'block' && e.kind !== 'pig' && e.kind !== 'tnt') continue;
+          const ext = Math.max(e.w, e.h) / 2;
+          const sx = (e.x + ext - left) * ppm;
+          const sy = (top - (e.y + ext)) * ppm;
+          if (sx > hl && sy < hb) hudHits++;
+        }
+      }
+      return {
+        cutRight: f.contentRight + 1 - right,
+        cutTop: f.contentTop + 0.8 - top,
+        atCap: a.viewH >= g.camera.aimHardCap - 1e-6,
+        viewH: a.viewH,
+        hudHits,
+        redPx: 0.9 * ppm,
+        slingFrac: (f.slingX - left) / w,
+      };
+    },
+    homeVisible: () => !!document.querySelector('.hud-home:not(.is-hidden)'),
     stats: () => ({
       quality: app.host.quality,
       dpr: app.host.dpr,

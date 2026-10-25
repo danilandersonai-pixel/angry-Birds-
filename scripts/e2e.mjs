@@ -11,8 +11,11 @@
 //  • рестарт клавишей R в полёте: новая сессия, птица снова в рогатке;
 //  • загрузка каждого из 30 уровней по очереди (startLevel + skipIntro + кадр) без ошибок;
 //  • замер FPS на самом тяжёлом уровне (больше всего тел) с разрушением;
-//  • плейтест №1: подсказка уровня не во время облёта, а после него; вид рогатки не мельче ~20 CSS px на Реда;
+//  • плейтест №1: подсказка уровня не во время облёта, а после него; вид рогатки не мельче ~20 CSS px на Реда (1-1);
 //    автокачество в покое не падает.
+//  • плейтест №2: вид рогатки показывает весь контент (30 уровней × все размеры; тела не под HUD); на 1-1 вместо
+//    текста — рука обучения; после гибели последней свиньи нет «К рогатке», от неё до итогов ≤ 4.5 с с тапом
+//    (без тапа — по таймингам ядра); кадр рендера на первом взрыве ≤ 20 мс.
 // Скриншоты ключевых моментов — в --out (по умолчанию scratchpad/integ/e2e). Код возврата ≠ 0 при ошибках.
 
 import { createServer } from 'vite';
@@ -174,7 +177,8 @@ async function flow(size, idx) {
     check((await page.evaluate('__game.phase()')) === 'play', 'тап пропускает облёт');
     check((await page.evaluate('__game.settle(10)')) === 'ready', 'птица в рогатке (ready)');
     await page.waitForTimeout(300);
-    check(await page.evaluate(() => !!document.querySelector('[data-testid="hint"]')), 'после облёта — подсказка уровня');
+    // 1-1 с чистым профилем: учит рука обучения — текстовой подсказки нет (плейтест №2, п. 9); текст — на 1-2
+    check(!(await page.evaluate(() => !!document.querySelector('[data-testid="hint"]'))), '1-1: вместо текстовой подсказки — рука обучения');
     const red = await page.evaluate((h) => (0.9 * h) / __game.stats().aimViewH, size.h);
     check(red >= 20, `вид рогатки: Ред ${red.toFixed(0)} CSS px (≥ 20)`);
     // прицел настоящим жестом: тянем влево-вниз (на третьем размере — вправо-вниз: выстрел назад, проверка поражения)
@@ -226,6 +230,10 @@ async function flow(size, idx) {
       check((await page.evaluate('__game.level()')) === '1-2', '«Дальше» открывает 1-2');
       await page.waitForTimeout(1500);
       await page.screenshot({ path: `${OUT}/${T}-10-next.png` });
+      await page.mouse.click(size.w * 0.6, size.h * 0.5);
+      await until(page, () => __game.phase() === 'play', null, 4000).catch(() => null);
+      await page.waitForTimeout(400);
+      check(await page.evaluate(() => !!document.querySelector('[data-testid="hint"]')), '1-2: после облёта — подсказка уровня');
     }
   } catch (e) {
     check(false, `${T}: ${e.message}`);
@@ -350,12 +358,172 @@ async function robustness() {
   await ctx.close();
 }
 
+// ───────────────────────── 3. плейтест №2: кадр, финал победы, первый взрыв ─────────────────────────
+
+/** Вид рогатки на всех уровнях: контент целиком в кадре, тела не под HUD. */
+async function framing(size) {
+  const touch = size.dpr > 1 && size.w < 1000;
+  log(`\n▶ Вид рогатки: весь контент в кадре, 30 уровней (${tag(size)}${touch ? ', тач' : ''})`);
+  const { ctx, page, errors } = await newPage(size, touch);
+  try {
+    await page.goto(`${BASE}/index.html?mute=1&unlockAll=1&level=1-1&intro=0&seed=3`, { waitUntil: 'load' });
+    await until(page, () => window.__game && __game.screen() === 'game' && __game.phase() === 'play', null, 90000);
+    const bad = [];
+    const atCap = [];
+    const hud = [];
+    let redMin = Infinity;
+    let redSum = 0;
+    let n = 0;
+    for (let ep = 1; ep <= 3; ep++) {
+      for (let i = 1; i <= 10; i++) {
+        const id = `${ep}-${i}`;
+        await page.evaluate(`__game.startLevel('${id}')`);
+        await page.evaluate('__game.skipIntro()');
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(null)))));
+        const f = await page.evaluate('__game.framing()');
+        const cut = Math.max(f.cutRight, f.cutTop);
+        if (cut > 0.05) (f.atCap ? atCap : bad).push(`${id} −${cut.toFixed(1)} м (h ${f.viewH.toFixed(1)})`);
+        if (f.hudHits > 0 && !f.atCap) hud.push(`${id}: ${f.hudHits}`);
+        redMin = Math.min(redMin, f.redPx);
+        redSum += f.redPx;
+        n++;
+        if (!QUICK && (id === '1-1' || id === '2-5' || id === '3-10')) await page.screenshot({ path: `${OUT}/frame-${tag(size)}-${id}.png` });
+      }
+    }
+    check(bad.length === 0, `весь контент в кадре вида рогатки (${n} уровней)${bad.length ? `: ${bad.join(', ')}` : ''}`);
+    if (atCap.length) notes.push(`[${tag(size)}] не влезает и на жёстком потолке камеры (нужны уровни ближе, Б1): ${atCap.join(', ')}`);
+    // HUD: допускается, только если отдалять дальше нельзя (запас ×1.35 исчерпан) — тогда в заметки
+    if (hud.length) notes.push(`[${tag(size)}] тела под HUD (запас отдаления исчерпан): ${hud.join(', ')}`);
+    check(hud.length <= 3, `верх сооружения не под HUD (исключений ${hud.length} ≤ 3)`);
+    notes.push(`[${tag(size)}] Ред в виде рогатки: мин ${redMin.toFixed(0)} px, среднее ${(redSum / n).toFixed(0)} px`);
+  } catch (e) {
+    check(false, `кадр ${tag(size)}: ${e.message}`);
+  }
+  check(errors.length === 0, `${tag(size)}: ошибок консоли нет${errors.length ? `:\n    ${errors.join('\n    ')}` : ''}`);
+  await ctx.close();
+}
+
+/** Финал победы на 1-1: нет «К рогатке», баннер быстро; без тапа и с тапом по экрану. */
+async function victory() {
+  const size = SIZES[0];
+  log(`\n▶ Финал победы 1-1 (${tag(size)})`);
+  const { ctx, page, errors } = await newPage(size);
+  const sampler = () => {
+    window.__vic = { pig0: null, home: false, banner: null, results: null };
+    const tick = () => {
+      const v = window.__vic;
+      const now = performance.now();
+      if (v.pig0 === null && __game.state() !== 'none' && __game.pigsLeft() === 0) v.pig0 = now;
+      if (v.pig0 !== null) {
+        if (__game.homeVisible()) v.home = true;
+        if (v.banner === null && document.querySelector('[data-testid="banner"]')) v.banner = now;
+        if (document.querySelector('[data-testid="results-score"]')) {
+          v.results = now;
+          return;
+        }
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  };
+  try {
+    for (const withTap of [false, true]) {
+      await page.goto(`${BASE}/index.html?mute=1&fresh=1&unlockAll=1&level=1-1&intro=0&seed=7`, { waitUntil: 'load' });
+      await until(page, () => window.__game && __game.screen() === 'game' && __game.phase() === 'play', null, 90000);
+      await page.evaluate('__game.settle(10)');
+      await page.evaluate(sampler);
+      // стреляем, пока не погибнет последняя свинья
+      for (let i = 0; i < 6; i++) {
+        const st = await page.evaluate('__game.settle(25)');
+        if (st !== 'ready' || (await page.evaluate('__game.pigsLeft()')) === 0) break;
+        const sh = await shoot(page, true);
+        if (!sh) await page.evaluate('__game.launch(30, 1)');
+        await until(page, () => __game.state() !== 'flying' || __game.pigsLeft() === 0, null, 15000).catch(() => null);
+        if ((await page.evaluate('__game.pigsLeft()')) === 0) break;
+      }
+      if ((await page.evaluate('__game.pigsLeft()')) !== 0) {
+        await until(page, () => __game.pigsLeft() === 0 || __game.state() === 'lost', null, 15000).catch(() => null);
+      }
+      if ((await page.evaluate('__game.pigsLeft()')) !== 0) {
+        notes.push(`финал победы (${withTap ? 'тап' : 'без тапа'}): не удалось победить 1-1 — пропуск`);
+        continue;
+      }
+      if (withTap) {
+        await until(page, () => window.__vic.banner !== null, null, 8000).catch(() => null);
+        await page.mouse.click(size.w * 0.5, size.h * 0.62);
+      }
+      await until(page, () => window.__vic.results !== null, null, 20000).catch(() => null);
+      const v = await page.evaluate('window.__vic');
+      const total = v.results !== null && v.pig0 !== null ? (v.results - v.pig0) / 1000 : Infinity;
+      const banner = v.banner !== null && v.pig0 !== null ? (v.banner - v.pig0) / 1000 : Infinity;
+      if (!withTap) await page.screenshot({ path: `${OUT}/v-01-results.png` });
+      check(!v.home, `${withTap ? 'с тапом' : 'без тапа'}: после последней свиньи нет кнопки «К рогатке»`);
+      check(banner <= 1.0, `${withTap ? 'с тапом' : 'без тапа'}: баннер победы через ${banner.toFixed(2)} с (≤ 1.0)`);
+      if (withTap) check(total <= 4.5, `с тапом: от последней свиньи до итогов ${total.toFixed(2)} с (≤ 4.5)`);
+      else {
+        // без тапа финал задают тайминги ядра (VICTORY_MAX, CLEARED_BANNER — Б3): ≤ 4.5 с — цель, ≤ 6.5 с — страховка
+        check(total <= 6.5, `без тапа: от последней свиньи до итогов ${total.toFixed(2)} с (≤ 6.5; цель ≤ 4.5 — патч ядра Б3)`);
+        if (total > 4.5) notes.push(`финал победы без тапа ${total.toFixed(2)} с > 4.5 с — ждёт патча TIMING ядра (Б3)`);
+      }
+    }
+  } catch (e) {
+    check(false, `финал победы: ${e.message}`);
+  }
+  check(errors.length === 0, `финал победы: ошибок консоли нет${errors.length ? `:\n    ${errors.join('\n    ')}` : ''}`);
+  await ctx.close();
+}
+
+/** Первый взрыв уровня (Бомб на 1-8): кадр рендера ≤ 20 мс. */
+async function blast(size) {
+  log(`\n▶ Первый взрыв: кадр рендера (${tag(size)})`);
+  const touch = size.dpr > 1 && size.w < 1000;
+  const { ctx, page, errors } = await newPage(size, touch);
+  try {
+    await page.goto(`${BASE}/index.html?mute=1&unlockAll=1&level=1-8&intro=0&seed=7`, { waitUntil: 'load' });
+    await until(page, () => window.__game && __game.screen() === 'game' && __game.phase() === 'play', null, 90000);
+    await page.evaluate('__game.settle(10)');
+    await page.waitForTimeout(600);
+    const bird = await page.evaluate('__game.loaded()');
+    await page.evaluate(() => {
+      window.__rm = { max: 0, at: -1, boom: -1, n: 0 };
+      const t0 = performance.now();
+      const tick = () => {
+        const st = __game.stats();
+        const r = window.__rm;
+        r.n++;
+        if (st.renderMs > r.max) {
+          r.max = st.renderMs;
+          r.at = __game.time();
+        }
+        if (performance.now() - t0 < 6000) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+    await shoot(page, true);
+    // Бомб взрывается сам после удара; на всякий случай — способность через 2.2 с
+    await page.waitForTimeout(2200);
+    await page.evaluate('__game.ability()');
+    await page.waitForTimeout(3900);
+    const r = await page.evaluate('window.__rm');
+    await page.screenshot({ path: `${OUT}/b-${tag(size)}-after.png` });
+    check(bird === 'bomb', `1-8: первая птица — Бомб (${bird})`);
+    check(r.max <= 20, `первый взрыв: максимум кадра рендера ${r.max.toFixed(1)} мс (≤ 20) на t=${r.at.toFixed(2)} с, кадров ${r.n}`);
+  } catch (e) {
+    check(false, `первый взрыв ${tag(size)}: ${e.message}`);
+  }
+  check(errors.length === 0, `первый взрыв: ошибок консоли нет${errors.length ? `:\n    ${errors.join('\n    ')}` : ''}`);
+  await ctx.close();
+}
+
 try {
   for (let i = 0; i < SIZES.length; i++) {
     await flow(SIZES[i], i);
     if (QUICK) break;
   }
   await robustness();
+  for (const sz of SIZES) await framing(sz);
+  await victory();
+  for (const sz of QUICK ? SIZES.slice(0, 1) : SIZES.slice(0, 2)) await blast(sz);
 } finally {
   await browser.close();
   await server.close();

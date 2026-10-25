@@ -10,7 +10,7 @@
 // раньше и со звуком; задержка камеры считает разрушения и в полёте; бонусные «10000» разнесены по высоте;
 // текстовая подсказка 1-1 не спорит с рукой обучения.
 
-import { AIM_ASSIST, CAMERA, UI_TIMING, WORLD } from '../config/constants';
+import { AIM_ASSIST, CAMERA, TIMING, UI_TIMING, WORLD } from '../config/constants';
 import { createSession } from '../core';
 import type { GameSession } from '../core/api';
 import type { GameEvent } from '../core/events';
@@ -44,6 +44,11 @@ const LINGER_MAX = 2.5;
 const WIN_BANNER_DELAY = 0.6;
 /** Бонусные числа соседних птиц — на разной высоте (м): очередь сжата, числа шире промежутка между птицами. */
 const BONUS_TIER_DY = 1.5;
+/** Начало бонуса: пауза ядра под баннер (CLEARED_BANNER — баннер уже показан) идёт ×3, кроме последних 0.35 с;
+ *  камера в это время уже летит к рогатке за BONUS_CAM_T. */
+const BONUS_INTRO_SPEED = 3;
+const BONUS_INTRO_KEEP = 0.35;
+const BONUS_CAM_T = 0.7;
 /** Подсказка уровня, мс. */
 const HINT_MS = 5000;
 /** Подсказка способности — через столько после выстрела (07 §10.4). */
@@ -134,6 +139,8 @@ export class GameScreen {
   private winBannerShown = false;
   private bonusT = -1;
   private bonusCam = false;
+  /** Время сессии входа в бонус, с. */
+  private bonusSimT0 = -1;
   private loseIn = -1;
   private homeT = 0;
   private homeOn = false;
@@ -192,10 +199,10 @@ export class GameScreen {
     this.paused = false;
     this.input.reset();
     this.begin(level);
-    // прогрев: вид рогатки и вид сооружения (интро)
+    // прогрев: вид рогатки, вид сооружения (интро) и отдаление следования за навесным выстрелом (ступень √2)
     const aim = this.camera.aimView();
     const castle = this.camera.castleView();
-    const scales = [this.d.host.canvas.height / aim.viewH, this.d.host.canvas.height / castle.viewH];
+    const scales = [this.d.host.canvas.height / aim.viewH, this.d.host.canvas.height / castle.viewH, this.d.host.canvas.height / Math.min(CAMERA.VIEW_H_MAX, aim.viewH * Math.SQRT2)];
     const items = this.renderer.warmList(scales, this.session!.entities());
     await this.d.cache.prewarm(items, { yieldFn: () => this.d.nextFrame(), sliceMs: 40 });
     if (token !== this.loadToken) return false;
@@ -279,6 +286,7 @@ export class GameScreen {
     this.playTime = 0;
     this.bonusT = -1;
     this.bonusCam = false;
+    this.bonusSimT0 = -1;
     this.loseIn = -1;
     this.homeT = 0;
     this.tutorT = -1;
@@ -376,8 +384,9 @@ export class GameScreen {
     }
     const s = this.session;
     if (!s) return;
-    // исход решён (свиней нет): тап ускоряет и ожидание покоя, и бонус (плейтест №2, п. 3)
-    if (s.state === 'bonus' || (s.pigsLeft === 0 && s.state === 'settling')) this.speed = UI_TIMING.BONUS_SKIP_SPEED;
+    // исход решён (свиней нет): тап ускоряет и остаток полёта, и ожидание покоя, и бонус (плейтест №2, п. 3)
+    const st = s.state;
+    if (st === 'bonus' || (s.pigsLeft === 0 && (st === 'flying' || st === 'settling'))) this.speed = UI_TIMING.BONUS_SKIP_SPEED;
   }
 
   /** «К рогатке». */
@@ -424,7 +433,8 @@ export class GameScreen {
     if (!this.paused) {
       if (this.phase === 'intro') this.updateIntro(dt);
       else {
-        this.acc = advance(this.acc, dt * this.speed, DT, MAX_STEPS * this.speed, () => s.step()).acc;
+        const k = this.stepK();
+        this.acc = advance(this.acc, dt * k, DT, MAX_STEPS * k, () => s.step()).acc;
       }
       this.alpha = Math.min(1, this.acc / DT);
       this.dispatch(s.drainEvents(), dt);
@@ -581,6 +591,7 @@ export class GameScreen {
         } else if (e.to === 'bonus') {
           this.bonusT = 0;
           this.bonusCam = false;
+          this.bonusSimT0 = this.session?.time ?? -1;
           this.winBannerIn = -1;
           if (!this.winBannerShown) this.showWinBanner();
         } else if (e.to === 'lost') {
@@ -713,9 +724,9 @@ export class GameScreen {
         break;
       case 'bonus':
         if (this.bonusT >= 0) this.bonusT += dt;
-        if (!this.bonusCam && this.bonusT >= 0.4) {
+        if (!this.bonusCam && this.bonusT >= 0) {
           this.bonusCam = true;
-          cam.flyToPose(cam.aimView(), 0.8);
+          cam.flyToPose(cam.aimView(), BONUS_CAM_T);
         }
         break;
       default:
@@ -756,6 +767,15 @@ export class GameScreen {
   /** Сколько времени до конца облёта (для хуков). */
   get introLeft(): number {
     return this.phase === 'intro' ? Math.max(0, this.introHold + this.introPan - this.introT) : 0;
+  }
+
+  /** Множитель шагов на этот кадр: скорость (тап, тесты) или ×3 в начале бонуса (плейтест №2, п. 3). */
+  private stepK(): number {
+    const s = this.session;
+    if (s && s.state === 'bonus' && this.bonusSimT0 >= 0 && s.time - this.bonusSimT0 < TIMING.CLEARED_BANNER - BONUS_INTRO_KEEP) {
+      return Math.max(this.speed, BONUS_INTRO_SPEED);
+    }
+    return this.speed;
   }
 
   /** Сколько шагов назначено на кадр сверх нормы (тесты). */
