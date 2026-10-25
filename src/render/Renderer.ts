@@ -19,7 +19,7 @@ import { DECOR_SIZE } from './decor';
 import { drawTrail, type Fx } from './fx/Fx';
 import { buildGround, type GroundFn } from './fx/ground';
 import type { Sprite } from './sprites/api';
-import { Background, drawForeground, drawTerrain, prewarmTerrain } from './sprites/background';
+import { Background, drawForeground, drawTerrain, prewarmTerrain, prewarmTerrainAsync, type BgQuality, type SliceOpts } from './sprites/background';
 import { drawBand, drawPouch } from './sprites/slingshot';
 import {
   SLING_BACK,
@@ -149,6 +149,14 @@ function wrapPi(a: number): number {
 
 const bgPool = new Map<ThemeId, Background>();
 const BG_POOL_MAX = 2;
+/** Ступень качества фонов (облака в 0.6 разрешения, бюджет полос ×0.6 и масштаб без сглаживания на LOW). */
+let bgQuality: BgQuality = 'high';
+
+/** Ступень качества приложения — всем фонам пула и новым (смена темы). */
+export function setBackgroundQuality(q: BgQuality): void {
+  bgQuality = q;
+  for (const bg of bgPool.values()) bg.setQuality(q);
+}
 
 /** Фон темы из общего пула (меню и игра делят кэши полос). */
 export function backgroundFor(theme: ThemeId): Background {
@@ -156,9 +164,10 @@ export function backgroundFor(theme: ThemeId): Background {
   if (bg) {
     bgPool.delete(theme);
     bgPool.set(theme, bg);
+    bg.setQuality(bgQuality);
     return bg;
   }
-  bg = new Background(theme);
+  bg = new Background(theme, { quality: bgQuality });
   bgPool.set(theme, bg);
   while (bgPool.size > BG_POOL_MAX) {
     const first = bgPool.keys().next().value as ThemeId;
@@ -237,6 +246,8 @@ export class Renderer {
   private queueX0 = 0;
   private queueFor: { level: LevelDef | null; minX: number | undefined } = { level: null, minX: undefined };
   private vis: VisSling = { pocket: { x: 0, y: 0 }, power: 0, lift: 0 };
+  /** Где нарисована птица в кармашке, пока рука обучения её оттягивает (последний кадр); null — обучения нет. */
+  private tutorAt: Vec | null = null;
   // переиспользуемые списки тел по слоям
   private readonly lBlocks: EntityView[] = [];
   private readonly lTnt: EntityView[] = [];
@@ -244,6 +255,8 @@ export class Renderer {
   private readonly lEggs: EntityView[] = [];
   private readonly lBirds: EntityView[] = [];
   private loadedEnt: EntityView | null = null;
+  /** «Уменьшить движение» (07 §19.3): птицы очереди не подпрыгивают сами (бонусные прыжки остаются). */
+  reducedMotion = false;
   /** Отрисовано тел в последнем кадре (для отладки). */
   drawn = 0;
   /** Время фаз кадра, мс (EMA): фон, рельеф, тела, эффекты, передний план. */
@@ -315,6 +328,14 @@ export class Renderer {
     return this.bg;
   }
 
+  /**
+   * Где нарисована птица в кармашке, пока рука обучения оттягивает её (мир, м; последний кадр) — до 1.7 м от кармашка
+   * ядра. Ввод принимает захват и здесь (InputHandlers.grabPoint). null — обучения нет.
+   */
+  get tutorialPocket(): Vec | null {
+    return this.tutorAt;
+  }
+
   /** Список прогрева спрайтов уровня при масштабах (пикс. устройства на метр). */
   warmList(scales: readonly number[], entities?: Iterable<EntityView>) {
     return this.level ? levelWarmList(this.level, scales, entities) : [];
@@ -322,9 +343,29 @@ export class Renderer {
 
   /** Прогреть фон и рельеф под вид (экран загрузки уровня). */
   prewarmWorld(view: ViewInfo): void {
-    if (!this.level || !this.bg) return;
-    this.bg.prewarm(view);
-    prewarmTerrain(this.level.terrain, this.level.theme);
+    this.prewarmBackground(view);
+    this.prewarmTerrain();
+  }
+
+  /** Прогреть полосы фона и облака под вид (отдельным куском загрузки: на CPU×4 — 0.2–0.4 с). */
+  prewarmBackground(view: ViewInfo): void {
+    if (this.level && this.bg) this.bg.prewarm(view);
+  }
+
+  /** Прогреть рельеф уровня (отдельным куском загрузки). */
+  prewarmTerrain(): void {
+    if (this.level) prewarmTerrain(this.level.terrain, this.level.theme);
+  }
+
+  /** То же, что prewarmWorld, но кусками с уступкой кадра (opts.yieldFn): полоса загрузки и музыка не замирают. */
+  async prewarmWorldAsync(view: ViewInfo, opts: SliceOpts = {}): Promise<void> {
+    await this.prewarmBackgroundAsync(view, opts);
+    if (this.level) await prewarmTerrainAsync(this.level.terrain, this.level.theme, undefined, opts);
+  }
+
+  /** Прогрев фона кусками (полоса/облако за шаг). */
+  async prewarmBackgroundAsync(view: ViewInfo, opts: SliceOpts = {}): Promise<void> {
+    if (this.level && this.bg) await this.bg.prewarmAsync(view, opts);
   }
 
   /** События кадра: фитиль Бомба, сжатие при ударе, прыжок в кармашек, бонусные птицы. */
@@ -400,6 +441,9 @@ export class Renderer {
     this.drawDecor(level, v);
     // 5. след
     drawTrail(ctx, v, src.trail());
+    this.resetCtx();
+    // 5а. эффекты способностей вдоль пути (призраки Чака, лента Сильвер, шлейф яйца) — под телами
+    p.fx?.drawUnder(ctx, v, src.trail());
     this.resetCtx();
 
     // разложить тела по слоям
@@ -516,6 +560,7 @@ export class Renderer {
     const lift = pocketLift(type) * w;
     const vis = this.vis;
     vis.pocket = { x: px, y: py + lift };
+    this.tutorAt = tutorial >= 0 && type && st === 'ready' ? vis.pocket : null;
     vis.power = power;
     vis.lift = lift;
     return vis;
@@ -771,7 +816,7 @@ export class Renderer {
         h.sqv = 0;
         h.wait = bonus ? 0.5 : rand(1.5, 3.5) * style.every;
       }
-    } else if (style.h > 0 || bonus) {
+    } else if ((style.h > 0 && !this.reducedMotion) || bonus) {
       h.wait -= dt;
       if (h.wait <= 0 && h.sq === 1) h.t = 1e-4;
     }

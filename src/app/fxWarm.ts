@@ -39,6 +39,8 @@ function sampleEvents(x: number, y: number): GameEvent[] {
   }
   ev.push({ type: 'impact', x, y, impulse: 30, a: 'pig', b: 'ground' });
   ev.push({ type: 'impact', x, y, impulse: 30, a: 'tnt', b: 'stone' });
+  // пыль яйца Матильды (EGG_DUST) — через настоящий путь событий
+  ev.push({ type: 'impact', x, y, impulse: 30, a: 'egg', b: 'stone' });
   for (const b of BIRD_TYPES) {
     ev.push({ type: 'birdLaunched', id: id, bird: b, x: x - 3, y: y + 2, power: 1 });
     ev.push({ type: 'ability', id: id, bird: b, x: x - 1, y: y + 2 });
@@ -73,48 +75,73 @@ function fillSizeSteps(): void {
 const SMALL_CI_MAX = 10;
 
 /**
- * Проиграть пробные события на каждом масштабе (пикс. устройства на метр) и нарисовать в невидимый холст.
- * gameCtx — игровой холст: в него один раз рисуются страницы атласа (под шторкой). Возвращает время, мс.
+ * Прогрев по кускам (загрузка уровня уступает кадр между ними — музыка меню под шторкой не голодает): один кусок на
+ * масштаб (пиксели устройства на метр), затем допекание ступеней размеров, затем — страницы атласа в игровой холст
+ * gameCtx (под шторкой). Пусто, если нет DOM.
  */
-export function warmFx(scales: readonly number[], view: ViewInfo, gameCtx?: CanvasRenderingContext2D): number {
-  if (typeof document === 'undefined') return 0;
-  const t0 = performance.now();
+export function warmFxSteps(scales: readonly number[], view: ViewInfo, gameCtx?: CanvasRenderingContext2D): Array<() => void> {
+  if (typeof document === 'undefined') return [];
   const ctx = ctx2d(createCanvas(8, 8));
   const fx = new Fx();
   const seen = new Set<number>();
+  const steps: Array<() => void> = [];
   for (const s of scales) {
     if (!(s > 0) || !Number.isFinite(s)) continue;
     const key = Math.round(s * 4);
     if (seen.has(key)) continue;
     seen.add(key);
-    const v: ViewInfo = { ...view, scale: s, camX: 0, camY: 4, time: 0 };
-    fx.clear();
-    for (const e of sampleEvents(0, 1)) fx.handle(e);
-    // жизнь частиц ~0.3–2 с: размеры дыма и огня растут со временем — несколько моментов
-    for (let i = 0; i < 14; i++) {
-      fx.update(0.1);
-      fx.draw(ctx, v);
-      fx.drawFlash(ctx, v);
-    }
-    fx.takeShake();
+    steps.push(() => {
+      const v: ViewInfo = { ...view, scale: s, camX: 0, camY: 4, time: 0 };
+      fx.clear();
+      for (const e of sampleEvents(0, 1)) fx.handle(e);
+      // жизнь частиц ~0.3–2 с: размеры дыма и огня растут со временем — несколько моментов
+      for (let i = 0; i < 14; i++) {
+        fx.update(0.1);
+        fx.draw(ctx, v);
+        fx.drawFlash(ctx, v);
+      }
+      fx.takeShake();
+    });
   }
-  fx.clear();
-  fillSizeSteps();
+  steps.push(() => {
+    fx.clear();
+    fillSizeSteps();
+  });
   // те же эффекты — пару кадров в игровой холст (под шторкой; следующий кадр игры его перерисует): загрузка страниц
   // атласа в GPU и первые смешивания 'lighter' (компиляция шейдеров) случаются сейчас, а не на первом взрыве
+  // (по кадру эффектов и по странице атласа на кусок: на программном растре каждый — десятки–сотни мс)
   if (gameCtx && scales.length > 0) {
     const v: ViewInfo = { ...view, scale: scales[0], camX: 0, camY: 4, time: 0 };
-    for (const e of sampleEvents(0, 1)) fx.handle(e);
     for (let i = 0; i < 3; i++) {
-      fx.update(0.12);
-      fx.draw(gameCtx, v);
-      fx.drawFlash(gameCtx, v);
+      steps.push(() => {
+        if (i === 0) for (const e of sampleEvents(0, 1)) fx.handle(e);
+        fx.update(0.12);
+        fx.draw(gameCtx, v);
+        fx.drawFlash(gameCtx, v);
+        gameCtx.setTransform(1, 0, 0, 1, 0, 0);
+        gameCtx.globalAlpha = 1;
+        gameCtx.globalCompositeOperation = 'source-over';
+      });
     }
-    gameCtx.setTransform(1, 0, 0, 1, 0, 0);
-    gameCtx.globalAlpha = 1;
-    gameCtx.globalCompositeOperation = 'source-over';
-    for (const page of FX_SPRITES.pageCanvases) gameCtx.drawImage(page, 0, 0);
-    fx.clear();
+    const pages = FX_SPRITES.pageCanvases.length;
+    for (let k = 0; k < pages; k++) {
+      steps.push(() => {
+        const page = FX_SPRITES.pageCanvases[k];
+        if (page) gameCtx.drawImage(page, 0, 0);
+      });
+    }
+    steps.push(() => fx.clear());
   }
+  return steps;
+}
+
+/**
+ * Проиграть пробные события на каждом масштабе (пикс. устройства на метр) и нарисовать в невидимый холст — разом
+ * (все куски warmFxSteps подряд). gameCtx — игровой холст: в него один раз рисуются страницы атласа (под шторкой).
+ * Возвращает время, мс.
+ */
+export function warmFx(scales: readonly number[], view: ViewInfo, gameCtx?: CanvasRenderingContext2D): number {
+  const t0 = performance.now();
+  for (const step of warmFxSteps(scales, view, gameCtx)) step();
   return performance.now() - t0;
 }

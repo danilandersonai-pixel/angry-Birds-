@@ -1,6 +1,6 @@
 // Экраны результата: победа (07 §12) и поражение (07 §13).
-// Победа: лента «Уровень пройден!», звёзды по очереди с «бумом» и искрами, подсчёт очков с тиканьем,
-// «Новый рекорд!» с конфетти. Поражение: красная лента и свинья, хохочущая до слёз.
+// Победа: лента «Уровень пройден!», подсчёт очков с тиканьем; звезда с «бумом» и искрами прилетает, когда бегущее
+// число пересекает её порог (winTiming.ts); «Новый рекорд!» с конфетти. Поражение: красная лента и свинья, хохочущая до слёз.
 // Анимации — только «композиторные»: opacity и translate / scale / rotate (у HTML-элементов — отдельными свойствами,
 // у SVG — через transform: отдельные свойства на SVG Chromium не уводит на композитор). Закончившиеся анимации
 // снимает anim() — иначе бесконечные «пульс» и «качание» остаются на главном потоке (плейтест №2, Б10).
@@ -13,6 +13,8 @@ import { confetti, starBoom } from '../fx';
 import { starSvg } from '../icons';
 import { S, STARS, fmt, pickTaunt, plural, t } from '../strings';
 import { episodeGate, gateText } from '../rules';
+import { WIN_T, planWin, rollValue } from '../winTiming';
+import type { StarThresholds } from '../../core/types';
 
 export interface WinResult {
   levelId: string;
@@ -25,13 +27,9 @@ export interface WinResult {
   stars: number;
   newRecord: boolean;
   hasNext: boolean;
+  /** Пороги звёзд — моменты прилёта звёзд по ходу подсчёта; по умолчанию — из уровня (deps.episodes). */
+  thresholds?: StarThresholds;
 }
-
-/** Тайминги победы (07 §12.5). */
-const WIN_T = {
-  full: { star: [0.5, 0.95, 1.4], starLead: 0.19, rollGap: 0.25, roll: 1.2, buttonsAt: 0.3, enableAfterStar: 0.3 },
-  reduced: { star: [0.3, 0.55, 0.8], starLead: 0, rollGap: 0.15, roll: 0.5, buttonsAt: 0.15, enableAfterStar: 0.15 },
-} as const;
 
 const STAR_SFX = ['star1', 'star2', 'star3'] as const;
 
@@ -219,44 +217,48 @@ export class WinView implements OverlayView {
     enterFrame(this.f, this.opts.ribbonFrom);
     this.ctx.sfx('win');
     const T = motion.reduced ? WIN_T.reduced : WIN_T.full;
+    // счёт крутится от нуля; звезда садится, когда бегущее число пересекает её порог (не раньше подсчёта)
+    const plan = planWin(this.r.score, this.r.stars, this.r.thresholds ?? this.ctx.loc(this.r.levelId)?.level.stars, T);
     const tl = new Timeline();
     this.tl = tl;
     this.btns.forEach((b, i) => popIn(b, T.buttonsAt * 1000 + i * 60));
-    T.star.forEach((land, i) => {
-      const earned = i < this.r.stars;
+    plan.land.forEach((land, i) => {
       const slot = this.slots[i]!;
       tl.at(Math.max(0, land - T.starLead), (skipped) => {
-        if (!earned || skipped) return;
-        this.flyStar(slot, i);
+        if (!skipped) this.flyStar(slot, i);
       });
       tl.at(land, (skipped) => {
-        if (earned) {
-          slot.classList.add('is-set');
-          if (skipped && i !== this.r.stars - 1) return; // при пропуске — один «бум» на последнюю звезду
-          starBoom(slot);
-          if (i === 2) this.bigFinish();
-          this.ctx.sfx(STAR_SFX[i]!);
-          if (!skipped && typeof navigator !== 'undefined' && matchMedia('(pointer: coarse)').matches) navigator.vibrate?.(15);
-        } else if (!skipped && !motion.reduced) {
-          anim(slot, [{ scale: '1' }, { scale: '.9' }, { scale: '1' }], { duration: 150 });
-        }
+        slot.classList.add('is-set');
+        if (skipped && i !== this.r.stars - 1) return; // при пропуске — один «бум» на последнюю звезду
+        starBoom(slot);
+        if (i === 2) this.bigFinish();
+        this.ctx.sfx(STAR_SFX[i]!);
+        if (!skipped && typeof navigator !== 'undefined' && matchMedia('(pointer: coarse)').matches) navigator.vibrate?.(15);
       });
     });
-    tl.at(T.star[2] + T.enableAfterStar, () => this.enableButtons());
-    const r0 = T.star[2] + T.rollGap;
-    tl.tween(r0, T.roll, (k) => {
-      this.scoreEl.textContent = fmt(Math.round(this.r.score * (1 - (1 - k) ** 3)));
+    // незаработанные звёзды «вздрагивают», когда счёт остановился, не дотянув до порога
+    plan.empty.forEach((at, j) => {
+      const slot = this.slots[this.r.stars + j]!;
+      tl.at(at, (skipped) => {
+        if (!skipped && !motion.reduced) anim(slot, [{ scale: '1' }, { scale: '.9' }, { scale: '1' }], { duration: 150 });
+      });
+    });
+    tl.at(plan.enableAt, () => this.enableButtons());
+    tl.tween(plan.rollStart, plan.rollEnd - plan.rollStart, (k) => {
+      this.scoreEl.textContent = fmt(rollValue(this.r.score, k));
       const now = performance.now();
       if (k < 1 && now - this.lastTick > 60) {
         this.lastTick = now;
         this.ctx.sfx('tick');
       }
     });
-    tl.at(r0 + T.roll, (skipped) => {
+    tl.at(plan.rollEnd, () => {
       this.scoreEl.textContent = fmt(this.r.score);
+    });
+    tl.at(plan.end, (skipped) => {
       if (this.r.newRecord) this.showBadge(!skipped);
     });
-    tl.at(r0 + T.roll + 0.3, () => {
+    tl.at(plan.end + 0.3, () => {
       this.primary.classList.add('pulse');
       this.finished = true;
       this.skipHint.style.opacity = '0';

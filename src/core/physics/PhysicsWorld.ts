@@ -75,7 +75,7 @@ export class PhysicsWorld {
   readonly world = new World({ gravity: { x: 0, y: WORLD.GRAVITY } });
   /** Живые сущности в порядке создания — от порядка обхода зависит детерминизм. */
   readonly ents = new Map<number, Ent>();
-  /** Урон включается с первым выстрелом (00 §1.1). */
+  /** Урон (удары и взрывы) включается с первым выстрелом (00 §1.1) и выключается после поражения. */
   damageEnabled = false;
   /** Нижняя граница мира: ниже тела удаляются. */
   readonly killY: number;
@@ -174,7 +174,8 @@ export class PhysicsWorld {
 
   private addPig(def: PigDef): PigEnt {
     const p = PIG_DEFS[def.type];
-    const body = this.dynamicBody(def.x, def.y, 0, { angularDamping: PIG_PHYS.ANGULAR_DAMPING, linearDamping: PIG_PHYS.LINEAR_DAMPING });
+    const angularDamping = PIG_PHYS.ANGULAR_DAMPING_BY_TYPE[def.type] ?? PIG_PHYS.ANGULAR_DAMPING;
+    const body = this.dynamicBody(def.x, def.y, 0, { angularDamping, linearDamping: PIG_PHYS.LINEAR_DAMPING });
     body.createFixture({
       shape: new Circle(p.radius), density: p.density, friction: p.friction, restitution: p.restitution, filterCategoryBits: COLLISION.PIG,
     });
@@ -369,8 +370,11 @@ export class PhysicsWorld {
     else if (source.kind === 'terrain' && target.kind === 'pig') mult = DAMAGE.PIG_STATIC_MULT;
     let share = 0;
     if (target.kind === 'pig' && target.helmetHp > 0) {
+      // в осях тела: каска сидит на голове и поворачивается вместе со свиньёй; снизу («ноги») она не защищает
       const local = target.body.getLocalPoint({ x: h.x, y: h.y });
-      share = local.y > DAMAGE.HELMET_TOP_Y * target.radius ? DAMAGE.HELMET_SHARE_TOP : DAMAGE.HELMET_SHARE_SIDE;
+      const top = DAMAGE.HELMET_TOP_Y * target.radius;
+      const bottom = DAMAGE.HELMET_BOTTOM_Y * target.radius;
+      share = local.y > top ? DAMAGE.HELMET_SHARE_TOP : local.y < bottom ? 0 : DAMAGE.HELMET_SHARE_SIDE;
     }
     this.damage(target, mult * excess, share, 'impact');
   }
@@ -528,7 +532,7 @@ export class PhysicsWorld {
       const J = Math.min(P.J0 * k, b.getMass() * P.DV_MAX);
       b.applyLinearImpulse({ x: (dx / dc) * J, y: (dy / dc) * J }, com, true);
       b.applyAngularImpulse(-Math.sign(dx || 1) * P.SPIN * J * Math.min(1, entSize(e) / 2), true);
-      if (isDestructible(e)) {
+      if (isDestructible(e) && this.damageEnabled) {
         const share = e.kind === 'pig' && e.helmetHp > 0 ? DAMAGE.HELMET_SHARE_SIDE : 0;
         this.damage(e, P.D0 * k * e.blastMult, share, 'blast');
       }

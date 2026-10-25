@@ -1,7 +1,19 @@
 // Headless-проверка уровней: устойчивость, прогон выстрелов, бот-эксперт, пороги звёзд (06 §7–§8).
 
 import { describe, expect, it } from 'vitest';
-import { checkStability, levelPoints, simulateShots, solveLevel, solveLevelAsync, suggestStars } from '../../src/core/sim';
+import {
+  checkStability,
+  fillPlan,
+  jitterShots,
+  levelPoints,
+  NOISE,
+  NoiseTable,
+  robustness,
+  simulateShots,
+  solveLevel,
+  solveLevelAsync,
+  suggestStars,
+} from '../../src/core/sim';
 import type { LevelDef } from '../../src/core/types';
 import { ALL_LEVELS } from '../../src/levels';
 import { flatGround, frame, hutLevel, level, pigOn, rect } from '../fixtures/levels';
@@ -197,6 +209,59 @@ describe('suggestStars', () => {
     expect(r.warnings.join('\n')).toContain('замысел не сходится');
     const easy = suggestStars({ ...hutLevel(), meta: { nMin: 2 } }, { solved: true, score: 40_000, birdsUsed: 1 });
     expect(easy.warnings.join('\n')).toContain('эксперту хватило 1 птиц при nMin 2');
+  });
+});
+
+describe('устойчивость к ошибке руки (sim/robust.ts)', () => {
+  const plan = [{ angleDeg: 30, power: 0.9, abilityAt: 0.5 }, { angleDeg: 45, power: 1, abilityAt: null }];
+
+  it('шум детерминирован по (seed, прогон, выстрел), тап — целыми кадрами, сила в [0.3, 1]', () => {
+    const t1 = new NoiseTable(7);
+    const t2 = new NoiseTable(7);
+    const a = jitterShots(plan, NOISE.hand, 3, t1);
+    expect(jitterShots(plan, NOISE.hand, 3, t2)).toEqual(a);
+    expect(jitterShots(plan, NOISE.hand, 4, t1)).not.toEqual(a);
+    // отклонения выстрела не зависят от длины серии
+    expect(jitterShots(plan.slice(0, 1), NOISE.hand, 3, new NoiseTable(7))[0]).toEqual(a[0]);
+    for (let k = 0; k < 40; k++) {
+      const [s0] = jitterShots(plan, NOISE.hand, k, t1);
+      expect(Math.abs(s0.angleDeg - 30)).toBeLessThan(6 * NOISE.hand.angle);
+      expect(s0.power).toBeGreaterThanOrEqual(0.3);
+      expect(s0.power).toBeLessThanOrEqual(1);
+      expect(Math.abs(Math.round((s0.abilityAt! - 0.5) * 60) - (s0.abilityAt! - 0.5) * 60)).toBeLessThan(0.01); // тап округлён до 1e-4 с
+    }
+    expect(jitterShots(plan, NOISE.fine, 0, t1)[1].abilityAt).toBeNull();
+  });
+
+  it('добивка: недостающие птицы повторяют выстрелы линии по кругу', () => {
+    const L = level({ birds: ['red', 'red', 'red', 'red', 'red'] });
+    expect(fillPlan(L, plan).map((s) => s.angleDeg)).toEqual([30, 45, 30, 45, 30]);
+  });
+
+  it('линия, берущая свинью с запасом, выигрывает под шумом всегда; доля побед, медиана и p80 считаются', () => {
+    const L = level({ birds: ['red', 'red'], pigs: [pigOn('medium', 10, 0)] });
+    const r = robustness(L, [{ angleDeg: 0, power: 1 }], { runs: 8 });
+    expect(r).toMatchObject({ runs: 8, wins: 8, winRate: 1 });
+    expect(r.scores).toHaveLength(8);
+    expect(r.median).toBeLessThanOrEqual(r.p80);
+    expect(r.median).toBeGreaterThan(5000);
+  });
+
+  it('звёзды по устойчивой линии: 3★ — 80-й перцентиль, 2★ — медиана (не ближе 5000 к 3★)', () => {
+    const L = hutLevel();
+    const robust = { winRate: 0.8, scores: [0, 30_000, 31_000, 33_500, 36_800, 0, 31_200, 35_000, 34_000, 32_000], won: [false, true, true, true, true, false, true, true, true, true], median: 32_000, p80: 35_000, birdsUsed: [] };
+    const r = suggestStars(L, { solved: true, score: 36_800, birdsUsed: 1 }, robust);
+    expect(r.robust).toBe(true);
+    expect(r.stars).toEqual({ one: 0, two: 30_000, three: 35_000 });
+    const lottery = suggestStars(L, { solved: true, score: 40_000, birdsUsed: 1 }, { ...robust, winRate: 0.2, won: robust.won.map((w, i) => w && i < 3) });
+    expect(lottery.warnings.join('\n')).toContain('пороги по победным прогонам');
+  });
+
+  it('решатель с переоценкой под шумом отдаёт решённую линию и её среднюю ценность', () => {
+    const r = solveLevel(simpleLevel(), { angles: [10, 20, 30, 40, 50], powers: [0.9, 1], refine: 1, refineLevels: 1, robust: { runs: 4, top: 3 } });
+    expect(r.solved).toBe(true);
+    expect(r.robustValue).not.toBeNull();
+    expect(simulateShots(simpleLevel(), r.shots).won).toBe(true);
   });
 });
 

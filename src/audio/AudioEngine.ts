@@ -8,9 +8,10 @@
 //     unlock(): Promise<void>;
 //     setSfx(on: boolean): void;                 // шины sfx/ui → 0 за τ 30 мс, звучащие голоса гаснут
 //     setMusic(on: boolean): void;               // off — секвенсор останавливается (фейд 0.3 с), джинглов нет
+//     setLevelMusic(on: boolean): void;          // тихий луп в уровне (настройка «Музыка в уровнях»; фон темы — всегда)
 //     setMasterVolume(v: number): void;          // 0..1
 //     playMusic(track: 'menu' | 'level' | null, theme?: ThemeId): void;
-//         // 'menu' — полька «Пернатый переполох»; 'level' — фон темы (музыки в уровне нет); null — тишина.
+//         // 'menu' — полька «Пернатый переполох»; 'level' — фон темы + тихий луп темы; null — тишина.
 //         // Смена трека (или темы уровня) = новая сессия звука: фитили гаснут, память карты событий сбрасывается.
 //     setPaused(p: boolean): void;               // музыка/фон ×0.5, фитили гаснут, разовые звуки доигрывают
 //     handle(e: GameEvent, listener?: { camX: number; viewW: number }): void;   // события кадра — пачкой
@@ -61,7 +62,7 @@ import {
 } from './noise';
 import type { S } from './sfx';
 import { beginCollect, endCollect } from './synth';
-import { startTrack, type TrackHandle, type TrackId } from './tracks';
+import { LEVEL_MUSIC, startTrack, type TrackHandle, type TrackId } from './tracks';
 
 export type { Listener, RewardKind, UiSoundName } from './mapping';
 export type { TrackId } from './tracks';
@@ -69,6 +70,8 @@ export type { TrackId } from './tracks';
 export interface AudioEngineOptions {
   sfx?: boolean;
   music?: boolean;
+  /** Тихий музыкальный луп в уровне (по умолчанию LEVEL_MUSIC). */
+  levelMusic?: boolean;
   /** Общая громкость 0..1. */
   volume?: number;
   /** Сам разблокироваться по первому жесту на странице (по умолчанию да). */
@@ -90,6 +93,8 @@ export interface AudioStats {
   bakeTotal: number;
   pool: PoolStats;
   music: TrackId | null;
+  /** Звучит ли сейчас музыкальный луп уровня (а не только фон темы). */
+  levelLoop: boolean;
 }
 
 const GESTURES = ['pointerdown', 'pointerup', 'touchend', 'keydown', 'click'] as const;
@@ -114,6 +119,7 @@ export class AudioEngine {
   private flushQueued = false;
   private sfxOn: boolean;
   private musicOn: boolean;
+  private levelMusicOn: boolean;
   private volume: number;
   private paused = false;
   private wantMusic: TrackId | null = null;
@@ -141,6 +147,7 @@ export class AudioEngine {
   constructor(opts: AudioEngineOptions = {}) {
     this.sfxOn = opts.sfx ?? true;
     this.musicOn = opts.music ?? true;
+    this.levelMusicOn = opts.levelMusic ?? LEVEL_MUSIC;
     this.volume = clamp01(opts.volume ?? 1);
     const mobile = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
     this.pool = new VoicePool(mobile ? MAX_VOICES_MOBILE : MAX_VOICES, mobile ? mobileLimits() : CAT_LIMIT);
@@ -338,6 +345,20 @@ export class AudioEngine {
     } else if (this.wantMusic && this.ready && !this.track) this.startMusic(this.wantMusic, this.wantTheme);
   }
 
+  /**
+   * Тихий луп в уровне вкл/выкл (фон темы остаётся при включённой музыке). Если сейчас звучит фон уровня —
+   * трек перезапускается кроссфейдом с лупом или без.
+   */
+  setLevelMusic(on: boolean): void {
+    if (this.levelMusicOn === on) return;
+    this.levelMusicOn = on;
+    const cur = this.track;
+    if (cur && cur.id === 'level' && cur.music !== on && this.musicOn && this.ready) {
+      this.stopMusic(CROSSFADE_S);
+      this.startMusic('level', cur.theme);
+    }
+  }
+
   /** Остановить голоса пула по признаку «звучит на шине музыки». */
   private releaseWhere(pred: (onMusic: boolean) => boolean): void {
     const c = this.ctx;
@@ -428,7 +449,7 @@ export class AudioEngine {
     const g = this.g;
     const nb = this.nb;
     if (!c || !g || !nb) return;
-    this.track = startTrack(c, nb, g.music, g.amb, id, theme, { at: c.currentTime + 0.05, fadeIn: CROSSFADE_S });
+    this.track = startTrack(c, nb, g.music, g.amb, id, theme, { at: c.currentTime + 0.05, fadeIn: CROSSFADE_S, levelMusic: this.levelMusicOn });
   }
 
   private stopMusic(fadeS: number): void {
@@ -701,6 +722,7 @@ export class AudioEngine {
       baked: this.baked.size,
       bakeTotal: BAKE_LIST.length,
       pool: { ...this.pool.stats },
+      levelLoop: !!this.track && this.track.id === 'level' && this.track.music,
       music: this.track?.id ?? null,
     };
   }

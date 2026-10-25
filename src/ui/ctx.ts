@@ -24,6 +24,8 @@ export interface UIAudio {
   readonly ready?: boolean;
   setSfx(on: boolean): void;
   setMusic(on: boolean): void;
+  /** Музыкальный луп в уровнях (настройка «Музыка в уровнях»); без метода — луп как задан движком. */
+  setLevelMusic?(on: boolean): void;
 }
 
 export type ScreenId = 'loading' | 'title' | 'episodes' | 'levels' | 'game';

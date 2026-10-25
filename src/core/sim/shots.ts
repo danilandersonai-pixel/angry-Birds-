@@ -41,6 +41,8 @@ export interface ShotLog {
   pigsLeft: number;
   /** От запуска до готовности к следующему выстрелу или до конца уровня, с. */
   duration: number;
+  /** Самая левая живая свинья (x центра) в конце хода; null — свиней нет. Свинья у рогатки — изъян уровня. */
+  pigMinX: number | null;
 }
 
 export interface SimResult {
@@ -128,6 +130,8 @@ function playShot(s: GameSession, shot: Shot, wait: WaitPolicy): ShotLog {
       break;
     }
   }
+  let pigMinX: number | null = null;
+  for (const e of s.entities()) if (e.kind === 'pig') pigMinX = Math.min(pigMinX ?? Infinity, e.x);
   return {
     bird,
     shot,
@@ -139,6 +143,7 @@ function playShot(s: GameSession, shot: Shot, wait: WaitPolicy): ShotLog {
     points: s.score - score0,
     pigsLeft: s.pigsLeft,
     duration: s.time - t0,
+    pigMinX,
   };
 }
 

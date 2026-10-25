@@ -1,10 +1,13 @@
 // Пороги звёзд (06 §8, 00 §1.11): черновая формула 06 §8.2 по очкам уровня, ограниченная результатом
-// эксперта (06 §8.3: эксперт всегда может взять 3★). Квантилей «типичного игрока» (06 §7.3) здесь нет —
-// это калибровка следующей стадии; поэтому порог 3★ не выше счёта эксперта, а 2★ не ниже «все свиньи + 2000».
+// эксперта (06 §8.3: эксперт всегда может взять 3★); 2★ не ниже «все свиньи + 2000».
+// С отчётом устойчивости (sim/robust.ts: линия эксперта с «мелким» шумом исполнения) пороги берутся по ней:
+// 2★ — медиана счёта, 3★ — 80-й перцентиль (поражение — 0), а не один точный прогон: точная линия бывала
+// хрупкой (3–37 % побед), и 3★ на 10 000 за птицу требовала победы, которая выходит у эксперта раз из трёх.
 
 import { MATERIALS, PIGS, SCORE } from '../../config/constants';
 import { shapeArea } from '../physics/geometry';
 import type { LevelDef, StarThresholds } from '../index';
+import type { RobustReport } from './robust';
 import type { SolveResult } from './solver';
 
 /** Максимум очков уровня без бонуса птиц: P — свиньи (5000 + полный урон), B — блоки (500 + полный урон) и TNT. */
@@ -20,6 +23,8 @@ export interface StarSuggestion {
   points: LevelPoints;
   /** 3★ срезана до счёта эксперта. */
   capped: boolean;
+  /** Пороги взяты по устойчивой линии (медиана / 80-й перцентиль под шумом). */
+  robust: boolean;
   /** Замечания калибровки (06 §8.3) по-русски. */
   warnings: string[];
 }
@@ -40,8 +45,16 @@ export function levelPoints(level: LevelDef): LevelPoints {
   return { pigs, blocks };
 }
 
-/** Предложенные пороги: формула 06 §8.2, затем 3★ ≤ floor1k(счёт эксперта) и 2★ ≤ 3★ − 5000. */
-export function suggestStars(level: LevelDef, solve?: Pick<SolveResult, 'solved' | 'score' | 'birdsUsed'> | null): StarSuggestion {
+/**
+ * Предложенные пороги: формула 06 §8.2, затем 3★ ≤ floor1k(счёт эксперта) и 2★ ≤ 3★ − 5000. С robust — по устойчивой
+ * линии: 3★ = floor1k(80-й перцентиль), 2★ = floor1k(медианы), но не ближе 5000 к 3★ и не ниже «все свиньи + 2000».
+ * Если побед под шумом меньше половины — квантили по победным прогонам (и предупреждение).
+ */
+export function suggestStars(
+  level: LevelDef,
+  solve?: Pick<SolveResult, 'solved' | 'score' | 'birdsUsed'> | null,
+  robust?: Pick<RobustReport, 'winRate' | 'scores' | 'won' | 'median' | 'p80' | 'birdsUsed'> | null,
+): StarSuggestion {
   const points = levelPoints(level);
   const P = points.pigs;
   const B = points.blocks;
@@ -53,6 +66,27 @@ export function suggestStars(level: LevelDef, solve?: Pick<SolveResult, 'solved'
   let two = Math.max(Math.min(r1k(P + 0.3 * B + 10_000 * Math.max(0, N - nMin - 1)), three - 5000), floorTwo);
   let capped = false;
   const warnings: string[] = [];
+
+  if (robust && robust.scores.length > 0 && robust.won.some(Boolean)) {
+    let med = robust.median;
+    let hi80 = robust.p80;
+    if (robust.winRate < 0.5) {
+      const wins = robust.scores.filter((_, i) => robust.won[i]).sort((a, b) => a - b);
+      med = wins[Math.floor(0.5 * wins.length)];
+      hi80 = wins[Math.min(wins.length - 1, Math.floor(0.8 * wins.length))];
+      warnings.push(`под шумом побед ${Math.round(robust.winRate * 100)} % (< 50 %): пороги по победным прогонам`);
+    }
+    three = f1k(hi80);
+    two = Math.max(Math.min(f1k(med), three - 5000), floorTwo);
+    two = Math.min(two, three);
+    if (two < floorTwo || three - two < 5000) warnings.push('узкий диапазон очков: добавьте разрушаемых блоков или птицу');
+    const range = THREE_RANGE[level.id.split('-')[0]];
+    if (range && (three < range[0] || three > range[1])) warnings.push(`3★ = ${three} вне ориентира эпизода ${range[0]}–${range[1]}`);
+    if (expert && level.meta?.nMin !== undefined && expert.birdsUsed !== level.meta.nMin) {
+      warnings.push(`устойчивой линии нужно ${expert.birdsUsed} птиц при nMin ${level.meta.nMin}`);
+    }
+    return { stars: { one: 0, two, three }, nMin: expert?.birdsUsed ?? nMin, points, capped: false, robust: true, warnings };
+  }
 
   if (expert) {
     const hi = f1k(expert.score);
@@ -83,5 +117,5 @@ export function suggestStars(level: LevelDef, solve?: Pick<SolveResult, 'solved'
   if (cur.two > 0 && Math.abs(two - cur.two) > DRIFT * cur.two) {
     warnings.push(`2★ отличается от заданной (${cur.two}) больше чем на ${DRIFT * 100} %`);
   }
-  return { stars: { one: 0, two, three }, nMin, points, capped, warnings };
+  return { stars: { one: 0, two, three }, nMin, points, capped, robust: false, warnings };
 }

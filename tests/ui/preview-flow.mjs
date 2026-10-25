@@ -290,13 +290,19 @@ try {
     }
   }
 
-  // 10. Кнопки победы во время анимации: первое нажатие доводит анимацию и сразу выполняет действие (07 §12.3)
+  // 10. Кнопки победы во время анимации: активны через 0.3 с после последней звезды; первое нажатие доводит
+  // анимацию и сразу выполняет действие (07 §12.3)
   {
     const p = await page('screen=win3');
-    await p.waitForTimeout(1500); // кнопки уже активны (≈ 1.7 с от показа), счёт ещё бежит
-    const running = await p.evaluate(() => document.querySelector('[data-testid=results-next]')?.getAttribute('aria-disabled') !== 'true');
-    ok(running, 'кнопки победы активны до конца подсчёта');
-    await p.click('[data-testid=results-next]');
+    await p.waitForFunction(() => document.querySelector('[data-testid=results-next]')?.getAttribute('aria-disabled') === null, null, { timeout: 4000, polling: 'raf' });
+    // нажимаем в том же кадре, что заметили активные кнопки: таймлайн ещё идёт («пульса» нет)
+    const running = await p.evaluate(() => {
+      const b = document.querySelector('[data-testid=results-next]');
+      const r = !b.classList.contains('pulse') && document.querySelectorAll('.res-star.is-set').length === 3;
+      b.click();
+      return r;
+    });
+    ok(running, 'кнопки победы активны после последней звезды, пока анимация не закончилась');
     await p.waitForTimeout(1500);
     const hud = await p.evaluate(() => document.querySelector('.hud-level .num')?.textContent);
     ok(hud === '1-4', `«Дальше» во время подсчёта сразу ведёт на следующий уровень (${hud})`);
@@ -475,6 +481,82 @@ try {
       return { finished: all.filter((a) => a.playState === 'finished').length, running: all.filter((a) => a.playState === 'running').length };
     });
     ok(st.finished === 0 && st.running >= 3, `после подсчёта: закончившихся анимаций ${st.finished}, идут ${st.running} (лучи, пульс, качание)`);
+    await p.close();
+  }
+
+  // 21. Ревью: вкладку скрыли, пока шторка закрыта и грузится следующий уровень — пауза под шторкой не открывается
+  // (showHud закрыл бы её панель, а приложение осталось бы на паузе). Если вкладка всё ещё скрыта к showHud — пауза
+  // открывается уже на новом уровне. Каждая onPause без панели паузы — ошибка.
+  for (const stayHidden of [false, true]) {
+    const p = await page('screen=win&static=1');
+    const calls = [];
+    p.on('console', (m) => {
+      const t = m.text();
+      if (t === '[app] pause' || t === '[app] resume') calls.push(t.slice(6));
+    });
+    await p.evaluate((stay) => {
+      const setH = (h) => {
+        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => (h ? 'hidden' : 'visible') });
+        Object.defineProperty(document, 'hidden', { configurable: true, get: () => h });
+        document.dispatchEvent(new Event('visibilitychange'));
+      };
+      window.__vis = null;
+      // кадр, когда шторка закрылась и окно итогов убрано (окно загрузки следующего уровня, busy снят)
+      const tick = () => {
+        const hole = document.querySelector('.abui-iris mask circle');
+        const shut = hole && hole.getAttribute('r') === '0' && !document.querySelector('.abui').dataset.overlay;
+        if (!shut) return void requestAnimationFrame(tick);
+        setH(true);
+        window.__vis = document.querySelector('.abui').dataset.overlay ?? null;
+        if (!stay) setTimeout(() => setH(false), 100);
+      };
+      requestAnimationFrame(tick);
+    }, stayHidden);
+    await p.click('[data-testid=results-next]', { force: true }); // «пульс» — кнопка не «стабильна»
+    await p.waitForFunction(() => window.__vis !== null || document.querySelector('.hud-level .num')?.textContent === '1-4', null, { timeout: 5000 });
+    await p.waitForTimeout(1200);
+    const st = await p.evaluate(() => ({
+      under: window.__vis,
+      hud: document.querySelector('.hud-level .num')?.textContent,
+      overlay: document.querySelector('.abui').dataset.overlay ?? null,
+    }));
+    const pauses = calls.filter((c) => c === 'pause').length;
+    const resumes = calls.filter((c) => c === 'resume').length;
+    const paused = pauses > resumes;
+    ok(st.under === null && st.hud === '1-4', `скрытие под шторкой: паузы под шторкой нет (${st.under}), уровень ${st.hud}`);
+    if (stayHidden) ok(st.overlay === 'pause' && paused, `вкладка скрыта к старту уровня → пауза на новом уровне (${st.overlay}; ${calls.join(',')})`);
+    else ok(st.overlay === null && !paused, `вкладку вернули до старта → игра идёт без паузы (${st.overlay}; ${calls.join(',') || '—'})`);
+    await p.close();
+  }
+
+  // 22. Ревью: загрузка → титул — экран загрузки гаснет раньше, чем входит титул (нет двух логотипов и совета на «Играть»)
+  {
+    const p = await page('screen=loading');
+    const r = await p.evaluate(
+      () =>
+        new Promise((resolve) => {
+          const op = (el) => {
+            if (!el || !el.isConnected) return 0;
+            let o = 1;
+            for (let e = el; e && e !== document.body; e = e.parentElement) o *= Number(getComputedStyle(e).opacity);
+            return o;
+          };
+          let both = 0;
+          let frames = 0;
+          let seenTitle = false;
+          window.__ui.showTitle();
+          const tick = () => {
+            const lo = op(document.querySelector('.scr-loading .ld-tip'));
+            const to = op(document.querySelector('[data-testid=btn-play]'));
+            if (lo > 0.05 && to > 0.05) both++;
+            if (to > 0.05) seenTitle = true;
+            if (++frames < 60) requestAnimationFrame(tick);
+            else resolve({ both, seenTitle, screen: window.__ui.screen });
+          };
+          requestAnimationFrame(tick);
+        }),
+    );
+    ok(r.both === 0 && r.seenTitle && r.screen === 'title', `загрузка → титул без наложения (кадров с обоими: ${r.both})`);
     await p.close();
   }
 } finally {

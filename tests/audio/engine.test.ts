@@ -194,6 +194,30 @@ describe('все звуки каталога исполняются живым �
   });
 });
 
+describe('музыка в уровнях (настройка)', () => {
+  it('по умолчанию в уровне звучит луп темы; setLevelMusic(false) оставляет только фон, true — возвращает луп', async () => {
+    const { e } = await unlocked();
+    e.playMusic('level', 'beach');
+    expect(e.stats().levelLoop).toBe(true);
+    e.setLevelMusic(false);
+    expect(e.stats().music).toBe('level');
+    expect(e.stats().levelLoop).toBe(false);
+    e.setLevelMusic(true);
+    expect(e.stats().levelLoop).toBe(true);
+    // в меню настройка ничего не перезапускает
+    e.playMusic('menu');
+    e.setLevelMusic(false);
+    expect(e.stats().music).toBe('menu');
+    e.playMusic('level', 'snow');
+    expect(e.stats().levelLoop).toBe(false);
+  });
+  it('настройка из конструктора: levelMusic: false — только фон темы', async () => {
+    const { e } = await unlocked({ levelMusic: false });
+    e.playMusic('level', 'meadow');
+    expect(e.stats().levelLoop).toBe(false);
+  });
+});
+
 describe('микс на уровне движка', () => {
   it('кулдаун: тот же звук дважды в одно мгновение звучит один раз', async () => {
     const { e } = await unlocked();
@@ -491,9 +515,11 @@ describe('фитиль Бомба и новая сессия', () => {
 });
 
 describe('музыка уровня и конец уровня', () => {
-  it('в уровне музыки нет — только фон темы (00-summary №14, №32); в меню — полька', async () => {
+  it('в уровне — фон темы и тихий луп темы (ревью; было: без музыки, 00-summary №14, №32); в меню — полька', async () => {
     const { e } = await unlocked();
     e.playMusic('level', 'beach');
+    expect((e as unknown as { track: { music: boolean } }).track.music).toBe(true);
+    e.setLevelMusic(false);
     expect((e as unknown as { track: { music: boolean } }).track.music).toBe(false);
     e.playMusic('menu');
     expect((e as unknown as { track: { music: boolean } }).track.music).toBe(true);

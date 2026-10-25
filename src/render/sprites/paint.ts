@@ -81,6 +81,21 @@ export function noiseTile(
   octaves: number,
   fn: (v: number, x: number, y: number) => readonly [number, number, number, number],
 ): AnyCanvas {
+  return finish(noiseTileSteps(size, seed, cells, octaves, fn));
+}
+
+/**
+ * То же по шагам (прогрев кусками): уступка после каждых rows строк; результат — значение генератора.
+ * Тайл грунта 512² — ≈ 40 мс (×4 CPU — 200 мс) одной задачей.
+ */
+export function* noiseTileSteps(
+  size: number,
+  seed: number,
+  cells: number,
+  octaves: number,
+  fn: (v: number, x: number, y: number) => readonly [number, number, number, number],
+  rows = 64,
+): Generator<void, AnyCanvas> {
   const c = createCanvas(size, size);
   const ctx = ctx2d(c);
   const img = ctx.createImageData(size, size);
@@ -104,9 +119,18 @@ export function noiseTile(
       img.data[i + 2] = p[2];
       img.data[i + 3] = p[3];
     }
+    if ((y + 1) % rows === 0 && y + 1 < size) yield;
   }
   ctx.putImageData(img, 0, 0);
   return c;
+}
+
+/** Довести генератор шагов до конца и вернуть его результат. */
+export function finish<T>(g: Generator<void, T>): T {
+  for (;;) {
+    const r = g.next();
+    if (r.done) return r.value;
+  }
 }
 
 /** Уменьшение движения (prefers-reduced-motion): покачивание и прочая декоративная анимация гасятся. */

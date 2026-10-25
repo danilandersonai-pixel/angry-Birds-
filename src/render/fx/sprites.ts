@@ -4,7 +4,7 @@
 // Модуль не трогает DOM при импорте — холсты создаются только при первом draw (тесты Fx идут в Node).
 
 import { createCanvas, ctx2d } from '../canvas';
-import { BIRD_FX, BIRD_TYPES, EGG_FX, HELMET_FX, MATERIAL_FX, TNT_FX } from './palette';
+import { BIRD_FX, BIRD_TYPES, EGG_FX, HELMET_FX, MATERIAL_FX, SMOKE, type SmokeTone, TNT_FX } from './palette';
 import { mixHex, rgba, TAU } from './math';
 import type { BirdType } from '../../core/types';
 
@@ -392,12 +392,15 @@ function paintSoftPuff(top: string, mid: string, bottom: string, hi: string, hiA
   };
 }
 
-/** Дым взрыва: тёплый угольно-серый (в него переходят огненные шары), мягкий край, свет сверху. */
-export const SPR_SMOKE = def(1, 1, 256, paintSoftPuff('#A99D97', '#7B706B', '#544A47', '#D6CBC4', 0.5));
-/** Тёмный дым — основание облака взрыва (остаётся дольше всех). */
-export const SPR_SMOKE_DARK = def(1, 1, 256, paintSoftPuff('#8A8388', '#625C62', '#433F45', '#B5AEB4', 0.45));
+const smokePuff = (t: SmokeTone, hiAlpha: number) => paintSoftPuff(t.top, t.mid, t.bottom, t.hi, hiAlpha);
+/** Дым взрыва: светло-серый с тёплым оттенком (в него переходят огненные шары), мягкий край, свет сверху. */
+export const SPR_SMOKE = def(1, 1, 256, smokePuff(SMOKE.warm, 0.5));
+/** Основание облака взрыва — чуть темнее и плотнее верха. */
+export const SPR_SMOKE_DARK = def(1, 1, 256, smokePuff(SMOKE.base, 0.45));
 /** Светлый дым — верх облака взрыва (рассеивается первым). */
-export const SPR_SMOKE_LIGHT = def(1, 1, 256, paintSoftPuff('#D2CDD1', '#ABA5AC', '#807A84', '#F4F1F4', 0.6));
+export const SPR_SMOKE_LIGHT = def(1, 1, 256, smokePuff(SMOKE.light, 0.6));
+/** Белые клубы яйца Матильды. */
+export const SPR_SMOKE_WHITE = def(1, 1, 256, smokePuff(SMOKE.white, 0.6));
 
 const softPuffIds = new Map<string, number>();
 /** Мягкое облачко заданного цвета (пыль взрыва у земли): без жёсткого края, тень снизу. */

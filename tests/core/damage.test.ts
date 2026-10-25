@@ -172,6 +172,26 @@ describe('урон и разрушение', () => {
     expect(tri.body.getMass()).toBeGreaterThan(2.2 * 0.5 * 0.93);
   });
 
+  it('качение свиней: крупные гасят качение сильнее (король после толчка 9 м/с — ≤ 4.5 м, small — ≈ 8.6 м)', () => {
+    const roll = (type: 'small' | 'large' | 'king') => {
+      const { pw } = physicsOf(level({ pigs: [pigOn(type, 20, 0)] }));
+      const pig = pigs(pw)[0];
+      pig.body.setAwake(true);
+      pig.body.setLinearVelocity({ x: -9, y: 0 });
+      pig.body.setAngularVelocity(9 / pig.radius);
+      const x0 = pos(pig).x;
+      for (let i = 0; i < 600 && pig.body.getLinearVelocity().length() > 0.05; i++) pw.step();
+      return x0 - pos(pig).x;
+    };
+    const small = roll('small');
+    const large = roll('large');
+    const king = roll('king');
+    expect(small).toBeGreaterThan(7.5);
+    expect(large).toBeLessThan(0.75 * small);
+    expect(king).toBeLessThan(4.5);
+    expect(king).toBeLessThan(large);
+  });
+
   it('после первого контакта птица демпфируется (lin 1.5 / ang 4), в полёте — нет', () => {
     const { pw } = physicsOf(level({}));
     const bird = pw.addBird('red', pw.allocId(), 0, { x: 0, y: 3 }, { x: 10, y: 0 }, 0, -1);

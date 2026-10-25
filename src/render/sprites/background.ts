@@ -8,6 +8,8 @@
 //   drawForeground(ctx, theme, view, groundRef?, frame?) — передний план (foreground.ts);
 //   THEME_INFO                                     — название и цвета темы для UI.
 // Дополнительно: Background.prewarm(view), prewarmTerrain(terrain, theme, view?) — построить кэши заранее;
+// Background.prewarmAsync(view, { yieldFn, sliceMs }), prewarmTerrainAsync(...) — то же кусками с уступкой кадра
+// (шаг — один тайл полосы / одно облако / одна текстура; полоса загрузки при старте не замирает);
 // Background.setQuality('high' | 'med' | 'low') — LOW: масштабирование без сглаживания на время зума, меньше памяти;
 // Background.memoryBytes / terrainMemoryBytes() — учёт памяти; Background.dispose() / releaseTerrain() — освободить;
 // shakeFrame(view, angle) — трансформация кадра для поворота от тряски (рельеф, передний план и тела — в одной).
@@ -33,9 +35,11 @@ import { createCanvas, ctx2d, type AnyCanvas, type Ctx2D } from '../canvas';
 import type { ViewInfo } from '../view';
 import { TAU, clamp, lerp, mix, rand, rgba } from './paint';
 import { THEME_PALETTES, type ThemePalette } from './themes';
+import { runAll, runSliced, type SliceOpts } from './slice';
 import { BIN_M, GLOW_PX, Tops, renderCloud, renderGlow, themeLayers, type CloudItem, type CloudLayer, type CloudSprite, type StripLayer } from './bgLayers';
 
-export { drawTerrain, prewarmTerrain, releaseTerrain, shakeFrame, terrainMemoryBytes, TerrainRenderer } from './terrain';
+export { drawTerrain, prewarmTerrain, prewarmTerrainAsync, releaseTerrain, shakeFrame, terrainMemoryBytes, TerrainRenderer } from './terrain';
+export { runSliced, type SliceOpts } from './slice';
 export { drawForeground } from './foreground';
 export { setReducedMotion } from './paint';
 export type { ThemePalette } from './themes';
@@ -281,14 +285,63 @@ export class Background {
 
   /** Построить все полосы и облака для данного вида заранее (экран загрузки). */
   prewarm(view: ViewInfo): void {
+    runAll(this.prewarmSteps(view));
+  }
+
+  /**
+   * То же кусками: между кусками ≥ sliceMs — await yieldFn() (старт приложения: одна задача 224 мс на прогреве фона
+   * меню замораживала полосу загрузки). Без yieldFn — сразу. Порядок: сначала полосы (кадр титула), затем облака.
+   */
+  prewarmAsync(view: ViewInfo, opts: SliceOpts = {}): Promise<number> {
+    return runSliced(this.prewarmSteps(view), opts);
+  }
+
+  /** Шаги прогрева: сухой прогон полосы, затем по тайлу; по облаку; в конце — вытеснение сверх бюджета. */
+  *prewarmSteps(view: ViewInfo): Generator<void> {
     const sRef = view.screenH / AIM_VIEW_H;
     this.anchorScale = view.scale;
     this.lastH = view.screenH;
     this.scaleSince = nowMs() - STABLE_MS;
     this.budget = this.budgetFor(view);
-    for (const L of this.strips) this.stripFor(L, view, sRef, true);
-    for (const C of [this.cloudsFar, this.cloudsNear]) for (const c of C.items) this.cloudFor(c, sRef, true);
+    for (const L of this.strips) {
+      const st = this.stateOf(L);
+      const totalWant = this.wantPx(L, view, sRef);
+      if (st.strips.some((s) => Math.abs(Math.log(totalWant / s.totalPx)) < EXACT_EPS)) continue;
+      const job = this.startJob(L, totalWant);
+      yield;
+      while (job.tiles.length < job.n) {
+        this.buildTile(job);
+        yield;
+      }
+      // фоновая достройка этого слоя (если была) устарела — готова точная полоса
+      st.job = null;
+      this.active.delete(st);
+      this.finishJob(st, job);
+    }
+    for (const C of [this.cloudsFar, this.cloudsNear]) {
+      for (const c of C.items) {
+        this.cloudFor(c, sRef, true);
+        yield;
+      }
+    }
     this.evict();
+  }
+
+  private stateOf(L: StripLayer): LayerState {
+    let st = this.states.get(L.id);
+    if (!st) {
+      st = { strips: [], job: null };
+      this.states.set(L.id, st);
+    }
+    return st;
+  }
+
+  /** Ширина полосы слоя под вид, px: дальний слой — под вид рогатки (sL = sRef), ближний — под текущий масштаб. */
+  private wantPx(L: StripLayer, v: ViewInfo, sRef: number): number {
+    const res = v.dpr > 1.25 ? L.res : 1;
+    const fixed = L.f <= FIXED_F;
+    const want = Math.min((fixed ? sRef : layerScale(v, sRef, L.f)) * res, STRIP_MAX_PX / L.period);
+    return Math.max(8, Math.round(L.period * want));
   }
 
   private budgetFor(v: ViewInfo): number {
@@ -597,16 +650,8 @@ export class Background {
    * строится сразу целиком.
    */
   private stripFor(L: StripLayer, v: ViewInfo, sRef: number, force: boolean): Strip {
-    let st = this.states.get(L.id);
-    if (!st) {
-      st = { strips: [], job: null };
-      this.states.set(L.id, st);
-    }
-    const res = v.dpr > 1.25 ? L.res : 1;
-    // дальний слой — всегда под вид рогатки (sL = sRef), ближний — под текущий масштаб
-    const fixed = L.f <= FIXED_F;
-    const want = Math.min((fixed ? sRef : layerScale(v, sRef, L.f)) * res, STRIP_MAX_PX / L.period);
-    const totalWant = Math.max(8, Math.round(L.period * want));
+    const st = this.stateOf(L);
+    const totalWant = this.wantPx(L, v, sRef);
     let best: Strip | null = null;
     let err = Infinity;
     for (const s of st.strips) {

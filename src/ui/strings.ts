@@ -89,6 +89,7 @@ export const S = {
   settings: 'Настройки',
   settingsTitle: 'Настройки',
   setMusic: 'Музыка',
+  setLevelMusic: 'Музыка в уровнях',
   setSfx: 'Звуки',
   setQuality: 'Качество графики',
   qAuto: 'Авто',
@@ -124,6 +125,7 @@ export const S = {
   rotateAnyway: 'Играть так',
 
   toastStorageOff: 'Прогресс не сохранится: браузер запретил хранилище',
+  toastStorageReadOnly: 'Прогресс не сохранится: сохранение от более новой версии игры',
   toastMusicOn: 'Музыка включена',
   toastMusicOff: 'Музыка выключена',
   toastSfxOn: 'Звуки включены',

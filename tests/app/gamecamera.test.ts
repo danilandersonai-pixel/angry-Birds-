@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { GAME_CAM, GameCamera, hudBox } from '../../src/app/GameCamera';
-import { hudLevel } from '../../src/app/GameScreen';
+import { pigBox } from '../../src/app/GameScreen';
 import { BIRDS, CAMERA, LAUNCH, PIGS, SLINGSHOT, WORLD } from '../../src/config/constants';
 import { ALL_LEVELS } from '../../src/levels';
 import { QUEUE_K_MIN, pocketLift, queueSpan } from '../../src/render/Renderer';
@@ -292,6 +292,133 @@ describe('GameCamera: вид рогатки на уровнях кампании
   });
 });
 
+describe('GameCamera: живые свиньи (liveProbe) — укатившаяся свинья в кадре авто-видов', () => {
+  const inPose = (c: GameCamera, p: { x: number; y: number; viewH: number }, x: number, y: number): boolean => {
+    const hw = (p.viewH * c.aspect) / 2;
+    return x >= p.x - hw - 1e-6 && x <= p.x + hw + 1e-6 && y <= p.y + p.viewH / 2 + 1e-6;
+  };
+
+  for (const [w, h] of [
+    [844, 390],
+    [1600, 900],
+  ] as Array<[number, number]>) {
+    it(`${w}×${h} 3-10: король укатился на 6 м вправо — вид рогатки, «К рогатке», облёт поражения и Z его показывают`, () => {
+      const c = cam(w, h, '3-10');
+      const f = c.level;
+      const p0 = c.aimView();
+      const c0 = c.castleView();
+      const o0 = c.overviewTarget();
+      // свиньи на исходных местах (внутри габарита) — кадр тот же: только расширяем
+      let probe: { left: number; right: number; top: number } | null = { left: f.contentLeft + 1, right: f.contentRight - 0.5, top: f.contentTop - 1 };
+      c.liveProbe = () => probe;
+      expect(c.aimView()).toEqual(p0);
+      expect(c.castleView()).toEqual(c0);
+      expect(c.overviewTarget()).toEqual(o0);
+      // король (r 0.9) скатился за правый край контента
+      const kx = f.contentRight + 6;
+      probe = { left: f.contentLeft + 1, right: kx + 0.9, top: f.contentTop - 1 };
+      const a = c.aimView();
+      expect(a.viewH >= p0.viewH - 1e-6, 'кадр не сужается').toBe(true);
+      expect(inPose(c, a, kx + 0.9, 0.9), `вид рогатки ${JSON.stringify(a)}`).toBe(true);
+      expect(inPose(c, a, f.slingX - c.aimLeftRoom(a.viewH) + 1e-3, 0), 'рогатка с местом под оттяжку').toBe(true);
+      expect(inPose(c, c.castleView(), kx + 0.9, 0.9), 'облёт поражения').toBe(true);
+      expect(inPose(c, c.overviewTarget(), kx + 0.9, 0.9), 'общий план').toBe(true);
+      // свинья подпрыгнула над сооружением — верх кадра выше
+      probe = { left: f.contentLeft, right: f.contentRight, top: f.contentTop + 3 };
+      const t = c.aimView();
+      expect(t.y + t.viewH / 2).toBeGreaterThanOrEqual(f.contentTop + 3 + GAME_CAM.TOP_PAD - 1e-3);
+      // свиней не осталось / рестарт уровня — исходный кадр
+      probe = null;
+      expect(c.aimView()).toEqual(p0);
+    });
+  }
+
+  it('дрожь свиньи на месте не пересчитывает авто-вид (шаг 0.1 м)', () => {
+    const c = cam(1600, 900, '2-10');
+    const f = c.level;
+    let dx = 2.01;
+    c.liveProbe = () => ({ left: f.contentLeft, right: f.contentRight + dx, top: f.contentTop });
+    const a = c.aimView();
+    dx = 2.04;
+    expect(c.aimView()).toBe(a); // тот же объект из кэша
+    dx = 2.3;
+    expect(c.aimView()).not.toBe(a);
+  });
+
+  it('pigBox: габарит живых свиней сессии (x ± r, y + r); без свиней — null', () => {
+    const ents = [
+      { kind: 'pig', x: 10, y: 1, radius: 0.5 },
+      { kind: 'block', x: 40, y: 9, radius: 2 },
+      { kind: 'pig', x: 14, y: 3, radius: 0.9 },
+    ];
+    const s = { entities: () => ents } as unknown as Parameters<typeof pigBox>[0];
+    expect(pigBox(s)).toEqual({ left: 9.5, right: 14.9, top: 3.9 });
+    expect(pigBox({ entities: () => [ents[1]] } as unknown as Parameters<typeof pigBox>[0])).toBeNull();
+    expect(pigBox(null)).toBeNull();
+  });
+});
+
+describe('GameCamera: замер HUD от UI (hudProbe → ui.hudRect)', () => {
+  const pose = (c: GameCamera): [number, number, number, number] => {
+    const a = c.aimView();
+    return [a.x, a.y, a.viewH, c.groundK];
+  };
+
+  it('пока HUD нет — формула; появился замер — кэш пересчитывается один раз, дальше замер не берётся', () => {
+    const c = cam(1600, 900, '1-1');
+    const p0 = pose(c);
+    let rect: { w: number; h: number } | null = null;
+    let calls = 0;
+    c.hudProbe = () => {
+      calls++;
+      return rect;
+    };
+    expect(pose(c)).toEqual(p0); // замера нет — вид по формуле
+    expect(c.hud).toEqual(hudBox(1600, 900, false));
+    // HUD шире и ниже формулы (600×400 против ≈250×209): верх сооружения 1-1 под ним — камера сужает полосу земли
+    // (или отдаляется); огромный HUD, который не обойти, вид не меняет
+    rect = { w: 600, h: 400 };
+    const n0 = calls;
+    const p1 = pose(c);
+    expect(calls).toBe(n0 + 1); // один замер на весь подбор (не на каждую пробу)
+    expect(p1[3] < p0[3] - 1e-6 || p1[2] > p0[2] + 1e-6).toBe(true);
+    expect(c.hud).toEqual(rect);
+    // кэш по замеру: ни новых замеров, ни нового вида до смены окна
+    const n1 = calls;
+    for (let i = 0; i < 5; i++) {
+      c.aimView();
+      c.queueMinX();
+    }
+    rect = { w: 10, h: 10 };
+    expect(pose(c)).toEqual(p1);
+    expect(calls).toBe(n1);
+    // смена размера окна — новый подбор с новым замером
+    c.setViewport(1280, 960, 1);
+    c.aimView();
+    expect(calls).toBe(n1 + 1);
+  });
+
+  it('замер, равный формуле, даёт тот же вид; нечисловой замер — формула', () => {
+    for (const id of ['1-1', '2-8', '3-8']) {
+      const ref = cam(844, 390, id);
+      ref.pointerCoarse = true;
+      ref.setViewport(844, 390, 2);
+      const p0 = pose(ref);
+      const c = cam(844, 390, id);
+      c.pointerCoarse = true;
+      c.setViewport(844, 390, 2);
+      c.hudProbe = () => hudBox(844, 390, true);
+      expect(pose(c), id).toEqual(p0);
+      const d = cam(844, 390, id);
+      d.pointerCoarse = true;
+      d.setViewport(844, 390, 2);
+      d.hudProbe = () => ({ w: Number.NaN, h: 100 });
+      expect(pose(d), id).toEqual(p0);
+      expect(d.hud).toEqual(hudBox(844, 390, true));
+    }
+  });
+});
+
 describe('Renderer: очередь и кармашек', () => {
   it('queueSpan повторяет раскладку ядра: max(QUEUE_DX, r_i + r_{i+1} + 0.2)', () => {
     expect(queueSpan(['red', 'red', 'red']).span).toBeCloseTo(2 * SLINGSHOT.QUEUE_DX, 9);
@@ -313,14 +440,3 @@ describe('Renderer: очередь и кармашек', () => {
   });
 });
 
-describe('hudLevel', () => {
-  it('убирает подсказку, не меняя исходный уровень', () => {
-    const lv = ALL_LEVELS.find((l) => l.hint)!;
-    const h = hudLevel(lv);
-    expect(h.hint).toBeUndefined();
-    expect(lv.hint).toBeTruthy();
-    expect(h.id).toBe(lv.id);
-    const plain = { ...lv, hint: undefined };
-    expect(hudLevel(plain)).toBe(plain);
-  });
-});

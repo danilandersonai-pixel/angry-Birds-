@@ -561,6 +561,119 @@ describe('Camera: следование при выстреле', () => {
   });
 });
 
+describe('Camera: манёвры способностей (петля Сильвер, разворот Хэла)', () => {
+  type P = { x: number; y: number; vx: number; vy: number };
+  /** Полёт: прямо (vx 15) 0.8 с, затем траектория path(t) за dur, затем after(t) 0.8 с; follow каждый кадр. */
+  function fly(c: Camera, man: number, dur: number, path: (t: number) => P, after: (t: number) => P) {
+    const dt = 1 / 60;
+    const xs: number[] = [];
+    const fr: number[] = [];
+    let p: P = { x: -1.4, y: 6, vx: 15, vy: 0 };
+    const rec = (): void => {
+      c.follow(p, dt);
+      c.update(dt);
+      xs.push(c.x);
+      fr.push(0.5 + (p.x - c.x) / c.viewW);
+    };
+    for (let i = 0; i < 48; i++) {
+      p = { x: p.x + 15 * dt, y: 6, vx: 15, vy: 0 };
+      rec();
+    }
+    const x0 = p.x;
+    if (man > 0) c.maneuver(man);
+    for (let t = dt; t <= dur + 1e-9; t += dt) {
+      const q = path(t);
+      p = { ...q, x: x0 + q.x };
+      rec();
+    }
+    const x1 = p.x;
+    const y1 = p.y;
+    for (let t = dt; t <= 0.8; t += dt) {
+      const q = after(t);
+      p = { ...q, x: x1 + q.x, y: y1 + q.y };
+      rec();
+    }
+    // наибольший откат камеры назад (от максимума до последующего минимума), скорость назад и рывок (изменение
+    // скорости камеры за кадр), м/с
+    let back = 0;
+    let hi = -Infinity;
+    for (const x of xs) {
+      hi = Math.max(hi, x);
+      back = Math.max(back, hi - x);
+    }
+    let vBack = 0;
+    for (let i = 1; i < xs.length; i++) vBack = Math.max(vBack, (xs[i - 1] - xs[i]) * 60);
+    let jerk = 0;
+    for (let i = 2; i < xs.length; i++) jerk = Math.max(jerk, Math.abs(xs[i] - 2 * xs[i - 1] + xs[i - 2]) * 60);
+    return { back, vBack, jerk, fr };
+  }
+
+  const inFrame = (fr: number[]): void => {
+    for (const f of fr) {
+      expect(f).toBeGreaterThanOrEqual(0.05 - 1e-9);
+      expect(f).toBeLessThanOrEqual(0.95 + 1e-9);
+    }
+  };
+  const S = 15;
+  const wide = (): LevelDef => hutLevel({ bounds: { minX: -40, maxX: 80, maxY: 30 } });
+
+  // петля против часовой (loopDive, OMEGA 11): вперёд, вверх, назад, вниз; затем пике почти вертикально
+  const OM_S = 11;
+  const loop = (t: number): P => {
+    const a = Math.min(OM_S * t, 2 * Math.PI);
+    const r = S / OM_S;
+    return { x: r * Math.sin(a), y: 6 + r * (1 - Math.cos(a)), vx: S * Math.cos(a), vy: S * Math.sin(a) };
+  };
+  const dive = (t: number): P => ({ x: 1.5 * t, y: -22 * t, vx: 1.5, vy: -22 });
+  // разворот Хэла (boomerang, OMEGA 8): дуга до зеркального курса, поднятого на 10°, затем полёт назад
+  const OM_H = 8;
+  const ARC = Math.PI - (10 * Math.PI) / 180;
+  const hal = (t: number): P => {
+    const a = Math.min(OM_H * t, ARC);
+    const k = Math.min(t, ARC / OM_H);
+    const r = S / OM_H;
+    return {
+      x: r * Math.sin(a) + (t - k) * S * Math.cos(ARC),
+      y: 6 + r * (1 - Math.cos(a)) + (t - k) * S * Math.sin(ARC),
+      vx: S * Math.cos(a),
+      vy: S * Math.sin(a),
+    };
+  };
+  const halBack = (t: number): P => ({ x: S * Math.cos(ARC) * t, y: S * Math.sin(ARC) * t - 7.5 * t * t, vx: S * Math.cos(ARC), vy: S * Math.sin(ARC) - 15 * t });
+
+  for (const [w, h] of [
+    [1600, 900],
+    [844, 390],
+  ] as Array<[number, number]>) {
+    it(`${w}×${h}: петля Сильвер (манёвр) — камера не откатывается назад и не мечется, птица в кадре`, () => {
+      const r = fly(cam(wide(), w, h), (2 * Math.PI) / OM_S + 0.12, (2 * Math.PI) / OM_S, loop, dive);
+      expect(r.back).toBeLessThan(0.3);
+      expect(r.vBack).toBeLessThan(1);
+      inFrame(r.fr);
+    });
+
+    it(`${w}×${h}: разворот Хэла — камера едет назад плавно (упреждение сглажено), птица в кадре`, () => {
+      const r = fly(cam(wide(), w, h), 0, ARC / OM_H + 0.2, hal, halBack);
+      expect(r.vBack).toBeLessThan(1.6 * S); // догоняет перевёрнутое упреждение, но без броска
+      expect(r.jerk).toBeLessThan(8);
+      inFrame(r.fr);
+    });
+  }
+
+  it('после манёвра — обычное следование; jumpTo / flyTo манёвр сбрасывают', () => {
+    const c = cam();
+    c.maneuver(0.5);
+    expect(c.maneuvering).toBe(true);
+    for (let i = 0; i < 40; i++) c.follow({ x: 10 + i * 0.25, y: 4, vx: 15, vy: 0 }, 1 / 60);
+    expect(c.maneuvering).toBe(false);
+    c.maneuver(1);
+    c.jumpTo(c.aimView());
+    expect(c.maneuvering).toBe(false);
+    c.maneuver(Number.NaN);
+    expect(c.maneuvering).toBe(false);
+  });
+});
+
 describe('Camera: тряска', () => {
   it('сумма вкладов ≤ 0.35 м, затухает за duration, не сдвигает саму камеру', () => {
     const c = cam();

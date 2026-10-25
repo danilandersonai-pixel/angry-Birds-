@@ -103,6 +103,16 @@ export class LoadingView implements View {
     }
   }
 
+  /** Загрузка закончена (переход на титул): полоса сразу на 100 %, советы больше не меняются. */
+  complete(): void {
+    this.target = 1;
+    this.shown = 1;
+    cancelAnimationFrame(this.raf);
+    this.raf = 0;
+    window.clearTimeout(this.tipTimer);
+    this.render();
+  }
+
   /** Сглаживание видимого прогресса (07 §6.1). */
   private readonly tick = (now: number): void => {
     const dt = Math.min(0.1, (now - this.last) / 1000);

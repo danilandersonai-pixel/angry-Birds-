@@ -6,25 +6,26 @@
 
 import { AudioEngine } from '../audio/AudioEngine';
 import { EPISODES, ALL_LEVELS, findLevel, nextLevelId } from '../levels';
+import { setBackgroundQuality } from '../render/Renderer';
 import { SpriteCache, levelWarmList } from '../render/SpriteCache';
-import { ProgressStore, type Settings } from '../storage/progress';
+import { ProgressStore, shakeOn, type Settings } from '../storage/progress';
 import { UI } from '../ui/UI';
 import { loadFonts } from '../ui/fonts';
 import type { ScreenId } from '../ui/ctx';
 import type { ThemeId } from '../core/types';
 import { CanvasHost, type QualityLevel } from './CanvasHost';
-import { GameScreen, hudLevel } from './GameScreen';
+import { GameScreen } from './GameScreen';
 import { MenuScene } from './MenuScene';
 import { installHooks } from './hooks';
+import { AutoQuality } from './quality';
 
 const nextFrame = (): Promise<void> => new Promise((r) => requestAnimationFrame(() => r()));
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** Минимальное время показа экрана загрузки (07 §6.1). */
 const BOOT_MIN_MS = 700;
-/** Автокачество: CPU-время кадра игры, мс — медленный / быстрый кадр. */
-const SLOW_MS = 13;
-const FAST_MS = 7;
+/** Автокачество: первые столько секунд сцены уровня (шторка, достройка фона в простое) не мерим. */
+const MEASURE_AFTER_S = 0.6;
 
 export class App {
   readonly params = new URLSearchParams(location.search);
@@ -46,14 +47,12 @@ export class App {
   private fpsFrames = 0;
   private fpsT = 0;
   fpsValue = 0;
-  private slowT = 0;
-  private fastT = 0;
-  private lastQualityChange = -Infinity;
   private autoQuality = true;
-  /** Сколько раз автокачество понижало уровень: после второго понижения вверх больше не идём (без качелей). */
-  private downgrades = 0;
+  /** Автокачество: интервалы rAF относительно периода дисплея + CPU-время кадра (quality.ts). */
+  readonly autoQ = new AutoQuality();
   /** Кадр после возврата вкладки / долгой паузы — не мерить. */
   private skipMeasure = 0;
+  private reducedMql: MediaQueryList | null = null;
 
   constructor(root: HTMLElement) {
     this.stage = document.createElement('div');
@@ -66,7 +65,7 @@ export class App {
     this.progress = new ProgressStore(fresh ? null : undefined);
     if (this.params.get('unlockAll') === '1') this.progress.unlockAll = true;
     const s = this.progress.settings;
-    this.audio = new AudioEngine({ sfx: s.sfx, music: s.music });
+    this.audio = new AudioEngine({ sfx: s.sfx, music: s.music, levelMusic: s.levelMusic });
     if (this.params.get('mute') === '1') this.audio.setMasterVolume(0);
     this.ui = new UI(this.stage, {
       episodes: EPISODES,
@@ -107,6 +106,9 @@ export class App {
     });
     // «Играть так» в портрете: canvas ужимается в полосу 16:9 вместе с интерфейсом
     window.addEventListener('resize', () => this.host.setLetterbox(this.ui.letterbox));
+    // системное «уменьшить движение» сменилось — заново применить настройки (тряска, вспышки, сцена меню)
+    this.reducedMql = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null;
+    this.reducedMql?.addEventListener?.('change', () => this.applySettings(this.progress.settings));
     // потеря фокуса окна — пауза (вкладку скрыли — пауза ставит UI сам)
     window.addEventListener('blur', () => this.pauseFromSystem());
     window.addEventListener('pagehide', () => this.pauseFromSystem());
@@ -124,6 +126,8 @@ export class App {
   async start(): Promise<void> {
     const t0 = performance.now();
     this.ui.showLoading(0.03);
+    // статический сплэш index.html (виден, пока скачивался скрипт) — экран загрузки UI уже на его месте
+    document.getElementById('boot')?.remove();
     this.loop();
     try {
       // 1. шрифты — до любых текстовых спрайтов (TNT, всплывающие очки)
@@ -165,8 +169,10 @@ export class App {
   async playLevel(id: string, opts: { intro?: boolean } = {}): Promise<boolean> {
     const level = findLevel(id);
     if (!level) return false;
+    // из меню: музыка меню гаснет фейдом под шторкой (а не обрывается на прогреве уровня); фон уровня включит showHud
+    if (this.ui.screen !== 'game') this.audio.playMusic(null);
     if (!(await this.game.load(level))) return false;
-    this.ui.showHud(hudLevel(level));
+    this.ui.showHud(level); // level.hint UI не показывает — подсказку даёт GameScreen после облёта
     this.game.start({ intro: opts.intro !== false });
     return true;
   }
@@ -190,8 +196,17 @@ export class App {
     return this.screen;
   }
 
+  /** «Уменьшить движение»: настройка «Анимации» или системная (как UI.applyMotion). */
+  private motionReduced(s: Readonly<Settings> = this.progress.settings): boolean {
+    if (s.motion === 'reduce') return true;
+    if (s.motion === 'full') return false;
+    return this.reducedMql?.matches === true;
+  }
+
   private applySettings(s: Readonly<Settings>): void {
-    this.game.camera.shakeEnabled = s.shake;
+    const reduced = this.motionReduced(s);
+    this.game.applyMotion(shakeOn(s, reduced), reduced);
+    this.menu.reducedMotion = reduced;
     this.game.aimAssistSetting = s.aimAssist === 'short';
     if (s.quality === 'auto') this.autoQuality = !this.params.has('quality');
     else {
@@ -201,9 +216,11 @@ export class App {
     this.game.invalidate();
   }
 
+  /** Ступень качества: холст (dpr и масштаб рендера), лимит частиц, фоны (облака, бюджет полос, масштаб без сглаживания). */
   setQuality(q: QualityLevel): void {
     this.host.setQuality(q);
     this.game.setFxQuality(q === 'high' ? 'high' : q === 'med' ? 'medium' : 'low');
+    setBackgroundQuality(q);
   }
 
   /** Пауза по системной причине (окно потеряло фокус). */
@@ -215,7 +232,7 @@ export class App {
     if (st === 'won' || st === 'lost') return;
     this.ui.showPause();
     // UI открывает паузу, только если нет другого оверлея
-    if (document.querySelector('.abui')?.getAttribute('data-overlay') === 'pause') this.game.pause();
+    if (this.ui.pauseOpen) this.game.pause();
   }
 
   // ───────────────────────── цикл ─────────────────────────
@@ -250,11 +267,9 @@ export class App {
   }
 
   /**
-   * FPS за последнюю секунду; адаптация качества (04 §10.1, плейтест №1 п. 5) — по CPU-времени кадра игры (шаги +
-   * события + рендер), а не по интервалу между кадрами: на дисплеях 30/50 Гц и в экономии батареи интервал всегда
-   * > 20 мс. Медленный кадр: CPU > SLOW_MS или интервал > 45 мс (явно < 22 fps); быстрый: CPU < FAST_MS.
-   * Медленно 2 с подряд — вниз, быстро 5 с — вверх (не чаще раза в 10 с; после двух понижений вверх не идём).
-   * Не мерим: облёт, первые 3 с уровня, паузу, кадры после возврата вкладки.
+   * FPS за последнюю секунду; адаптация качества (04 §10.1) — AutoQuality: доля кадров длиннее 1.5 периода дисплея
+   * (растр и композитинг холста — вне JS) и CPU-время кадра игры; тяжёлая перегрузка — сразу LOW. Период дисплея —
+   * по кадрам меню. Мерим облёт и игру; не мерим: первые 0.6 с сцены, паузу, итоги, кадры после возврата вкладки.
    */
   private measure(dt: number): void {
     this.fpsFrames++;
@@ -269,33 +284,17 @@ export class App {
       this.skipMeasure--;
       return;
     }
-    if (!this.autoQuality || !this.booted || this.ui.screen !== 'game' || g.paused || g.phase !== 'play' || g.playTime < 3) {
-      this.slowT = this.fastT = 0;
+    const scr = this.ui.screen;
+    // экраны меню: кадр дешёвый (сцена ≤ 30 fps) — интервал rAF ≈ период дисплея
+    if (this.booted && scr !== 'game' && scr !== 'loading') this.autoQ.observePeriod(dt * 1000);
+    const scene = g.phase === 'play' || g.phase === 'intro';
+    if (!this.autoQuality || !this.booted || scr !== 'game' || g.paused || !scene || g.sceneTime < MEASURE_AFTER_S) {
+      this.autoQ.reset();
       return;
     }
-    const cpu = g.lastFrameMs;
-    if (cpu > SLOW_MS || dt > 0.045) {
-      this.slowT += dt;
-      this.fastT = 0;
-    } else if (cpu < FAST_MS) {
-      this.fastT += dt;
-      this.slowT = Math.max(0, this.slowT - dt);
-    } else {
-      this.slowT = Math.max(0, this.slowT - dt);
-      this.fastT = Math.max(0, this.fastT - dt);
-    }
-    const q = this.host.quality;
-    if (this.time - this.lastQualityChange < 10) return;
-    if (this.slowT >= 2 && q !== 'low') {
-      this.setQuality(q === 'high' ? 'med' : 'low');
-      this.lastQualityChange = this.time;
-      this.slowT = 0;
-      this.downgrades++;
-    } else if (this.fastT >= 5 && q !== 'high' && this.downgrades < 2) {
-      this.setQuality(q === 'low' ? 'med' : 'high');
-      this.lastQualityChange = this.time;
-      this.fastT = 0;
-    }
+    if (g.idleThrottled) return; // покой (кадр рисуется реже): интервалы и CPU ничего не говорят о цене кадра
+    const q = this.autoQ.frame(dt * 1000, g.lastFrameMs, this.time, this.host.quality);
+    if (q) this.setQuality(q);
   }
 
   get appTime(): number {

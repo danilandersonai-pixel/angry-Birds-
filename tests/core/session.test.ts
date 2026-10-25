@@ -2,13 +2,13 @@
 // доигрыш прицела после победы, устойчивость API к вызовам в неправильном состоянии, детерминизм, скорость шага.
 
 import { describe, expect, it } from 'vitest';
-import { CAMERA, SCORE, TIMING } from '../../src/config/constants';
+import { CAMERA, RETIRE, SCORE, TIMING } from '../../src/config/constants';
 import { createSession } from '../../src/core';
 import type { GameSession } from '../../src/core/api';
 import type { GameEvent, SessionState } from '../../src/core/events';
 import type { PhysicsWorld } from '../../src/core/physics/PhysicsWorld';
 import type { LevelDef } from '../../src/core/types';
-import { bigLevel, hutLevel, level, pigOn, rect, unreachableLevel } from '../fixtures/levels';
+import { bigLevel, flatGround, hutLevel, level, pigOn, rect, unreachableLevel } from '../fixtures/levels';
 import { destructibles, ofType, physicsOf, readySession, runFor, runUntil, stepWorld } from './helpers';
 
 /** Одна medium в 10 м: горизонтальный выстрел на полной силе пробивает её. */
@@ -81,23 +81,95 @@ describe('автомат сессии', () => {
     expect(beam.getPosition().y).toBeLessThan(0.3);
   });
 
-  it('ход: уход птицы → settling (задержка ≤ 0.6 с + возврат камеры) → loading → ready; смех после промаха', () => {
+  it('ход: уход птицы → settling (задержка камеры LINGER_MIN + возврат) → loading → ready; прыжок птицы — во время возврата', () => {
     const s = readySession(hutLevel());
-    s.launch(60, 0.4); // недолёт
+    s.launch(60, 0.4); // недолёт: разрушений нет — задержка ровно LINGER_MIN
     const log = record(s, () => s.state === 'ready', 15);
     const events = log.map((x) => x.e);
     expect(changes(events)).toEqual(['ready>flying', 'flying>settling', 'settling>loading', 'loading>ready']);
     const removed = ofType(events, 'birdRemoved')[0];
     const tRemoved = timeOf(log, (e) => e.type === 'birdRemoved');
     const tLoading = timeOf(log, (e) => e.type === 'stateChanged' && e.to === 'loading');
+    const tReady = timeOf(log, (e) => e.type === 'stateChanged' && e.to === 'ready');
     const ret = Math.min(CAMERA.RETURN_MAX, Math.max(CAMERA.RETURN_MIN, CAMERA.RETURN_BASE + Math.abs(removed.x - s.slingshot().anchor.x) * CAMERA.RETURN_PER_M));
-    expect(tLoading - tRemoved).toBeGreaterThanOrEqual(ret - 1e-6);
-    expect(tLoading - tRemoved).toBeLessThanOrEqual(ret + TIMING.LINGER_MAX + 1e-6);
+    // камера уезжает через LINGER_MIN и приезжает через ret — к её приезду птица уже в кармашке
+    expect(tReady - tRemoved).toBeCloseTo(TIMING.LINGER_MIN + Math.max(ret, TIMING.BIRD_HOP_TIME), 1);
+    expect(tReady - tLoading).toBeCloseTo(TIMING.BIRD_HOP_TIME, 6);
     const laugh = ofType(events, 'pigsLaugh');
     expect(laugh).toHaveLength(1);
     expect(laugh[0].pigs).toEqual(['small', 'small']);
     expect(timeOf(log, (e) => e.type === 'pigsLaugh')).toBe(tRemoved);
     expect(s.birdsLeft).toBe(2);
+  });
+
+  it('разрушения держат камеру: отъезд через BREAK_QUIET после последнего разрушения (но не раньше LINGER_MIN)', () => {
+    const s = readySession(hutLevel());
+    s.launch(38, 1); // удар в верх башни; быстрый пропуск через 1 с — башня ещё рушится, когда птица уходит
+    let tHit = -1;
+    const log: Array<{ t: number; e: GameEvent }> = [];
+    for (let i = 0; i < 60 * 15 && s.state !== 'ready' && s.state !== 'won'; i++) {
+      if (tHit >= 0 && s.time - tHit >= RETIRE.QUICK_SKIP_AFTER_HIT && s.state === 'flying') s.activateAbility();
+      s.step();
+      for (const e of s.drainEvents()) {
+        if (e.type === 'birdImpact' && tHit < 0) tHit = s.time;
+        log.push({ t: s.time, e });
+      }
+    }
+    expect(s.state).toBe('ready');
+    const tSettle = timeOf(log, (e) => e.type === 'stateChanged' && e.to === 'settling');
+    const tLoading = timeOf(log, (e) => e.type === 'stateChanged' && e.to === 'loading');
+    const late = log.filter((x) => x.t > tSettle && (x.e.type === 'blockDestroyed' || x.e.type === 'pigDestroyed')).map((x) => x.t);
+    expect(late.length).toBeGreaterThan(0); // разрушение после ухода птицы
+    const removed = ofType(log.map((x) => x.e), 'birdRemoved')[0];
+    const ret = Math.min(CAMERA.RETURN_MAX, Math.max(CAMERA.RETURN_MIN, CAMERA.RETURN_BASE + Math.abs(removed.x - s.slingshot().anchor.x) * CAMERA.RETURN_PER_M));
+    const leave = tLoading - Math.max(0, ret - TIMING.BIRD_HOP_TIME); // отъезд камеры
+    const expected = Math.min(Math.max(tSettle + TIMING.LINGER_MIN, Math.max(...late) + TIMING.BREAK_QUIET), tSettle + TIMING.LINGER_MAX);
+    // шаг дискретный: loading — на первом шаге после срока
+    expect(leave).toBeGreaterThanOrEqual(expected - 1e-6);
+    expect(leave).toBeLessThanOrEqual(expected + 1 / 60 + 1e-6);
+    expect(leave - tSettle).toBeGreaterThan(TIMING.LINGER_MIN);
+  });
+
+  it('releaseLinger: камера уехала — птица ложится в кармашек к её приезду; вне settling — ничего', () => {
+    const s = readySession(hutLevel());
+    s.releaseLinger(0.8);
+    expect(s.state).toBe('ready');
+    s.launch(60, 0.4);
+    s.releaseLinger(0.8);
+    expect(s.state).toBe('flying');
+    runUntil(s, () => s.state === 'settling', 15);
+    const t0 = s.time;
+    runFor(s, 0.1);
+    s.releaseLinger(0.8); // отъезд раньше LINGER_MIN: экран решил сам
+    const log = record(s, () => s.state === 'ready', 5);
+    const tLoading = timeOf(log, (e) => e.type === 'stateChanged' && e.to === 'loading');
+    const tReady = timeOf(log, (e) => e.type === 'stateChanged' && e.to === 'ready');
+    expect(tLoading - t0).toBeCloseTo(0.1 + 0.8 - TIMING.BIRD_HOP_TIME, 6);
+    expect(tReady - t0).toBeCloseTo(0.1 + 0.8, 6);
+    // короткий возврат (меньше прыжка): прыжок сразу, ready через BIRD_HOP_TIME
+    const q = readySession(hutLevel());
+    q.launch(60, 0.4);
+    runUntil(q, () => q.state === 'settling', 15);
+    const t1 = q.time;
+    q.releaseLinger(0.1);
+    const log2 = record(q, () => q.state === 'ready', 5);
+    expect(timeOf(log2, (e) => e.type === 'stateChanged' && e.to === 'loading') - t1).toBeCloseTo(1 / 60, 6);
+    expect(timeOf(log2, (e) => e.type === 'stateChanged' && e.to === 'ready') - t1).toBeCloseTo(1 / 60 + TIMING.BIRD_HOP_TIME, 6);
+  });
+
+  it('птица, катящаяся по склону, уходит через MAX_AFTER_HIT после первого контакта', () => {
+    const drop = 30 * Math.tan((20 * Math.PI) / 180);
+    const s = readySession(level({
+      bounds: { minX: -12, maxX: 80, maxY: 30 },
+      terrain: [flatGround(), { kind: 'ground', points: [[4, 0], [34, 0], [34, drop], [4, 0]] }],
+      pigs: [pigOn('small', 70, 0)],
+    }));
+    s.launch(55, 0.75); // падает на склон и катится вниз к рогатке
+    const log = record(s, () => s.state !== 'flying' && s.state !== 'ready', 15);
+    const tHit = timeOf(log, (e) => e.type === 'birdImpact');
+    const tGone = timeOf(log, (e) => e.type === 'birdRemoved');
+    expect(tGone - tHit).toBeLessThanOrEqual(RETIRE.MAX_AFTER_HIT + 1e-6);
+    expect(tGone - tHit).toBeGreaterThanOrEqual(RETIRE.MIN_AFTER_HIT - 1e-6);
   });
 
   it('смех после промаха: позы laugh на 1.2 с (со сдвигом до 0.4 с); после выстрела с убийством — без смеха', () => {
@@ -171,6 +243,27 @@ describe('автомат сессии', () => {
     expect([...s.entities()].find((e) => e.kind === 'pig')!.pigPose).toBe('laugh');
   });
 
+  it('после поражения свиньи не гибнут: ни урона, ни pigDestroyed, pigsLeft замер на levelEnd (и вылет за край мира)', () => {
+    const s = readySession(level({ birds: ['red'], pigs: [pigOn('small', 40, 0), pigOn('medium', 44, 0)] }));
+    const pw = (s as unknown as { physics: PhysicsWorld }).physics; // только постановка сцены
+    s.launch(45, 0.3); // недолёт
+    runUntil(s, () => s.state === 'lost', 20);
+    expect(s.pigsLeft).toBe(2);
+    const [small, medium] = destructibles(pw).filter((e) => e.kind === 'pig');
+    // смертельный удар о землю (с 6 м medium гибнет) и вылет small за нижнюю границу мира
+    medium.body.setTransform({ x: 44, y: 8 }, 0);
+    medium.body.setLinearVelocity({ x: 0, y: -15 });
+    medium.body.setAwake(true);
+    small.body.setTransform({ x: 40, y: pw.killY - 1 }, 0);
+    small.body.setAwake(true);
+    const events = runFor(s, 2);
+    expect(events.filter((e) => e.type === 'pigDestroyed' || e.type === 'pigDamaged' || e.type === 'score')).toEqual([]);
+    expect(medium.dead).toBe(false);
+    expect(medium.hp).toBe(medium.maxHp);
+    expect(s.pigsLeft).toBe(2);
+    expect(s.state).toBe('lost');
+  });
+
   it('гибель последней свиньи во время прицела: выстрел доигрывается, бонус за эту птицу теряется', () => {
     const s = readySession(rollingPigLevel());
     s.launch(-2, 0.8); // толчок (16.8 м/с при V_MAX 21): свинья цела, скатывается к обрыву
@@ -207,6 +300,23 @@ describe('автомат сессии', () => {
     const events = runUntil(s, () => s.state === 'won', 20);
     expect(ofType(events, 'birdBonus').map((e) => e.bird)).toEqual(['red', 'red']); // из кармашка и из очереди
     expect(ofType(events, 'birdBonus')[0].x).toBeCloseTo(sl.anchor.x, 1);
+  });
+
+  it('счёт и всплывающие очки всегда кратны 10 (как в AB)', () => {
+    const s = readySession(hutLevel(['bomb', 'blues', 'red']));
+    const shots: Array<[number, number, number]> = [[20, 1, 0.9], [14, 1, 0.5], [30, 0.9, 9]];
+    for (const [angle, power, tap] of shots) {
+      if (s.state !== 'ready') break;
+      s.launch(angle, power);
+      const t0 = s.time;
+      for (let i = 0; i < 60 * 12 && s.state !== 'ready' && s.state !== 'won' && s.state !== 'lost'; i++) {
+        if (s.time - t0 >= tap && s.state === 'flying') s.activateAbility();
+        s.step();
+        for (const e of s.drainEvents()) if ('points' in e && typeof e.points === 'number') expect(e.points % 10).toBe(0);
+        expect(s.score % 10).toBe(0);
+      }
+    }
+    expect(s.score).toBeGreaterThan(0);
   });
 
   it('вызовы API в неправильном состоянии ничего не ломают', () => {

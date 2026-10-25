@@ -67,6 +67,29 @@ export const SCORE_MATERIAL: Record<Material, ScoreStyle> = {
 
 /** Пыль от удара о землю (нейтральный тёплый грунт; тема рельефа Fx не известна). */
 export const GROUND_DUST = '#CDB78F';
+/** Пыль удара яйца Матильды (цвет скорлупы). */
+export const EGG_DUST = '#FFFDF5';
+
+/** Клуб дыма: верх, середина, низ вертикального градиента и блик. */
+export interface SmokeTone {
+  readonly top: string;
+  readonly mid: string;
+  readonly bottom: string;
+  readonly hi: string;
+}
+
+/**
+ * Дым взрывов (ревью «дым тёмный и плотный»): светлые клубы AB2, середина #CFCFCF…#E8E8E8 — разрушение под дымом
+ * остаётся видно. base — основание облака, warm — переход огненного шара в дым, light — верх, white — яйцо Матильды.
+ */
+export const SMOKE: Readonly<Record<'base' | 'warm' | 'light' | 'white', SmokeTone>> = {
+  base: { top: '#E5E3E2', mid: '#D1CFCF', bottom: '#AAA7A7', hi: '#FFFFFF' },
+  warm: { top: '#F1EDE9', mid: '#DAD4CF', bottom: '#B4ADA8', hi: '#FFFFFF' },
+  light: { top: '#FFFFFF', mid: '#E8E8E8', bottom: '#C6C6CA', hi: '#FFFFFF' },
+  white: { top: '#FFFFFF', mid: '#F8F6F0', bottom: '#DAD5CA', hi: '#FFFFFF' },
+};
+/** Наибольшая непрозрачность клуба дыма. */
+export const SMOKE_ALPHA_MAX = 0.55;
 /** Зелёный «пуф» свиньи (04-visual.md §8.4). */
 export const PIG_PUFF = { outline: '#2F6A1A', body: '#6EC03A', hi: '#A6E46A', white: '#F3FFE9' } as const;
 /** Белый «пуф» птицы. */

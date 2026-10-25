@@ -347,6 +347,41 @@ export function levelWarmList(level: LevelDef, scales: readonly number[], entiti
   return out;
 }
 
+/**
+ * Стадии повреждения уровня для допекания после старта (в простое): блоки — стадии 1…3 для каждой пары материал /
+ * форма / размер / вариант узора (по сущностям, иначе по LevelDef), свиньи — стадии 1…2 во всех позах (каска — с ней
+ * и без). В игре их строил первый удар: до 6 мс за спрайт прямо в кадре.
+ */
+export function levelDamageWarmList(level: LevelDef, scales: readonly number[], entities?: Iterable<EntityView>): WarmItem[] {
+  const out: WarmItem[] = [];
+  const seen = new Set<string>();
+  const buckets = [...new Set(scales.filter((s) => s > 0).map((s) => ppuBucket(s)))];
+  const add = (base: string, make: (ppu: number) => Sprite): void => {
+    for (const b of buckets) {
+      const k = `${base}@${b}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push({ base, ppu: b, make });
+    }
+  };
+  const blocks: Array<{ m: Material; s: BlockShape; w: number; h: number; v: number }> = [];
+  if (entities) {
+    for (const e of entities) if (e.kind === 'block' && e.material) blocks.push({ m: e.material, s: e.shape, w: e.w, h: e.h, v: blockVariant(e.seed) });
+  } else {
+    for (const b of level.blocks) blocks.push({ m: b.material, s: b.shape, w: b.w, h: b.shape === 'circle' ? b.w : b.h, v: 0 });
+  }
+  for (let st = 1; st <= 3; st++) for (const b of blocks) add(blockKey(b.m, b.s, b.w, b.h, st, b.v), blockMake(b.m, b.s, b.w, b.h, st, b.v));
+  for (const t of new Set(level.pigs.map((p) => p.type))) {
+    for (let st = 1; st <= 2; st++) {
+      for (const p of PIG_POSES) {
+        add(pigKey(t, p, st, true), pigMake(t, p, st, true));
+        if (t === 'helmet') add(pigKey(t, p, st, false), pigMake(t, p, st, false));
+      }
+    }
+  }
+  return out;
+}
+
 /** Вариант декора по координате (детерминированно, 3 варианта). */
 export function decorVariant(x: number): number {
   return Math.abs(Math.round(x * 7.31)) % 3;

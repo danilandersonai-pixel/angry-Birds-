@@ -78,6 +78,8 @@ class Session implements GameSession {
   private lingerEnd: number | null = null;
   /** Время возврата камеры к рогатке перед следующей птицей. */
   private returnTime = 0;
+  /** Камера держится на месте событий до этого времени: последнее разрушение + BREAK_QUIET (взрыв — BLAST_QUIET). */
+  private quietAt = -Infinity;
   private bonusAwarded = 0;
   private aimAngle = 0;
   private lastStretch = 0;
@@ -96,7 +98,9 @@ class Session implements GameSession {
       killed: (e) => this.onKilled(e),
       removed: (e) => this.onRemoved(e),
       exploded: (x, y, radius, source) => {
-        if (this.live) this.emit({ type: 'explosion', x, y, radius, source });
+        if (!this.live) return;
+        this.noteBreak(TIMING.BLAST_QUIET);
+        this.emit({ type: 'explosion', x, y, radius, source });
       },
     });
     this.host = {
@@ -278,11 +282,16 @@ class Session implements GameSession {
     return since >= TIMING.VICTORY_MIN - EPS && (this.calm(TIMING.VICTORY_HOLD) || since >= TIMING.VICTORY_MAX - EPS);
   }
 
-  /** После ухода птицы: задержка камеры (LINGER) и её возврат — затем следующая птица; без птиц — ждём итог. */
+  /**
+   * После ухода птицы: задержка камеры (LINGER_MIN, пока идут разрушения, ≤ LINGER_MAX) и её возврат; следующая птица
+   * прыгает в кармашек за BIRD_HOP_TIME до приезда камеры. Без птиц — ждём итог.
+   */
   private updateSettling(t: number): void {
     if (this.birds.length > 0) {
-      if (this.lingerEnd === null && (t >= TIMING.LINGER_MAX - EPS || this.calm(TIMING.CALM_HOLD))) this.lingerEnd = t;
-      if (this.lingerEnd !== null && t >= this.lingerEnd + this.returnTime - EPS) this.go('loading');
+      if (this.lingerEnd === null && t >= TIMING.LINGER_MIN - EPS && (this.now >= this.quietAt - EPS || t >= TIMING.LINGER_MAX - EPS)) {
+        this.lingerEnd = t;
+      }
+      if (this.lingerEnd !== null && t >= this.lingerEnd + Math.max(0, this.returnTime - TIMING.BIRD_HOP_TIME) - EPS) this.go('loading');
     } else if (t >= TIMING.LOSE_TIMEOUT - EPS || this.calm(TIMING.LOSE_HOLD)) {
       this.finish(false);
     }
@@ -315,6 +324,8 @@ class Session implements GameSession {
 
   private finish(won: boolean): void {
     this.scoring.locked = true;
+    // после поражения сцена доигрывается только визуально: без урона (и от взрывов) свиньи не гибнут под окном итога
+    if (!won) this.physics.damageEnabled = false;
     this.go(won ? 'won' : 'lost');
     this.emit({ type: 'levelEnd', won, score: this.scoring.score, stars: this.stars() });
   }
@@ -481,8 +492,11 @@ class Session implements GameSession {
   }
 
   private onKilled(e: Destructible): void {
+    // исход записан в levelEnd: свинья, упавшая за край мира после поражения, не меняет счётчик и не даёт событий
+    if (this.st === 'lost') return;
     if (e.kind === 'pig') this.pigs--;
     if (!this.live) return;
+    this.noteBreak(TIMING.BREAK_QUIET);
     const points = this.scoring.destroy(e);
     const { x, y } = e.body.getPosition();
     switch (e.kind) {
@@ -506,6 +520,11 @@ class Session implements GameSession {
 
   private emit(e: GameEvent): void {
     this.events.push(e);
+  }
+
+  /** Разрушение или взрыв: камера не уедет с места событий раньше чем через quiet секунд. */
+  private noteBreak(quiet: number): void {
+    this.quietAt = Math.max(this.quietAt, this.now + quiet);
   }
 
   // ── Управление ───────────────────────────────────────────────
@@ -576,6 +595,7 @@ class Session implements GameSession {
     this.groupView = null;
     this.eggHold = null;
     this.pigsAtLaunch = this.pigs;
+    this.quietAt = -Infinity;
     this.sling.release();
     this.go('flying');
     this.emit({ type: 'birdLaunched', id: view.id, bird: type, x: shot.pos.x, y: shot.pos.y, power: shot.power });
@@ -651,6 +671,13 @@ class Session implements GameSession {
 
   focusBird(): EntityView | null {
     return this.focus;
+  }
+
+  releaseLinger(returnTime?: number): void {
+    if (this.st !== 'settling' || this.birds.length === 0 || this.victoryPending) return;
+    // отъезд камеры — сейчас, но не позже LINGER_MAX: ядро не ждёт экран дольше своего предела
+    this.lingerEnd = Math.min(this.now - this.stateTime, TIMING.LINGER_MAX);
+    if (returnTime !== undefined && Number.isFinite(returnTime)) this.returnTime = clamp(returnTime, 0, CAMERA.RETURN_MAX);
   }
 
   /** Тем же интегратором, что planck (полунеявный Эйлер, шаг 1/60): точка каждые PREDICT_STRIDE шагов. */

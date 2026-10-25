@@ -256,6 +256,32 @@ describe('InputController: прицел', () => {
     expect(p.input.gesture).toBe('pending');
   });
 
+  it('обучение 1-1: нажатие на нарисованную (оттянутую рукой) птицу берёт её; первая точка — кармашек ядра', () => {
+    for (const [w, h] of [
+      [1600, 900],
+      [844, 390],
+    ] as Array<[number, number]>) {
+      // рука оттянула птицу на (−1.6, −0.5)·k м — до 1.68 м от кармашка ядра (Renderer.visualSling); здесь — так,
+      // чтобы нарисованная птица была дальше 1 м и дальше 44 px от кармашка ядра
+      let drawn: Vec | null = null;
+      const q = rig(w, h, 1, { handlers: { grabPoint: () => drawn } });
+      const k = Math.max(1.05 / Math.hypot(1.6, 0.5), 60 / q.cam.ppm / Math.hypot(1.6, 0.5));
+      drawn = { x: -1.6 * k, y: 2.7 - 0.5 * k };
+      const d = q.cam.worldToScreen(drawn.x, drawn.y);
+      const b = q.bird();
+      expect(Math.hypot(d.x - b.x, d.y - b.y)).toBeGreaterThan(44); // вне зоны 44 px кармашка ядра
+      q.down(1, d.x, d.y);
+      expect(q.s.log, `${w}×${h}`).toEqual(['beginAim']);
+      expect(q.s.aims[0]).toEqual({ x: 0, y: 2.7 }); // без выстрела от простого тапа
+      q.up(1, d.x, d.y);
+      expect(q.s.state).toBe('ready'); // отпустили на месте — отмена (слабое натяжение)
+      // обучения нет (grabPoint → null) — там же пан, как раньше
+      drawn = null;
+      q.down(2, d.x, d.y);
+      expect(q.input.gesture).toBe('pending');
+    }
+  });
+
   it('телефон: полная оттяжка за 90 CSS px хода', () => {
     const p = rig(640, 360);
     const b = p.bird();

@@ -25,7 +25,10 @@ describe('константы (00 §1.15)', () => {
     expect(C.DAMAGE.BIRD_SPEED_COMP).toBeCloseTo(24 / 21, 12);
     expect(C.TIMING).toMatchObject({ LINGER_MAX: 1.6, VICTORY_MAX: 2.0, CLEARED_BANNER: 0.4 });
     expect(C.ABILITY.MATILDA.DESPAWN).toBe(1.0);
-    expect(C.TIMING.CALM_HOLD).toBe(0.5);
+    // темп между выстрелами (ревью «арт и ощущения»): задержка камеры по разрушениям, прыжок птицы во время возврата
+    expect(C.TIMING).toMatchObject({ LINGER_MIN: 0.45, BREAK_QUIET: 0.4, BLAST_QUIET: 0.8 });
+    expect('CALM_HOLD' in C.TIMING).toBe(false);
+    expect(C.RETIRE).toMatchObject({ REST_V: 0.4, REST_W: 1.0, REST_HOLD: 0.3, MAX_AFTER_HIT: 3 });
     expect('TURN_MIN' in C.TIMING || 'TURN_MAX' in C.TIMING).toBe(false);
   });
 

@@ -8,13 +8,13 @@ import type { Sprite } from './sprites/api';
 
 export type DecorKind = DecorDef['kind'];
 
-/** Габарит декора при scale = 1: ширина и высота, м (для отсечения и холста). */
+/** Габарит декора при scale = 1: ширина и высота, м (для отсечения и холста; крайние «шапки» куста и наклон травинок — внутри). */
 export const DECOR_SIZE: Record<DecorKind, { w: number; h: number }> = {
-  bush: { w: 2.0, h: 1.25 },
+  bush: { w: 2.6, h: 1.4 },
   rock: { w: 1.35, h: 0.85 },
   flower: { w: 0.55, h: 0.75 },
   sign: { w: 1.1, h: 1.55 },
-  grass: { w: 0.8, h: 0.6 },
+  grass: { w: 1.4, h: 0.7 },
   shell: { w: 0.55, h: 0.4 },
   snowman: { w: 1.3, h: 2.0 },
   pine: { w: 2.0, h: 3.6 },

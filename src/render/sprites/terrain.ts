@@ -17,8 +17,9 @@
 import type { TerrainDef, ThemeId } from '../../core/types';
 import { createCanvas, ctx2d, type AnyCanvas, type Ctx2D } from '../canvas';
 import type { ViewInfo } from '../view';
-import { TAU, clamp, hexRgb, lerp, mix, noiseTile, rand, rgba, smooth } from './paint';
+import { TAU, clamp, finish, hexRgb, lerp, mix, noiseTileSteps, rand, rgba, smooth } from './paint';
 import { THEME_PALETTES, type DeckPalette, type GroundPalette, type RockPalette } from './themes';
+import { runAll, runSliced, type SliceOpts } from './slice';
 import {
   bandLower,
   bboxOf,
@@ -77,6 +78,11 @@ const tileCache = new Map<string, AnyCanvas>();
 
 /** Бесшовный тайл грунта темы: шум, слои, камушки / ракушки. */
 function soilTile(theme: ThemeId): AnyCanvas {
+  return finish(soilTileSteps(theme));
+}
+
+/** То же по шагам (шум — по 64 строки, затем крапинки и камушки). */
+function* soilTileSteps(theme: ThemeId): Generator<void, AnyCanvas> {
   const key = `soil:${theme}`;
   const hit = tileCache.get(key);
   if (hit) return hit;
@@ -86,7 +92,7 @@ function soilTile(theme: ThemeId): AnyCanvas {
   const a = hexRgb(G.soil);
   const b = hexRgb(G.soilDark);
   const deep = hexRgb(G.soilDeep);
-  const c = noiseTile(S, 17 + theme.length, 8, 3, (v, _x, y) => {
+  const c = yield* noiseTileSteps(S, 17 + theme.length, 8, 3, (v, _x, y) => {
     const t = clamp((v - 0.36) * 2.3, 0, 1);
     // слой (страта) — тёмная волнистая полоса на глубине ~2.4 м тайла
     const yy = y / ppm;
@@ -177,9 +183,13 @@ function drawShell(ctx: Ctx2D, r: number, G: GroundPalette): void {
 
 /** Крупные мягкие пятна камня (светлые / тёмные, без крапин). */
 function rockTileBig(): AnyCanvas {
+  return finish(rockTileBigSteps());
+}
+
+function* rockTileBigSteps(): Generator<void, AnyCanvas> {
   const hit = tileCache.get('rockBig');
   if (hit) return hit;
-  const c = noiseTile(ROCK_BIG_PX, 41, 3, 3, (v) => {
+  const c = yield* noiseTileSteps(ROCK_BIG_PX, 41, 3, 3, (v) => {
     const t = clamp((v - 0.5) * 2.4, -1, 1);
     return t > 0 ? [255, 255, 255, Math.round(t * 0.16 * 255)] : [20, 24, 30, Math.round(-t * 0.2 * 255)];
   });
@@ -189,9 +199,13 @@ function rockTileBig(): AnyCanvas {
 
 /** Мелкая фактура камня: зерно и редкие крапины. */
 function rockTileFine(): AnyCanvas {
+  return finish(rockTileFineSteps());
+}
+
+function* rockTileFineSteps(): Generator<void, AnyCanvas> {
   const hit = tileCache.get('rockFine');
   if (hit) return hit;
-  const c = noiseTile(ROCK_FINE_PX, 59, 8, 2, (v) => {
+  const c = yield* noiseTileSteps(ROCK_FINE_PX, 59, 8, 2, (v) => {
     const t = clamp((v - 0.5) * 2.2, -1, 1);
     return t > 0 ? [255, 255, 255, Math.round(t * 0.07 * 255)] : [20, 24, 30, Math.round(-t * 0.09 * 255)];
   });
@@ -1122,6 +1136,11 @@ export class TerrainRenderer {
 
   /** Привязать рельеф: тот же массив — без работы; новый массив — по хэшу содержимого (смена — сброс кэша). */
   private bind(terrain: readonly TerrainDef[], theme: ThemeId): Geo[] {
+    return finish(this.bindSteps(terrain, theme));
+  }
+
+  /** bind по шагам: геометрия — по одному элементу рельефа за шаг (прогрев кусками). */
+  private *bindSteps(terrain: readonly TerrainDef[], theme: ThemeId): Generator<void, Geo[]> {
     if (terrain !== this.ref) {
       const key = terrainHash(terrain);
       if (key !== this.key) {
@@ -1139,7 +1158,15 @@ export class TerrainRenderer {
     }
     let g = this.geos.get(theme);
     if (!g) {
-      g = this.items.map((it) => buildGeo(it, theme));
+      const items = this.items;
+      const out: Geo[] = [];
+      for (let i = 0; i < items.length; i++) {
+        out.push(buildGeo(items[i], theme));
+        if (i + 1 < items.length) yield;
+      }
+      // за время шагов рельеф или тема могли смениться (рисование между кусками) — не путать кэш
+      if (this.items !== items || this.theme !== theme) return out;
+      g = out;
       this.geos.set(theme, g);
     }
     return g;
@@ -1288,12 +1315,22 @@ export class TerrainRenderer {
    * вид — тайлы этого вида (обычно вид рогатки; его масштаб закрепляется в кэше). Возвращает затраченное время, мс.
    */
   prewarm(terrain: readonly TerrainDef[], theme: ThemeId, view?: ViewInfo): number {
-    if (!hasDom()) return 0;
     const t0 = nowMs();
-    soilTile(theme);
-    rockTileBig();
-    rockTileFine();
-    const geos = this.bind(terrain, theme);
+    runAll(this.prewarmSteps(terrain, theme, view));
+    return nowMs() - t0;
+  }
+
+  /** Шаги прогрева (по текстуре / геометрии / тайлу вида) — для нарезки с уступкой кадра (prewarmTerrainAsync). */
+  *prewarmSteps(terrain: readonly TerrainDef[], theme: ThemeId, view?: ViewInfo): Generator<void> {
+    if (!hasDom()) return;
+    yield* soilTileSteps(theme);
+    yield;
+    yield* rockTileBigSteps();
+    yield;
+    yield* rockTileFineSteps();
+    yield;
+    const geos = yield* this.bindSteps(terrain, theme);
+    yield;
     if (view && view.scale > 0) {
       let set = this.sets.find((s) => Math.abs(view.scale / s.scale - 1) <= TILE_EPS);
       if (!set) {
@@ -1307,10 +1344,15 @@ export class TerrainRenderer {
       set.pinned = true;
       this.visits.set(Math.round(Math.log(view.scale) * 2000), 1e6);
       const { i0, i1, j0, j1 } = this.tileRange(view, false);
-      for (let j = j0 - 1; j <= j1 + 1; j++) for (let i = i0 - 1; i <= i1 + 1; i++) if (!set.tiles.has(tileKey(i, j))) this.buildTile(set, geos, theme, i, j);
+      for (let j = j0 - 1; j <= j1 + 1; j++) {
+        for (let i = i0 - 1; i <= i1 + 1; i++) {
+          if (set.tiles.has(tileKey(i, j))) continue;
+          this.buildTile(set, geos, theme, i, j);
+          yield;
+        }
+      }
       this.evict();
     }
-    return nowMs() - t0;
   }
 
   /** Начало мировых пикселей на экране и диапазон видимых тайлов. */
@@ -1407,6 +1449,11 @@ const shared = new TerrainRenderer();
  */
 export function prewarmTerrain(terrain: TerrainDef[], theme: ThemeId, view?: ViewInfo): number {
   return shared.prewarm(terrain, theme, view);
+}
+
+/** То же кусками ≤ sliceMs с await yieldFn() между ними (шаг — текстура темы, геометрия, тайл вида). */
+export function prewarmTerrainAsync(terrain: TerrainDef[], theme: ThemeId, view: ViewInfo | undefined, opts: SliceOpts = {}): Promise<number> {
+  return runSliced(shared.prewarmSteps(terrain, theme, view), opts);
 }
 
 /**

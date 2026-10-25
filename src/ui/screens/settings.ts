@@ -1,7 +1,7 @@
 // Диалоги (07 §14): «Настройки» (свитчи, сегменты, сброс прогресса, «Об игре») и подтверждение сброса.
 // Бумажная панель поверх всего, затемнение, Esc/тап мимо — закрыть, Tab не выходит из диалога.
 
-import type { Settings } from '../../storage/progress';
+import { shakeOn, type Settings } from '../../storage/progress';
 import { CSS_EASE, anim, done, motion, popIn } from '../anim';
 import type { UiCtx } from '../ctx';
 import { button, focusEl, h, ribbon } from '../dom';
@@ -128,7 +128,7 @@ export class SettingsDialog implements DialogView {
   private readonly backdrop: HTMLElement;
   private readonly closeBtn: HTMLButtonElement;
   private readonly first: HTMLElement;
-  private readonly sw: Partial<Record<'music' | 'sfx' | 'shake' | 'haptics', { set(v: boolean): void }>> = {};
+  private readonly sw: Partial<Record<'music' | 'levelMusic' | 'sfx' | 'shake' | 'haptics', { set(v: boolean): void }>> = {};
   private readonly dispose: () => void;
 
   constructor(
@@ -151,11 +151,13 @@ export class SettingsDialog implements DialogView {
     const set = (p: Partial<Settings>): void => ctx.setSettings(p);
 
     const music = switchRow(S.setMusic, s.music, (v) => set({ music: v }), 'set-music');
+    const levelMusic = switchRow(S.setLevelMusic, s.levelMusic, (v) => set({ levelMusic: v }), 'set-level-music');
     const sfx = switchRow(S.setSfx, s.sfx, (v) => set({ sfx: v }), 'set-sfx');
-    const shake = switchRow(S.setShake, s.shake, (v) => set({ shake: v }), 'set-shake');
-    this.sw = { music, sfx, shake };
+    // «авто» показывается действующим значением (при уменьшенном движении — выкл); нажатие делает выбор явным
+    const shake = switchRow(S.setShake, shakeOn(s, motion.reduced), (v) => set({ shake: v }), 'set-shake');
+    this.sw = { music, levelMusic, sfx, shake };
     // две колонки (в ландшафте): слева свитчи и сброс, справа сегменты
-    const swRows: HTMLElement[] = [music.row, sfx.row, shake.row];
+    const swRows: HTMLElement[] = [music.row, levelMusic.row, sfx.row, shake.row];
     if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
       const hap = switchRow(S.setHaptics, s.haptics, (v) => set({ haptics: v }), 'set-haptics');
       this.sw.haptics = hap;
@@ -208,8 +210,9 @@ export class SettingsDialog implements DialogView {
   sync(): void {
     const s = this.ctx.settings();
     this.sw.music?.set(s.music);
+    this.sw.levelMusic?.set(s.levelMusic);
     this.sw.sfx?.set(s.sfx);
-    this.sw.shake?.set(s.shake);
+    this.sw.shake?.set(shakeOn(s, motion.reduced));
     this.sw.haptics?.set(s.haptics);
   }
 

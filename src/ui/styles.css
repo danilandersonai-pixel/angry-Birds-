@@ -105,6 +105,7 @@
 .abui[data-letterbox] .hint,
 .abui[data-letterbox] .ability-hint {
   top: calc(50% + var(--lb-h) / 2 + 12px);
+  bottom: auto;
 }
 .abui[data-letterbox] .banner {
   top: calc(50% - var(--lb-h) * 0.2);
@@ -2209,11 +2210,12 @@
 }
 
 /* ───────────── подсказка способности (07 §10.4) ───────────── */
-/* сверху по центру, под строкой HUD: не закрывает землю со свиньями и опорами во время полёта и удара */
+/* снизу по центру, над полосой земли: сверху тост закрывал саму птицу в полёте (на телефоне апогей — под строкой HUD) */
 .ability-hint {
   position: absolute;
   left: 50%;
-  top: calc(var(--inset-t) + max(52px, 76 * var(--u)));
+  top: auto;
+  bottom: calc(var(--inset-b) + max(56px, 64 * var(--u)));
   translate: -50% 0;
   display: flex;
   align-items: center;

@@ -3,6 +3,7 @@
 // Обе мелодии написаны с нуля для проекта — это НЕ тема Angry Birds.
 // Все функции принимают BaseAudioContext и узел назначения: живой звук и офлайн-рендер идут одним путём.
 
+import type { ThemeId } from '../core/types';
 import type { NoiseBank } from './noise';
 import { type Ctx, midiHz, playNoiseBurst, playTone } from './synth';
 
@@ -341,8 +342,8 @@ export const LEVEL_SONG: AmbSong = {
   ],
 };
 
-/** Компиляция эмбиента: калимба, пэд на смену аккорда (на всю его длину), мягкий бас на 1-ю и 3-ю доли, шейкер. */
-export function compileAmbient(song: AmbSong): SeqEv[] {
+/** Компиляция эмбиента: калимба, пэд на смену аккорда (на всю его длину), мягкий бас на 1-ю и 3-ю доли, шейкер. tr — транспозиция, полутоны. */
+export function compileAmbient(song: AmbSong, tr = 0): SeqEv[] {
   const ev: SeqEv[] = [];
   const n = song.bars.length;
   const S = song.barSteps;
@@ -350,7 +351,7 @@ export function compileAmbient(song: AmbSong): SeqEv[] {
     const s0 = bi * S;
     let pos = 0;
     for (const [m, len, vel] of bar.lead) {
-      if (m > 0) ev.push({ step: s0 + pos, kind: 'pluck', midi: m, len, vel: vel ?? (pos % 4 === 0 ? 0.9 : 0.75) });
+      if (m > 0) ev.push({ step: s0 + pos, kind: 'pluck', midi: m + tr, len, vel: vel ?? (pos % 4 === 0 ? 0.9 : 0.75) });
       pos += len;
     }
     if (pos !== S) throw new Error(`такт ${bi}: длина мелодии ${pos} ≠ ${S}`);
@@ -358,9 +359,9 @@ export function compileAmbient(song: AmbSong): SeqEv[] {
     if (bi === 0 || song.bars[bi - 1]!.chord !== bar.chord) {
       let span = 1;
       while (bi + span < n && song.bars[bi + span]!.chord === bar.chord) span++;
-      ev.push({ step: s0, kind: 'pad', notes: ch.pad, len: span * S, vel: 1 });
+      ev.push({ step: s0, kind: 'pad', notes: tr ? ch.pad.map((m) => m + tr) : ch.pad, len: span * S, vel: 1 });
     }
-    ev.push({ step: s0, kind: 'sub', midi: ch.bass, len: 7, vel: 1 }, { step: s0 + 8, kind: 'sub', midi: ch.bass, len: 6, vel: 0.7 });
+    ev.push({ step: s0, kind: 'sub', midi: ch.bass + tr, len: 7, vel: 1 }, { step: s0 + 8, kind: 'sub', midi: ch.bass + tr, len: 6, vel: 0.7 });
     if (bar.shaker) {
       for (const k of [2, 6, 10, 14]) ev.push({ step: s0 + k, kind: 'shaker', vel: 1 });
       for (const k of [7, 15]) ev.push({ step: s0 + k, kind: 'shaker', vel: 0.45 });
@@ -369,7 +370,7 @@ export function compileAmbient(song: AmbSong): SeqEv[] {
   return ev.sort((a, b) => a.step - b.step);
 }
 
-export function compileAmbientSong(name: string, song: AmbSong): CompiledSong {
+export function compileAmbientSong(name: string, song: AmbSong, tr = 0): CompiledSong {
   return {
     name,
     bpm: song.bpm,
@@ -377,9 +378,34 @@ export function compileAmbientSong(name: string, song: AmbSong): CompiledSong {
     stepS: 60 / song.bpm / 4,
     introSteps: 0,
     totalSteps: song.bars.length * song.barSteps,
-    events: compileAmbient(song),
+    events: compileAmbient(song, tr),
   };
 }
+
+/**
+ * Луп уровня по теме (ревью «в уровнях нет музыки»; AB2: у уровней своя спокойная музыка): та же «Тихая лужайка»,
+ * но в своей тональности, темпе и с своим шейкером — луг: фа мажор, 80 BPM, шейкер со второй половины; пляж: соль
+ * мажор, 88 BPM, шейкер всё время («ракушки»); снег: ре мажор, 70 BPM, без шейкера («музыкальная шкатулка»).
+ */
+export const LEVEL_THEME: Readonly<Record<ThemeId, { transpose: number; bpm: number; shaker: 'song' | 'all' | 'none' }>> = {
+  meadow: { transpose: 0, bpm: 80, shaker: 'song' },
+  beach: { transpose: 2, bpm: 88, shaker: 'all' },
+  snow: { transpose: -3, bpm: 70, shaker: 'none' },
+};
+
+/** Песня лупа уровня для темы. */
+export function levelSong(theme: ThemeId): CompiledSong {
+  const v = LEVEL_THEME[theme];
+  const bars = LEVEL_SONG.bars.map((b) => ({ ...b, shaker: v.shaker === 'song' ? b.shaker : v.shaker === 'all' }));
+  return compileAmbientSong(`level:${theme}`, { ...LEVEL_SONG, bpm: v.bpm, bars }, v.transpose);
+}
+
+/** Лупы уровней по темам. */
+export const LEVEL_SONGS: Readonly<Record<ThemeId, CompiledSong>> = {
+  meadow: levelSong('meadow'),
+  beach: levelSong('beach'),
+  snow: levelSong('snow'),
+};
 
 /** Готовые песни треков движка. */
 export const SONGS = {

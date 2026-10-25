@@ -99,7 +99,13 @@ export interface LevelDef {
   birds: BirdType[];
   /** ANCHOR рогатки в мире — центр «кармашка» в покое = основание рогатки + SLINGSHOT.ANCHOR (0, 2.7). Обычно (0, 2.7) при земле y=0. */
   slingshot: Vec;
-  /** Границы мира: за пределами птица/обломки удаляются. Камера ограничена ими. */
+  /**
+   * Границы уровня. По x: птица «уходит» за minX/maxX ± RETIRE.OUT_MARGIN (8 м), остальные тела удаляются за
+   * ± WORLD.BOUNDS_MARGIN (15 м; свинья — с гибелью); снизу — ниже killY = min(WORLD.KILL_Y, низ рельефа − 1).
+   * maxY — верх уровня для поиска земли лучом сверху (очередь птиц); сверху ядро ничего не удаляет: всё, что
+   * взлетело выше, падает обратно. Камера (render/Camera.clampPose) по x держится в minX…maxX, по высоте — не выше
+   * земли − GROUND_MARGIN + VIEW_H_MAX, maxY она не читает.
+   */
   bounds: { minX: number; maxX: number; maxY: number };
   /** Рельеф. Обычно первый элемент — широкая земля под всем уровнем. */
   terrain: TerrainDef[];
@@ -128,8 +134,13 @@ export interface LevelMeta {
   teach?: string;
   /** Откуда пороги звёзд: 'solver' — по решателю, 'manual' — вручную. */
   starsSource?: 'solver' | 'manual';
-  /** Произвольные данные калибровки (счёт решателя и т.п.). */
+  /**
+   * Данные калибровки (scripts/level-report.ts --solve --robust): expertBirds / expertScore — птиц и счёт линии
+   * эксперта, robustWin / handWin — доля её побед под «мелким» шумом и «рукой» (sim/robust.ts) и т.п.
+   */
   calib?: Record<string, number>;
+  /** Линия эксперта: выстрелы по порядку — угол °, сила 0..1, тап способности (с после запуска). Тесты её повторяют. */
+  plan?: Array<{ angleDeg: number; power: number; abilityAt?: number | null }>;
 }
 
 /** Декоративный объект без физики. */

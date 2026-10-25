@@ -18,6 +18,9 @@
 //   --seed=N       seed сессии (1)
 //   --seconds=N    длительность проверки устойчивости, с (10)
 //   --jobs=N       процессов-оценщиков решателя (по умолчанию — число ядер; 1 — в этом процессе)
+//   --robust[=K]   устойчивый решатель: лучшие кандидаты каждой птицы переоцениваются K (12) прогонами с «мелким»
+//                  шумом исполнения, звёзды — по устойчивой линии (2★ — медиана, 3★ — 80-й перцентиль)
+//   --runs=N       прогонов проверки устойчивости найденной линии (30): «мелкий» шум и «рука» (sim/robust.ts)
 // В конце текстового отчёта — сводная таблица (Markdown) и, при --solve, предложенные пороги звёзд
 // готовым фрагментом для вставки в файлы уровней (src/levels/episodeN.ts, поле stars).
 // Код возврата: 0 — все уровни устойчивы (и решены при --solve); 1 — есть проблемы; 2 — уровни не найдены.
@@ -30,15 +33,21 @@ import { availableParallelism } from 'node:os';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
+import { GameCamera } from '../src/app/GameCamera';
 import type { LevelDef } from '../src/core/index';
+import { lintLevel } from '../src/levels/lint';
 import {
   checkStability,
+  NOISE,
+  robustBatch,
+  robustReport,
   simulateShots,
   solveLevel,
   solveLevelAsync,
   suggestStars,
   type BatchEvaluator,
   type BodyMotion,
+  type RobustReport,
   type Shot,
   type SimResult,
   type SolveOptions,
@@ -56,6 +65,38 @@ interface LevelReport {
   stability: StabilityReport;
   solve?: SolveResult;
   stars?: StarSuggestion;
+  /** Устойчивость найденной линии: «мелкий» шум и «рука». */
+  robust?: { fine: RobustReport; hand: RobustReport };
+  /** Ходы (решателя и прогонов с шумом), после которых живая свинья лежит левее рогатки + PIG_NEAR_SLING м. */
+  pigsNearSling?: number;
+  /** Вид рогатки в игре (GameCamera без DOM, HUD по формуле): Ред, px, и доля неба над контентом. */
+  frame: FrameInfo[];
+  lint: { errors: string[]; warnings: string[] };
+}
+
+interface FrameInfo {
+  w: number;
+  h: number;
+  viewH: number;
+  redPx: number;
+  skyFrac: number;
+}
+
+/** Экраны для замера кадра: десктоп 16:9 и телефон (касание). */
+const FRAME_SCREENS: ReadonlyArray<[number, number, boolean]> = [
+  [1600, 900, false],
+  [844, 390, true],
+];
+
+function frameOf(level: LevelDef): FrameInfo[] {
+  return FRAME_SCREENS.map(([w, h, coarse]) => {
+    const c = new GameCamera();
+    c.pointerCoarse = coarse;
+    c.setViewport(w, h, 1);
+    c.setLevel(level);
+    const a = c.aimView();
+    return { w, h, viewH: a.viewH, redPx: (0.9 * h) / a.viewH, skyFrac: (a.y + a.viewH / 2 - c.level.contentTop) / a.viewH };
+  });
 }
 
 const SCRIPT = fileURLToPath(import.meta.url);
@@ -85,8 +126,12 @@ const opts = {
     refine: num('refine', 3),
     refineLevels: num('refine-levels', 2),
     maxMs: num('max-ms', 60_000),
+    robust: flags.has('robust') ? { runs: num('robust', 12) || 12, top: 8 } : undefined,
   } satisfies SolveOptions,
+  runs: Math.max(1, Math.round(num('runs', 30))),
 };
+/** Свинья ближе этого к рогатке (по x) в конце хода — изъян уровня (ревью: король докатывался до рогатки). */
+const PIG_NEAR_SLING = 5;
 
 function fail(message: string): never {
   console.error(message);
@@ -176,7 +221,9 @@ function poolEvaluator(pool: readonly Evaluator[]): BatchEvaluator {
 
 async function reportLevel(level: LevelDef, evaluate: BatchEvaluator | null): Promise<LevelReport> {
   const stability = checkStability(level, opts.seconds, { seed: opts.solver.seed, keepAwake: opts.awake });
-  const head = { id: level.id, name: level.name, stars0: level.stars, stability };
+  const lr = lintLevel(level);
+  const lint = { errors: lr.errors.map((i) => `[${i.code}] ${i.message}`), warnings: lr.warnings.map((i) => `[${i.code}] ${i.message}`) };
+  const head = { id: level.id, name: level.name, stars0: level.stars, stability, frame: frameOf(level), lint };
   if (!opts.solve) return head;
   const solverOpts: SolveOptions = {
     ...opts.solver,
@@ -188,7 +235,22 @@ async function reportLevel(level: LevelDef, evaluate: BatchEvaluator | null): Pr
           ),
   };
   const solve = evaluate ? await solveLevelAsync(level, solverOpts, evaluate) : solveLevel(level, solverOpts);
-  return { ...head, solve, stars: suggestStars(level, solve) };
+  if (!solve.shots.length) return { ...head, solve, stars: suggestStars(level, solve) };
+  // устойчивость найденной линии: те же прогоны в пуле или здесь
+  const ctx = { level, seed: opts.solver.seed, wait: solve.wait, outOfTime: () => false };
+  const runBatch = async (batch: Shot[][]): Promise<SimResult[]> =>
+    evaluate
+      ? ((await evaluate(batch, ctx)) as SimResult[])
+      : batch.map((shots) => simulateShots(level, shots, opts.solver.seed, { wait: solve.wait }));
+  const fineRes = await runBatch(robustBatch(level, solve.shots, { runs: opts.runs, noise: NOISE.fine }));
+  const handRes = await runBatch(robustBatch(level, solve.shots, { runs: opts.runs, noise: NOISE.hand }));
+  const fine = robustReport(fineRes);
+  const hand = robustReport(handRes);
+  const near = level.slingshot.x + PIG_NEAR_SLING;
+  const pigsNearSling = [solve.log, ...fineRes.map((r) => r.shots), ...handRes.map((r) => r.shots)]
+    .flat()
+    .filter((l) => l.pigMinX !== null && l.pigMinX < near).length;
+  return { ...head, solve, stars: suggestStars(level, solve, fine), robust: { fine, hand }, pigsNearSling };
 }
 
 /** Норма смещения после усадки (06 §7.1, T0) — справочно, в критерий устойчивости не входит. */
@@ -211,6 +273,14 @@ function formatStability(r: StabilityReport): string[] {
   return lines;
 }
 
+function formatRobust(r: LevelReport): string[] {
+  if (!r.robust) return [];
+  const f = (x: RobustReport) => `побед ${Math.round(x.winRate * 100)} %, ★ ${x.meanStars.toFixed(2)}, медиана ${pts(x.median)}, p80 ${pts(x.p80)}`;
+  const lines = [`  устойчивость (${r.robust.fine.runs} прогонов): мелкий шум — ${f(r.robust.fine)}; рука — ${f(r.robust.hand)}`];
+  if (r.pigsNearSling) lines.push(`    ! свинья у рогатки (левее x = рогатка + ${PIG_NEAR_SLING} м) после ${r.pigsNearSling} ходов`);
+  return lines;
+}
+
 function formatSolve(level: LevelDef, s: SolveResult, stars: StarSuggestion): string[] {
   const nMin = level.meta?.nMin;
   const shots = s.shots.map((x) => `${x.angleDeg}° × ${x.power}${x.abilityAt != null ? ` тап ${x.abilityAt} с` : ''}`).join('; '); // без округления: строка повторяема
@@ -221,7 +291,8 @@ function formatSolve(level: LevelDef, s: SolveResult, stars: StarSuggestion): st
       (s.timedOut ? ', остановлен по лимиту времени' : ''),
     `    выстрелы: ${shots || '—'}`,
     `  звёзды 2★/3★: заданы ${pts(level.stars.two)} / ${pts(level.stars.three)}, предложено ${pts(stars.stars.two)} / ${pts(stars.stars.three)}` +
-      (stars.capped ? ' (3★ ограничена счётом эксперта)' : ''),
+      (stars.capped ? ' (3★ ограничена счётом эксперта)' : '') +
+      (stars.robust ? ' (по устойчивой линии)' : ''),
   ];
   for (const w of stars.warnings) lines.push(`    ! ${w}`);
   return lines;
@@ -229,15 +300,22 @@ function formatSolve(level: LevelDef, s: SolveResult, stars: StarSuggestion): st
 
 function formatLevel(level: LevelDef, r: LevelReport): string {
   const bodies = level.blocks.length + (level.tnt?.length ?? 0);
-  const lines = [`${r.id} «${r.name}»: птиц ${level.birds.length}, свиней ${level.pigs.length}, блоков и TNT ${bodies}`, ...formatStability(r.stability)];
-  if (r.solve && r.stars) lines.push(...formatSolve(level, r.solve, r.stars));
+  const frame = r.frame.map((f) => `${f.w}×${f.h} — Ред ${f.redPx.toFixed(1)} px (вид ${f.viewH.toFixed(1)} м), небо ${f.skyFrac.toFixed(2)}`).join('; ');
+  const lines = [
+    `${r.id} «${r.name}»: птиц ${level.birds.length}, свиней ${level.pigs.length}, блоков и TNT ${bodies}`,
+    `  кадр: ${frame}`,
+    `  lint: ошибок ${r.lint.errors.length}, предупреждений ${r.lint.warnings.length}`,
+    ...[...r.lint.errors, ...r.lint.warnings].slice(0, 8).map((x) => `    · ${x}`),
+    ...formatStability(r.stability),
+  ];
+  if (r.solve && r.stars) lines.push(...formatSolve(level, r.solve, r.stars), ...formatRobust(r));
   return lines.join('\n');
 }
 
 /** Сводная таблица в Markdown: по строке на уровень. */
 function summaryTable(levels: readonly LevelDef[], results: readonly LevelReport[]): string[] {
   const head = ['уровень', 'птиц', 'свиней', 'тел', 'устойчив', 'сдвиг блоков, м', 'поворот, °', 'сдвиг свиней, м', 'сон, с'];
-  if (opts.solve) head.push('решён', 'птиц / nMin', 'счёт', '2★/3★ заданы', '2★/3★ предложено', 'решатель, с');
+  if (opts.solve) head.push('решён', 'птиц / nMin', 'счёт', '2★/3★ заданы', '2★/3★ предложено', 'побед: мелко / рука', 'решатель, с');
   const rows = results.map((r, i) => {
     const level = levels[i];
     const st = r.stability;
@@ -260,6 +338,7 @@ function summaryTable(levels: readonly LevelDef[], results: readonly LevelReport
         pts(s.score),
         `${pts(level.stars.two)} / ${pts(level.stars.three)}`,
         `${pts(r.stars.stars.two)} / ${pts(r.stars.stars.three)}`,
+        r.robust ? `${Math.round(r.robust.fine.winRate * 100)} % / ${Math.round(r.robust.hand.winRate * 100)} %` : '—',
         (s.ms / 1000).toFixed(1) + (s.timedOut ? ' (лимит)' : s.reduced ? ' (урезан)' : ''),
       );
     }
@@ -279,7 +358,13 @@ function starsFragment(results: readonly LevelReport[]): string[] {
     ...solved.map((r) => {
       const { two, three } = r.stars!.stars;
       const same = two === r.stars0.two && three === r.stars0.three;
-      return `'${r.id}': { stars: { one: 0, two: ${k(two)}, three: ${k(three)} } },${same ? ' // как задано' : ''}`;
+      const s = r.solve!;
+      const plan = s.shots.map((x) => `[${x.angleDeg}, ${x.power}${x.abilityAt != null ? `, ${x.abilityAt}` : ''}]`).join(', ');
+      const rb = r.robust ? `, robustWin: ${r.robust.fine.winRate.toFixed(2)}, handWin: ${r.robust.hand.winRate.toFixed(2)}` : '';
+      return (
+        `'${r.id}': { stars: { one: 0, two: ${k(two)}, three: ${k(three)} } },${same ? ' // как задано' : ''}\n` +
+        `    nMin: ${s.birdsUsed}, calib: { expertBirds: ${s.birdsUsed}, expertScore: ${s.score}${rb} }, plan: [${plan}]`
+      );
     }),
   ];
 }

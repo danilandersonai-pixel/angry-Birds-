@@ -1,7 +1,7 @@
 // Музыка: инварианты нот (такт = 8/16 шестнадцатых), форма польки, эмбиент уровня, джинглы, lookahead-планировщик.
 import { describe, expect, it } from 'vitest';
 import {
-  type Bar, compileAmbient, compileBars, DEFEAT, LEVEL_SONG, LOOKAHEAD_MS, MENU_SONG, SCHEDULE_AHEAD_S, type SeqEv,
+  type Bar, compileAmbient, compileBars, DEFEAT, LEVEL_SONG, LEVEL_SONGS, LEVEL_THEME, LOOKAHEAD_MS, MENU_SONG, SCHEDULE_AHEAD_S, type SeqEv,
   Sequencer, SONGS, type Timers, VICTORY,
 } from '../../src/audio/music';
 import { makeNoiseBank } from '../../src/audio/noise';
@@ -67,6 +67,28 @@ describe('спокойная музыка уровня «Тихая лужайк
   it('пэд берётся раз на смену аккорда и держится всю его длину', () => {
     const pads = s.events.filter((e) => e.kind === 'pad');
     expect(pads.reduce((n, e) => n + e.len!, 0)).toBe(s.totalSteps);
+  });
+});
+
+describe('луп уровня по темам (ревью «в уровнях нет музыки»)', () => {
+  it('у каждой темы свой вариант: тональность, темп, шейкер; форма и длина такта те же', () => {
+    const pl = (th: 'meadow' | 'beach' | 'snow') => LEVEL_SONGS[th].events.filter((e) => e.kind === 'pluck').map((e) => e.midi!);
+    expect(LEVEL_SONGS.meadow.events).toEqual(SONGS.level.events); // луг — исходная «Тихая лужайка»
+    expect(pl('beach')).toEqual(pl('meadow').map((m) => m + LEVEL_THEME.beach.transpose));
+    expect(pl('snow')).toEqual(pl('meadow').map((m) => m + LEVEL_THEME.snow.transpose));
+    const bpms = new Set(Object.values(LEVEL_SONGS).map((s) => s.bpm));
+    expect(bpms.size).toBe(3);
+    const shakers = (th: 'meadow' | 'beach' | 'snow') => LEVEL_SONGS[th].events.filter((e) => e.kind === 'shaker').length;
+    expect(shakers('snow')).toBe(0);
+    expect(shakers('beach')).toBeGreaterThan(shakers('meadow'));
+    for (const s of Object.values(LEVEL_SONGS)) {
+      expect(s.totalSteps).toBe(LEVEL_SONG.bars.length * 16);
+      // спокойный луп: 70–90 BPM, петля 40–60 с
+      expect(s.bpm).toBeGreaterThanOrEqual(70);
+      expect(s.bpm).toBeLessThanOrEqual(90);
+      expect(s.totalSteps * s.stepS).toBeGreaterThan(40);
+      expect(s.totalSteps * s.stepS).toBeLessThan(60);
+    }
   });
 });
 
@@ -176,10 +198,9 @@ describe('треки движка (tracks.ts)', () => {
     const amb = c.createGain();
     return { ctx, made, music, amb, nb: makeNoiseBank(ctx, 0.05), env: fakeEnv() };
   }
-  it("'level' — только фон темы: ни оркестра, ни секвенсора, к шине музыки ничего не подключено", () => {
-    expect(LEVEL_MUSIC).toBe(false);
+  it("'level' с выключенным лупом («Музыка в уровнях» выкл.) — только фон темы: ни оркестра, ни секвенсора", () => {
     const { ctx, made, music, amb, nb, env } = setup();
-    const h = startTrack(ctx, nb, music as unknown as AudioNode, amb as unknown as AudioNode, 'level', 'snow', { at: 0, fadeIn: 0.6, timers: env.timers });
+    const h = startTrack(ctx, nb, music as unknown as AudioNode, amb as unknown as AudioNode, 'level', 'snow', { at: 0, fadeIn: 0.6, timers: env.timers, levelMusic: false });
     expect(h.music).toBe(false);
     expect(made.some((n) => n.outs.has(music))).toBe(false);
     expect(made.some((n) => n.outs.has(amb))).toBe(true);
@@ -188,9 +209,11 @@ describe('треки движка (tracks.ts)', () => {
     env.run(1000);
     expect(env.pending()).toBe(0);
   });
-  it('луп уровня (P2) включается флагом; полька — тише прежнего (кнопки меню над музыкой)', () => {
+  it('луп уровня по умолчанию включён, тише польки на ≥ 6 дБ; полька — тише прежнего (кнопки меню над музыкой)', () => {
+    expect(LEVEL_MUSIC).toBe(true);
+    expect(20 * Math.log10(TRACK_GAIN.level / TRACK_GAIN.menu)).toBeLessThanOrEqual(-6);
     const { ctx, made, music, amb, nb, env } = setup();
-    const h = startTrack(ctx, nb, music as unknown as AudioNode, amb as unknown as AudioNode, 'level', 'snow', { at: 0, fadeIn: 0.6, timers: env.timers, levelMusic: true });
+    const h = startTrack(ctx, nb, music as unknown as AudioNode, amb as unknown as AudioNode, 'level', 'snow', { at: 0, fadeIn: 0.6, timers: env.timers });
     expect(h.music).toBe(true);
     expect(made.some((n) => n.outs.has(music))).toBe(true);
     expect(env.pending()).toBe(1);

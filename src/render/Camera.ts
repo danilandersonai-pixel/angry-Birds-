@@ -39,6 +39,14 @@ export const CAMERA_CFG = {
   AIM_RIGHT_PAD_MIN: 0.5,
   /** Следование: при |vx| больше этого камера не едет навстречу движению птицы, м/с. */
   FOLLOW_DEAD_V: 0.5,
+  /** Упреждение по vx сглаживается с этим τ, с: разворот птицы (удар, Хэл) не перебрасывает цель кадра скачком. */
+  FOLLOW_TAU_LOOK: 0.45,
+  /**
+   * Манёвр способности (петля Сильвер, разворот Хэла): упреждение заморожено, τ позиции 0.55 с, назад камера едет,
+   * только если птица уходит левее этой доли ширины кадра (вперёд — правее 1 − доля).
+   */
+  FOLLOW_TAU_MANEUVER: 0.55,
+  MANEUVER_BAND: 0.15,
   /** Общий план «почти равен» виду рогатки: выше него меньше чем в столько раз, а центры ближе этой доли ширины. */
   OVERVIEW_SAME_K: 1.12,
   OVERVIEW_SAME_X_K: 0.1,
@@ -270,6 +278,11 @@ export class Camera {
   private kvy = 0;
   private shakes: ShakeSrc[] = [];
   private autoCache: CameraPose | null = null; // авто-вид рогатки до смены уровня/viewport
+  /** Сглаженное упреждение следования, м (null — следование не идёт: первый кадр берёт мгновенное). */
+  private look: number | null = null;
+  /** Сколько ещё секунд длится манёвр способности (спокойное следование); manEnded — он кончился на прошлом кадре. */
+  private manT = 0;
+  private manEnded = false;
 
   constructor(level?: LevelDef) {
     if (level) this.setLevel(level);
@@ -554,6 +567,7 @@ export class Camera {
   panBy(dxCss: number, dyCss: number): void {
     this.tween = null;
     this.vx = this.vy = 0;
+    this.look = null;
     const k = this.ppm;
     this.x -= dxCss / k;
     this.y += dyCss / k;
@@ -608,6 +622,9 @@ export class Camera {
   jumpTo(p: CameraPose): void {
     this.tween = null;
     this.vx = this.vy = 0;
+    this.look = null;
+    this.manT = 0;
+    this.manEnded = false;
     const c = this.clampPose(p);
     this.x = c.x;
     this.y = c.y;
@@ -617,6 +634,9 @@ export class Camera {
   /** Перелёт в позу за duration секунд (по умолчанию easeInOutCubic). duration ≤ 0 — мгновенно. */
   flyTo(x: number, y: number, viewH: number, duration: number, ease: Ease = easeInOutCubic): void {
     this.vx = this.vy = 0;
+    this.look = null;
+    this.manT = 0;
+    this.manEnded = false;
     const to = this.clampPose({ x, y, viewH });
     if (!(duration > 0)) {
       this.jumpTo(to);
@@ -672,28 +692,56 @@ export class Camera {
   }
 
   /**
-   * Следование за птицей (01 §6.4): упреждение по vx, птица в полосе 25–65 % ширины, зум — птица и земля в кадре
-   * плюс 3 м над птицей, но не ближе вида рогатки. Экспоненты τ 0.18 / 0.35 с; низ кадра — к земле той же τ 0.18.
-   * Мёртвая зона: камера не едет навстречу движению птицы (при выпуске птица на 20 % — левее полосы — и камера
-   * ждёт, пока та сама войдёт в полосу, а не дёргается назад к рогатке).
+   * Манёвр способности на sec секунд (петля Сильвер, разворот Хэла): следование спокойнее — упреждение заморожено,
+   * τ позиции FOLLOW_TAU_MANEUVER, назад — только когда птица уходит из полосы [0.15, 0.85] ширины кадра.
+   */
+  maneuver(sec: number): void {
+    if (Number.isFinite(sec) && sec > 0) this.manT = Math.max(this.manT, sec);
+  }
+
+  /** Идёт манёвр способности. */
+  get maneuvering(): boolean {
+    return this.manT > 0;
+  }
+
+  /**
+   * Следование за птицей (01 §6.4): упреждение по vx (сглаженное, τ 0.45 с), птица в полосе 25–65 % ширины, зум —
+   * птица и земля в кадре плюс 3 м над птицей, но не ближе вида рогатки. Экспоненты τ 0.18 / 0.35 с; низ кадра —
+   * к земле той же τ 0.18. Мёртвая зона: камера не едет навстречу движению птицы (при выпуске птица на 20 % — левее
+   * полосы — и камера ждёт, пока та сама войдёт в полосу, а не дёргается назад к рогатке). Манёвр способности —
+   * см. maneuver().
    */
   follow(target: { x: number; y: number; vx: number; vy: number }, dt: number): void {
     if (!Number.isFinite(target.x) || !Number.isFinite(target.y)) return;
     this.tween = null;
     this.vx = this.vy = 0;
     const d = clamp(Number.isFinite(dt) ? dt : 0, 0, 0.1);
-    const kPos = 1 - Math.exp(-d / C.FOLLOW_TAU_POS);
+    const man = this.manT > 0;
+    this.manT = Math.max(0, this.manT - d);
+    // манёвр кончился: упреждение — то, при котором камера уже стоит (без рывка вдогонку замороженной цели)
+    if (!man && this.manEnded) this.look = clamp(this.x - target.x, C.LOOKAHEAD_MIN, C.LOOKAHEAD_MAX);
+    this.manEnded = man && this.manT <= 0;
+    const kPos = 1 - Math.exp(-d / (man ? C.FOLLOW_TAU_MANEUVER : C.FOLLOW_TAU_POS));
     const bottom0 = this.y - this.viewH / 2;
     const needH = this.viewHForTop(target.y + C.HEADROOM);
     const th = clamp(Math.max(this.aimViewH, needH), C.VIEW_H_MIN, C.VIEW_H_MAX);
     this.viewH += (th - this.viewH) * (1 - Math.exp(-d / C.FOLLOW_TAU_ZOOM));
     const w = this.viewW;
     const bvx = Number.isFinite(target.vx) ? target.vx : 0;
-    const look = clamp(bvx * C.LOOKAHEAD_K, C.LOOKAHEAD_MIN, C.LOOKAHEAD_MAX);
+    const lookT = clamp(bvx * C.LOOKAHEAD_K, C.LOOKAHEAD_MIN, C.LOOKAHEAD_MAX);
+    // упреждение: в манёвре заморожено (петля переворачивает vx), иначе догоняет мгновенное с τ FOLLOW_TAU_LOOK
+    if (this.look === null) this.look = lookT;
+    else if (!man) this.look += (lookT - this.look) * (1 - Math.exp(-d / C.FOLLOW_TAU_LOOK));
+    const look = this.look;
     const [bandL, bandR] = C.FOLLOW_BAND;
     // цель центра — птица + упреждение, но так, чтобы птица была в полосе [bandL, bandR] ширины кадра
     let tx = clamp(target.x + look, target.x - (bandR - 0.5) * w, target.x + (0.5 - bandL) * w);
-    if ((bvx > C.FOLLOW_DEAD_V && tx < this.x) || (bvx < -C.FOLLOW_DEAD_V && tx > this.x)) tx = this.x;
+    if (man) {
+      // манёвр: камера стоит, пока птица в полосе [0.15, 0.85]; выходит — ровно столько, чтобы вернуть её в полосу
+      const lo = target.x - (0.5 - C.MANEUVER_BAND) * w;
+      const hi = target.x + (0.5 - C.MANEUVER_BAND) * w;
+      tx = clamp(this.x, lo, hi);
+    } else if (!man && ((bvx > C.FOLLOW_DEAD_V && tx < this.x) || (bvx < -C.FOLLOW_DEAD_V && tx > this.x))) tx = this.x;
     this.x += (tx - this.x) * kPos;
     // жёсткая страховка: птица не уходит за край кадра по горизонтали (5 % запаса)
     this.x = clamp(this.x, target.x - 0.45 * w, target.x + 0.45 * w);

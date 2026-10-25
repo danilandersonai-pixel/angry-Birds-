@@ -44,24 +44,27 @@ const codes = (lv: LevelDef, sev: 'error' | 'warning' = 'error'): string[] =>
   lintLevel(lv)[sev === 'error' ? 'errors' : 'warnings'].map((i) => i.code);
 
 describe('prefabs', () => {
-  it('1-1 собирается как в 06 §6.2 (сдвиг x 26 → 19 под V_MAX 21)', () => {
+  it('1-1 собирается из башни 06 §6.2 на скальном уступе (x = 15, ревью: сооружения ближе и выше)', () => {
     const lv = findLevel('1-1') as LevelDef;
     expect(lv.blocks).toEqual([
-      { material: 'wood', shape: 'rect', x: 17.25, y: 1, w: 0.5, h: 2 },
-      { material: 'wood', shape: 'rect', x: 20.75, y: 1, w: 0.5, h: 2 },
-      { material: 'wood', shape: 'rect', x: 19, y: 2.25, w: 4, h: 0.5 },
-      { material: 'wood', shape: 'rect', x: 17.25, y: 3.5, w: 0.5, h: 2 },
-      { material: 'wood', shape: 'rect', x: 20.75, y: 3.5, w: 0.5, h: 2 },
-      { material: 'wood', shape: 'rect', x: 19, y: 4.75, w: 4, h: 0.5 },
-      { material: 'wood', shape: 'isoTriangle', x: 19, y: 5.75, w: 4, h: 1.5 },
+      { material: 'wood', shape: 'rect', x: 13.25, y: 2.5, w: 0.5, h: 2 },
+      { material: 'wood', shape: 'rect', x: 16.75, y: 2.5, w: 0.5, h: 2 },
+      { material: 'wood', shape: 'rect', x: 15, y: 3.75, w: 4, h: 0.5 },
+      { material: 'wood', shape: 'rect', x: 13.25, y: 5, w: 0.5, h: 2 },
+      { material: 'wood', shape: 'rect', x: 16.75, y: 5, w: 0.5, h: 2 },
+      { material: 'wood', shape: 'rect', x: 15, y: 6.25, w: 4, h: 0.5 },
+      { material: 'wood', shape: 'isoTriangle', x: 15, y: 7.25, w: 4, h: 1.5 },
     ]);
     expect(lv.pigs).toEqual([
-      { type: 'small', x: 19, y: 0.405 },
-      { type: 'small', x: 19, y: 2.905 },
+      { type: 'small', x: 15, y: 1.905 },
+      { type: 'small', x: 15, y: 4.405 },
     ]);
     expect(lv.slingshot).toEqual({ x: 0, y: 2.7 });
-    expect(lv.bounds).toEqual({ minX: -12, maxX: 34, maxY: 25 });
-    expect(lv.stars).toEqual({ one: 0, two: 22000, three: 33000 });
+    expect(lv.bounds).toEqual({ minX: -12, maxX: 30, maxY: 25 });
+    // звёзды — из калибровки по устойчивой линии (src/levels/calib.ts), круглые тысячи
+    expect(lv.stars.one).toBe(0);
+    expect(lv.stars.two % 1000).toBe(0);
+    expect(lv.stars.three).toBeGreaterThan(lv.stars.two);
   });
 
   it('макросы дают только детали каталога 00 §1.6', () => {
@@ -132,10 +135,28 @@ describe('огибающая досягаемости (06 §2.2)', () => {
 });
 
 describe('lint: синтетические примеры', () => {
-  it('правильная рама со свиньёй — без ошибок и предупреждений', () => {
-    const f = frame({ x: 25 });
-    const r = lintLevel(mk({ parts: [f], pigs: [pigIn('small', f.spots[0]), pigIn('medium', f.spots[1])] }));
+  it('правильная башня со свиньями — без ошибок и предупреждений', () => {
+    const t = tower({ x: 15, floors: 2, roof: 'wood' });
+    const r = lintLevel(mk({ parts: [t], pigs: [pigIn('small', t.spots[0]), pigIn('medium', t.spots[1])] }));
     expect(formatLint(r)).toContain('ошибок 0, предупреждений 0');
+  });
+
+  it('кадр: далёкий и низкий контент — предупреждения wide и low; свинья у рогатки — ошибка', () => {
+    const f = frame({ x: 25 });
+    expect(codes(mk({ parts: [f], pigs: [pigIn('small', f.spots[0])] }), 'warning')).toEqual(expect.arrayContaining(['wide', 'low']));
+    expect(codes(mk({ pigs: [pigOn('small', 4, 0)] }))).toContain('pig-near-sling');
+  });
+
+  it('пороги звёзд — круглые тысячи; эпизод 1 и вводные уровни птиц без калибровки устойчивости — ошибка', () => {
+    expect(codes(mk({ pigs: [pigOn('small', 15, 0)], stars: { one: 0, two: 20500, three: 30000 } }))).toContain('stars');
+    const t = tower({ x: 15, floors: 2, roof: 'wood' });
+    const base = { parts: [t], pigs: [pigIn('small', t.spots[0])] };
+    expect(codes(mk({ ...base, id: '1-3' }))).toContain('robust');
+    expect(codes(mk({ ...base, id: '2-2', theme: 'beach' }))).toContain('robust');
+    expect(codes(mk({ ...base, id: '2-3', theme: 'beach' }))).not.toContain('robust');
+    const calib = (robustWin: number) => mk({ ...base, id: '1-3', meta: { calib: { robustWin } } });
+    expect(codes(calib(0.5))).toContain('robust');
+    expect(codes(calib(0.7))).not.toContain('robust');
   });
 
   it('перекрытие > 0.02 — ошибка; встык и ±0.02 — нет', () => {
@@ -235,7 +256,7 @@ describe('lint: синтетические примеры', () => {
     const blocks = pyramid({ x: 25, rows: 4 }).blocks.filter((b) => !(b.x === 25 && b.y === 1.5));
     const lv = mk({ blocks, pigs: [pigOn('small', 25, 1)] });
     expect(codes(lv)).toEqual([]);
-    expect(codes(lv, 'warning')).toEqual(['com-leaning', 'com-leaning']);
+    expect(codes(lv, 'warning').filter((c) => c === 'com-leaning')).toEqual(['com-leaning', 'com-leaning']);
   });
 
   it('нет свиней, свинья вне досягаемости, рогатка в воздухе', () => {
@@ -251,7 +272,8 @@ describe('lint: синтетические примеры', () => {
   });
 
   it('рогатка на холме: основание на площадке — чисто', () => {
-    const lv = mk({ terrain: [flatGround(), slingHill(3)], slingshot: slingshotOn(0, 3), pigs: [pigOn('small', 22, 0)] });
+    const t = tower({ x: 15, floors: 2, roof: 'wood' });
+    const lv = mk({ terrain: [flatGround(), slingHill(3)], slingshot: slingshotOn(0, 3), parts: [t], pigs: [pigIn('small', t.spots[0])] });
     expect(codes(lv)).toEqual([]);
     expect(codes(lv, 'warning')).toEqual([]);
   });

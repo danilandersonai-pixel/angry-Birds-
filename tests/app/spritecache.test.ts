@@ -122,3 +122,21 @@ describe('levelWarmList', () => {
     expect(blockVariant(NaN)).toBe(0);
   });
 });
+
+describe('levelDamageWarmList: стадии повреждения для допекания в простое', () => {
+  it('блоки — стадии 1…3 на каждую пару материал/форма/размер, свиньи — 1…2 во всех позах; ключи как у Renderer', async () => {
+    const { levelDamageWarmList, blockKey, pigKey, ppuBucket } = await import('../../src/render/SpriteCache');
+    const { ALL_LEVELS } = await import('../../src/levels');
+    const lv = ALL_LEVELS.find((l) => l.id === '2-10')!;
+    const items = levelDamageWarmList(lv, [50]);
+    const keys = new Set(items.map((i) => i.base));
+    const b = lv.blocks[0];
+    const h = b.shape === 'circle' ? b.w : b.h;
+    for (const st of [1, 2, 3]) expect(keys.has(blockKey(b.material, b.shape, b.w, h, st, 0))).toBe(true);
+    expect(keys.has(blockKey(b.material, b.shape, b.w, h, 0, 0))).toBe(false); // стадия 0 — в основном прогреве
+    const pt = lv.pigs[0].type;
+    for (const st of [1, 2]) for (const pose of ['idle', 'blink', 'laugh', 'scared'] as const) expect(keys.has(pigKey(pt, pose, st, true))).toBe(true);
+    expect(new Set(items.map((i) => i.ppu))).toEqual(new Set([ppuBucket(50)]));
+    expect(items.length).toBe(new Set(items.map((i) => `${i.base}@${i.ppu}`)).size); // без повторов
+  });
+});

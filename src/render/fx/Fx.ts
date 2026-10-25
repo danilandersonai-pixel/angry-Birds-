@@ -6,8 +6,11 @@
 //  • частицы — пул объектов (лимит 600 / 400 / 250 по качеству), без аллокаций в кадре; при переполнении
 //    вытесняются самые старые с наименьшим приоритетом (пыль < обломки < перья < элементы взрыва);
 //  • облака-«пуфы» (свинья, птица) — 9 кругов в три прохода;
-//  • взрывы: вспышка ('lighter'), ударная волна-кольцо, огненные шары → дым (частицы), искры, угольки,
-//    остаточный дым — мягкие клубы в три яруса (тёмное основание, тёплая середина, светлый верх), ≈ 1.2–1.6 с;
+//  • способности — у каждой птицы свой «удар» (abilities.ts): кольца-вспышки, мини-облачка, перья, а вдоль пути по
+//    следу — призраки и линии скорости Чака, дуга Хэла, лента петли Сильвер, шлейф яйца Матильды; вздутие Бомба;
+//  • взрывы: вспышка ('lighter'), ударная волна-кольцо, огненные шары (ядро ≈ 0.22 с) → светлый дым, искры, угольки,
+//    остаточный дым — светлые мягкие клубы в три яруса (α ≤ 0.55, 0.7–0.9 с; у яйца — белые, 0.6 с); на цепочке
+//    взрывов новые клубы рядом с живыми не рождаются — живые подновляются (площадь дыма не растёт);
 //  • всплывающие очки — отдельный список (popups.ts), лимит частиц на них не действует;
 //  • запросы тряски камеры (takeShake) и экранная вспышка (drawFlash).
 // Частицы рисуются кэшированными спрайтами (sprites.ts) — градиенты не создаются в кадре.
@@ -17,8 +20,11 @@ import type { BirdType, BlockShape, Material, TerrainDef } from '../../core/type
 import type { ViewInfo } from '../view';
 import { buildGround, FLAT_GROUND, type GroundFn } from './ground';
 import { clamp, easeOutBack, easeOutCubic, lerp, rand, randInt, randSign, smoothstep, TAU } from './math';
-import { BIRD_FX, BIRD_PUFF, GROUND_DUST, MATERIAL_FX, PIG_PUFF } from './palette';
+import { BIRD_FX, BIRD_PUFF, EGG_DUST, GROUND_DUST, MATERIAL_FX, PIG_PUFF, SMOKE_ALPHA_MAX } from './palette';
+import { type AbilFx, drawAbilities, newAbil } from './abilities';
 import { Popups } from './popups';
+import { lastTrail } from './trail';
+import type { TrailPoint } from '../../core/api';
 import {
   FX_SPRITES,
   puffSprite,
@@ -34,6 +40,7 @@ import {
   SPR_SMOKE,
   SPR_SMOKE_DARK,
   SPR_SMOKE_LIGHT,
+  SPR_SMOKE_WHITE,
   SPR_SPLINTER,
   SPR_STAR,
   SPR_STREAK,
@@ -45,6 +52,20 @@ export { drawTrail } from './trail';
 
 /** Гравитация мира для обломков, м/с² (03-physics.md: g = 15). */
 const G = 15;
+/** Огненное ядро взрыва: шар горит до FIRE_HOT с, затем светлый дым шара тает к FIRE_LIFE. */
+export const FIRE_HOT = 0.22;
+const FIRE_LIFE = 0.6;
+/** Цвета облачков пыли (puffSprite), которые эмиттеры выбирают в игре, — все прогреваются в prewarm. */
+export const RUNTIME_DUSTS: readonly string[] = [
+  MATERIAL_FX.wood.dust,
+  MATERIAL_FX.ice.dust,
+  MATERIAL_FX.stone.dust,
+  GROUND_DUST,
+  EGG_DUST,
+  '#FFFFFF',
+  PIG_PUFF.white,
+  PIG_PUFF.body,
+];
 /** Сколько частиц с приоритетом ниже взрыва может родиться за кадр. */
 const FRAME_SPAWN_CAP = 220;
 
@@ -119,6 +140,8 @@ class Particle {
   grow = 0;
   /** Базовая непрозрачность. */
   alpha = 1;
+  /** Метка источника (номер взрыва у клубов дыма). */
+  tag = 0;
 }
 
 interface Cloud {
@@ -137,13 +160,48 @@ interface Blast {
   y: number;
   R: number;
   t: number;
-  /** Альфа экранной вспышки (0 — нет). */
-  flash: number;
 }
 
+/** Кольцо-вспышка способности: радиус r0 → r1 (м), толщина w → w/4, сжатие по вертикали sy (эллипс «плюха»). */
+interface Ring {
+  x: number;
+  y: number;
+  t: number;
+  life: number;
+  r0: number;
+  r1: number;
+  w: number;
+  color: string;
+  sy: number;
+  a0: number;
+}
+
+/** Вздутие Бомба перед подрывом: тело раздувается и белеет, белый диск гаснет. */
+interface Pop {
+  x: number;
+  y: number;
+  r: number;
+  t: number;
+  life: number;
+}
+
+/** Экранная вспышка: спад α за FLASH_T с (07 §19.3, WCAG 2.3.1 — не больше FLASH_MAX вспышек в секунду). */
+const FLASH_T = 0.1;
+/** Наименьший промежуток между началами вспышек, с: ближе — сливаются с текущей. */
+export const FLASH_GAP = 0.34;
+/** Не больше вспышек за любую секунду. */
+export const FLASH_MAX = 3;
+
 export class Fx {
-  /** «Меньше вспышек» (доступность): отключает экранную вспышку. */
-  reduceFlashes = false;
+  /** Предел альфы экранной вспышки: 1 — как есть (α до 0.35), 0.12 — «Уменьшить движение» (07 §19.3), 0 — без вспышки. */
+  flashMax = 1;
+  /** «Без вспышек»: то же, что flashMax = 0. */
+  get reduceFlashes(): boolean {
+    return this.flashMax <= 0;
+  }
+  set reduceFlashes(v: boolean) {
+    this.flashMax = v ? 0 : 1;
+  }
 
   private readonly pool: Particle[] = [];
   private n = 0;
@@ -153,11 +211,22 @@ export class Fx {
   private time = 0;
   private readonly clouds: Cloud[] = [];
   private readonly blasts: Blast[] = [];
+  private readonly abils: AbilFx[] = [];
+  private readonly rings: Ring[] = [];
+  private readonly pops: Pop[] = [];
+  /** Эффекты способностей вдоль следа уже нарисованы под телами в этом кадре (drawUnder). */
+  private underDrawn = false;
   private readonly popups = new Popups();
   private ground: GroundFn = FLAT_GROUND;
   private shakeAmt = 0;
   private shakeDur = 0;
   private scratch = new Float64Array(0);
+  // огибающая экранной вспышки: α = flashA·(1 − (time − flashFrom)/FLASH_T); flashLog — начала за последнюю секунду
+  private flashA = 0;
+  private flashFrom = -Infinity;
+  private readonly flashLog: number[] = [];
+  /** Номер последнего взрыва (метка его клубов дыма). */
+  private blastSeq = 0;
 
   constructor() {
     for (let i = 0; i < QUALITY.high.limit; i++) this.pool.push(new Particle());
@@ -165,7 +234,7 @@ export class Fx {
 
   /** Живых элементов всего: частицы + облака + взрывы + всплывающие очки. */
   get count(): number {
-    return this.n + this.clouds.length + this.blasts.length + this.popups.list.length;
+    return this.n + this.clouds.length + this.blasts.length + this.popups.list.length + this.abils.length + this.rings.length + this.pops.length;
   }
 
   get particleCount(): number {
@@ -212,10 +281,11 @@ export class Fx {
     at([...SPR_SPLINTER, ...SPR_SHARD, ...SPR_CHUNK], [0.18, 0.36]);
     at([...SPR_HELMET, ...SPR_SHELL, ...SPR_TNT_CHIP, SPR_STAR, SPR_EMBER], [0.22]);
     at(Object.values(SPR_FEATHER).flat(), [0.3]);
-    at([SPR_TWINKLE], [0.3, 0.6]);
-    const dusts = [MATERIAL_FX.wood.dust, MATERIAL_FX.ice.dust, MATERIAL_FX.stone.dust, GROUND_DUST, '#FFFFFF', PIG_PUFF.white, PIG_PUFF.body];
-    at(dusts.map(puffSprite), [0.5, 1.0]);
-    at([SPR_FIRE, SPR_SMOKE, SPR_SMOKE_DARK, SPR_SMOKE_LIGHT, softPuffSprite(GROUND_DUST)], [1.2, 2.4, 4.0]);
+    at([SPR_TWINKLE], [0.3, 0.6, 1.2, 1.6]);
+    // все цвета пыли, которые эмиттеры выбирают в игре (emitImpact, emitDust, пуфы свиней): новое определение
+    // спрайта в кадре — допекание и смена страницы атласа (15–23 мс на ударе яйца)
+    at(RUNTIME_DUSTS.map(puffSprite), [0.5, 1.0]);
+    at([SPR_FIRE, SPR_SMOKE, SPR_SMOKE_DARK, SPR_SMOKE_LIGHT, SPR_SMOKE_WHITE, softPuffSprite(GROUND_DUST)], [1.2, 2.4, 4.0]);
     at([SPR_GLOW_WARM], [5]);
     at([SPR_STREAK], [0.6, 1.2]);
     return performance.now() - t0;
@@ -225,9 +295,15 @@ export class Fx {
     this.n = 0;
     this.clouds.length = 0;
     this.blasts.length = 0;
+    this.abils.length = 0;
+    this.rings.length = 0;
+    this.pops.length = 0;
     this.popups.clear();
     this.shakeAmt = 0;
     this.shakeDur = 0;
+    this.flashA = 0;
+    this.flashFrom = -Infinity;
+    this.flashLog.length = 0;
   }
 
   /** Забрать накопленный запрос тряски (суммируется за кадр, ограничен 0.35 м). */
@@ -267,11 +343,7 @@ export class Fx {
         break;
       }
       case 'ability':
-        if (e.bird !== 'bomb') {
-          const r = BIRD_FX[e.bird].radius;
-          this.addCloud(e.x, e.y, r * 0.9, 0.4, BIRD_PUFF);
-          this.emitFeathers(e.bird, e.x, e.y, 3, 1.5, 4, e.bird === 'blues' ? 0.7 : 0.9);
-        }
+        this.emitAbility(e.bird, e.x, e.y);
         break;
       case 'pigDamaged':
         this.emitPigHit(e.x, e.y, 0.5, 3 + Math.min(2, e.stage));
@@ -285,6 +357,7 @@ export class Fx {
         this.emitTnt(e.x, e.y);
         break;
       case 'explosion':
+        if (e.source === 'egg') for (const a of this.abils) if (a.bird === 'matilda') a.eggDone = true; // шлейф яйца гаснет
         this.emitExplosion(e.x, e.y, e.radius, e.source);
         break;
       case 'score':
@@ -366,13 +439,31 @@ export class Fx {
       bl[i].t += dt;
       if (bl[i].t >= 0.4) bl.splice(i, 1);
     }
+    for (const list of [this.abils, this.rings, this.pops] as Array<Array<{ t: number; life: number }>>) {
+      for (let i = list.length - 1; i >= 0; i--) {
+        list[i].t += dt;
+        if (list[i].t >= list[i].life) list.splice(i, 1);
+      }
+    }
     this.popups.update(dt);
   }
 
   // ── Отрисовка ───────────────────────────────────────────────
 
+  /**
+   * Эффекты способностей вдоль пути птицы (призраки Чака, дуга Хэла, лента Сильвер, шлейф яйца) — под телами: рендер
+   * зовёт сразу после следа. trail — след текущего выстрела (по умолчанию — переданный последнему drawTrail).
+   * Если рендер не позвал drawUnder, draw рисует их сам (поверх тел).
+   */
+  drawUnder(ctx: CanvasRenderingContext2D, view: ViewInfo, trail: readonly TrailPoint[] = lastTrail()): void {
+    this.underDrawn = true;
+    if (this.abils.length) drawAbilities(ctx, view, this.abils, trail, this.ground);
+  }
+
   /** Частицы, облака, взрывы и очки — поверх тел (слой 18–19 из 04-visual.md §2). */
   draw(ctx: CanvasRenderingContext2D, view: ViewInfo): void {
+    if (!this.underDrawn && this.abils.length) drawAbilities(ctx, view, this.abils, lastTrail(), this.ground);
+    this.underDrawn = false;
     ctx.save();
     this.drawLayer(ctx, view, L_BACK);
     this.drawLayer(ctx, view, L_SMOKE_HI);
@@ -380,24 +471,28 @@ export class Fx {
     this.drawLayer(ctx, view, L_FEATHER);
     if (this.blasts.length) this.drawBlasts(ctx, view);
     this.drawLayer(ctx, view, L_FIRE);
+    if (this.pops.length) this.drawPops(ctx, view);
     if (this.clouds.length) this.drawClouds(ctx, view);
     this.drawLayer(ctx, view, L_TOP);
     ctx.globalCompositeOperation = 'lighter';
     this.drawLayer(ctx, view, L_GLOW);
     ctx.globalCompositeOperation = 'source-over';
+    if (this.rings.length) this.drawRings(ctx, view);
     ctx.globalAlpha = 1;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.popups.draw(ctx, view);
     ctx.restore();
   }
 
-  /** Экранная вспышка взрывов TNT/Bomb — поверх всего (слой 21). */
+  /** Текущая альфа экранной вспышки (0 — нет). */
+  get flashAlpha(): number {
+    const k = (this.time - this.flashFrom) / FLASH_T;
+    return k >= 0 && k < 1 ? this.flashA * (1 - k) : 0;
+  }
+
+  /** Экранная вспышка взрывов TNT/Bomb — поверх всего (слой 21). Цепочка взрывов сливается в ≤ 3 вспышки/с. */
   drawFlash(ctx: CanvasRenderingContext2D, view: ViewInfo): void {
-    if (this.reduceFlashes || this.blasts.length === 0) return;
-    let a = 0;
-    for (const b of this.blasts) {
-      if (b.flash > 0 && b.t < 0.1) a = Math.max(a, b.flash * (1 - b.t / 0.1));
-    }
+    const a = Math.min(this.flashAlpha, this.flashMax);
     if (a <= 0.004) return;
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -489,15 +584,15 @@ export class Fx {
         case K_FIRE: {
           const grow = easeOutCubic(t < 0.2 ? t / 0.2 : 1);
           sizeMul = (0.4 + 0.8 * grow) * (1 + 0.5 * t);
-          const heat = clamp(1 - (t - 0.06) / 0.25, 0, 1);
-          // шар уже стал дымом — передаёт плотность остаточному дыму под ним (плавно, 0.4 → 0.9 с)
-          alpha = 1 - smoothstep(0.4, 0.9, t);
+          const heat = fireHeat(t);
+          // шар уже стал светлым дымом — передаёт его остаточному дыму под ним (плавно, 0.2 → FIRE_LIFE)
+          const smoke = SMOKE_ALPHA_MAX * (1 - smoothstep(0.2, FIRE_LIFE, t));
           const px = p.size * sizeMul * s;
-          if (alpha <= 0.01 || px < 1) continue;
+          if ((heat <= 0.01 && smoke <= 0.01) || px < 1) continue;
           if (sx < -px || sx > W + px || sy < -px || sy > H + px) continue;
           // дым снизу, огонь сверху с альфой «жара»: плавный переход без градиентов в кадре
-          if (heat < 0.97) this.blit(ctx, SPR_SMOKE, px, alpha, 0, 1, sx, sy);
-          if (heat > 0.01) this.blit(ctx, SPR_FIRE, px, alpha * heat, 0, 1, sx, sy);
+          if (heat < 0.97 && smoke > 0.01) this.blit(ctx, p.spr, px, smoke, 0, 1, sx, sy);
+          if (heat > 0.01) this.blit(ctx, SPR_FIRE, px, heat, 0, 1, sx, sy);
           continue;
         }
         default:
@@ -550,6 +645,56 @@ export class Fx {
         ctx.beginPath();
         ctx.arc(sx, sy, lerp(0.2, 1.6, k) * Rpx, 0, TAU);
         ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /** Кольца-вспышки способностей: растут с easeOutCubic, тоньше и прозрачнее к концу. */
+  private drawRings(ctx: CanvasRenderingContext2D, view: ViewInfo): void {
+    const s = view.scale;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    for (const r of this.rings) {
+      const k = r.t / r.life;
+      const R = lerp(r.r0, r.r1, easeOutCubic(k)) * s;
+      const alpha = r.a0 * (1 - k) ** 1.3;
+      if (alpha <= 0.01 || R < 1) continue;
+      const sx = (r.x - view.camX) * s + view.screenW / 2;
+      const sy = view.screenH / 2 - (r.y - view.camY) * s;
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = r.color;
+      ctx.lineWidth = Math.max(1, lerp(r.w, r.w * 0.25, k) * s);
+      ctx.beginPath();
+      ctx.ellipse(sx, sy, R, R * r.sy, 0, 0, TAU);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /** Вздутие Бомба: чёрное тело раздувается ×1.4 за 0.07 с и белеет, затем белый диск растёт и гаснет. */
+  private drawPops(ctx: CanvasRenderingContext2D, view: ViewInfo): void {
+    const s = view.scale;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    for (const p of this.pops) {
+      const t = p.t;
+      const sx = (p.x - view.camX) * s + view.screenW / 2;
+      const sy = view.screenH / 2 - (p.y - view.camY) * s;
+      const R = p.r * (1 + 0.4 * easeOutCubic(clamp(t / 0.07, 0, 1))) * s;
+      const white = smoothstep(0.02, 0.07, t);
+      const fade = 1 - smoothstep(0.08, p.life, t);
+      if (white < 0.99) {
+        ctx.globalAlpha = 1 - white;
+        ctx.fillStyle = BIRD_FX.bomb.base;
+        ctx.beginPath();
+        ctx.arc(sx, sy, R, 0, TAU);
+        ctx.fill();
+      }
+      if (white * fade > 0.01) {
+        ctx.globalAlpha = white * fade;
+        ctx.fillStyle = '#FFFFFF';
+        ctx.beginPath();
+        ctx.arc(sx, sy, R * (1 + 0.6 * smoothstep(0.07, p.life, t)), 0, TAU);
+        ctx.fill();
       }
     }
     ctx.globalAlpha = 1;
@@ -673,6 +818,7 @@ export class Fx {
     p.flip = 1;
     p.grow = 0;
     p.alpha = 1;
+    p.tag = 0;
     return p;
   }
 
@@ -682,6 +828,77 @@ export class Fx {
   }
 
   // ── Эмиттеры ────────────────────────────────────────────────
+
+  /**
+   * Способность: свой «удар» у каждой птицы (AB2). Здесь — вспышки, облачка и перья в точке способности; то, что
+   * тянется за птицей по пути (призраки, дуга, лента, шлейф яйца), рисует abilities.ts по следу.
+   */
+  private emitAbility(bird: BirdType, x: number, y: number): void {
+    const r = BIRD_FX[bird].radius;
+    const ab = newAbil(bird, x, y);
+    if (ab) {
+      this.abils.push(ab);
+      if (this.abils.length > 8) this.abils.shift();
+    }
+    switch (bird) {
+      case 'chuck':
+        // короткая вспышка рывка: звезда-блик, жёлто-белое кольцо, искорки
+        this.emitFlashStar(x, y, 1.6, 0.2);
+        this.addRing(x, y, 0.35, 1.5, 0.16, 0.18, '#FFF3B0', 1, 0.9);
+        this.emitTwinkles(x, y, 3, 0.2, 2, 4, 0.2, 0.3);
+        this.emitFeathers(bird, x, y, 2, 1.5, 3.5, 0.9);
+        break;
+      case 'blues':
+        // голубое кольцо-вспышка и три мини-облачка в точке разделения
+        this.addRing(x, y, 0.3, 1.5, 0.17, 0.26, '#5CC8FF', 1, 1);
+        this.addRing(x, y, 0.3, 0.9, 0.08, 0.18, '#FFFFFF', 1, 0.9);
+        for (let i = 0; i < 3; i++) {
+          const a = (i / 3) * TAU + rand(0, 0.6);
+          this.addCloud(x + Math.cos(a) * 0.45, y + Math.sin(a) * 0.45, 0.2, 0.32, BIRD_PUFF);
+        }
+        this.emitFeathers(bird, x, y, 3, 1.5, 4, 0.7);
+        break;
+      case 'matilda': {
+        // «плюх» под птицей: сплющенное белое кольцо и облачко там, где рождается яйцо, выброс белых перьев
+        const ey = y - 0.7 * r;
+        this.emitFlashStar(x, ey, 1.2, 0.18);
+        this.addRing(x, ey, 0.3, 1.6, 0.16, 0.26, '#FFFFFF', 0.42, 0.95);
+        this.addCloud(x, ey, 0.32, 0.35, BIRD_PUFF);
+        this.emitFeathers(bird, x, y, randInt(8, 10), 2.5, 6, 1);
+        break;
+      }
+      case 'hal':
+        this.addRing(x, y, 0.3, 1.3, 0.12, 0.2, '#B8F08A', 1, 0.85);
+        this.emitFeathers(bird, x, y, 3, 1.5, 4, 0.9);
+        break;
+      case 'silver':
+        this.addCloud(x, y, r * 0.7, 0.3, BIRD_PUFF);
+        this.emitTwinkles(x, y, 2, 0.2, 1, 3, 0.2, 0.3);
+        this.emitFeathers(bird, x, y, 2, 1.5, 3.5, 0.9);
+        break;
+      case 'bomb':
+        // вздутие и белая вспышка — поверх огня взрыва, который ядро рождает в тот же шаг
+        this.pops.push({ x, y, r, t: 0, life: 0.16 });
+        if (this.pops.length > 4) this.pops.shift();
+        break;
+      default:
+        // Ред (боевой клич, P2) и прочие
+        this.addCloud(x, y, r * 0.9, 0.4, BIRD_PUFF);
+        this.emitFeathers(bird, x, y, 3, 1.5, 4, 0.9);
+        break;
+    }
+  }
+
+  /** Крупная звезда-блик ('lighter'): вспышка в точке способности. size — диаметр, м. */
+  private emitFlashStar(x: number, y: number, size: number, life: number): void {
+    const p = this.spawn(K_TWINKLE, SPR_TWINKLE, P_BLAST, x, y, 0, 0, size, life);
+    if (p) p.ang = rand(-0.2, 0.2);
+  }
+
+  private addRing(x: number, y: number, r0: number, r1: number, w: number, life: number, color: string, sy: number, a0: number): void {
+    this.rings.push({ x, y, t: 0, life, r0, r1, w, color, sy, a0 });
+    if (this.rings.length > 12) this.rings.shift();
+  }
 
   private emitBlockDestroyed(mat: Material, shape: BlockShape, x: number, y: number, w: number, h: number, angle: number, vx: number, vy: number): void {
     const area = shape === 'rect' ? w * h : shape === 'circle' ? Math.PI * (w / 2) ** 2 : (w * h) / 2;
@@ -819,7 +1036,7 @@ export class Fx {
           : surf === 'ground'
             ? GROUND_DUST
             : surf === 'egg'
-              ? '#FFFDF5'
+              ? EGG_DUST
               : null;
     if (color) this.emitDust(color, x, y, 1, r * 2, 0, 0, 0.45);
     if (surf === 'stone') this.emitTwinkles(x, y, 1, 0.05, 1, 3, 0.18, 0.3);
@@ -977,15 +1194,17 @@ export class Fx {
 
   private emitExplosion(x: number, y: number, R: number, source: ExplosionSource): void {
     R = Math.max(0.5, R);
-    this.blasts.push({ x, y, R, t: 0, flash: source === 'tnt' ? 0.35 : source === 'bomb' ? 0.25 : 0 });
+    this.blasts.push({ x, y, R, t: 0 });
     if (this.blasts.length > 8) this.blasts.shift();
+    if (source !== 'egg') this.noteFlash(source === 'tnt' ? 0.35 : 0.25);
     this.requestShake(Math.min(0.35, 0.12 * R), 0.35);
-    // огненные шары → дым (9 штук, 04-visual.md §8.3)
+    // огненные шары → дым (9 штук, 04-visual.md §8.3); spr — дым, в который шар переходит (у яйца — белый)
     const k = 10; // drag: основное движение за ~0.2 с
+    const fireSmoke = source === 'egg' ? SPR_SMOKE_WHITE : SPR_SMOKE;
     for (let i = 0; i < 9; i++) {
       const a = (i / 9) * TAU + rand(0, 0.5);
       const d = R * rand(0.15, 0.55);
-      const p = this.spawn(K_FIRE, SPR_FIRE, P_BLAST, x + Math.cos(a) * d * 0.4, y + Math.sin(a) * d * 0.4, Math.cos(a) * d * 0.8 * k, Math.sin(a) * d * 0.8 * k, 2 * R * rand(0.28, 0.45), 0.9);
+      const p = this.spawn(K_FIRE, fireSmoke, P_BLAST, x + Math.cos(a) * d * 0.4, y + Math.sin(a) * d * 0.4, Math.cos(a) * d * 0.8 * k, Math.sin(a) * d * 0.8 * k, 2 * R * rand(0.28, 0.45), FIRE_LIFE);
       if (!p) break;
       p.drag = k;
       p.g = -0.9 * k; // всплытие 0.9 м/с
@@ -1010,7 +1229,7 @@ export class Fx {
       p.drag = 1.2;
       p.g = 9;
     }
-    this.emitBlastSmoke(x, y, R);
+    this.emitBlastSmoke(x, y, R, source === 'egg');
     // скорлупа яйца Матильды
     if (source === 'egg') {
       for (let i = 0; i < 6; i++) {
@@ -1027,39 +1246,46 @@ export class Fx {
     }
     // пыль по земле, если взрыв у поверхности: мягкие клубы (без кругов-наложений) катятся в стороны
     const h = this.ground(x);
-    if (h > -Infinity && Math.abs(y - h) < R) {
+    const spr = softPuffSprite(GROUND_DUST);
+    // на цепочке взрывов пыль у земли не копится: рядом уже катится своя
+    if (h > -Infinity && Math.abs(y - h) < R && this.liveNear(K_DUST, spr, x, h, R) < 4) {
       const n = this.cnt(6);
-      const spr = softPuffSprite(GROUND_DUST);
       for (let i = 0; i < n; i++) {
         const side = i % 2 === 0 ? 1 : -1;
         const px = x + side * R * rand(0.1, 0.8);
         const gh = this.ground(px);
-        const p = this.spawn(K_DUST, spr, P_DUST, px, (gh > -Infinity ? gh : h) + 0.25, side * rand(6, 14), rand(0.5, 2), R * rand(0.4, 0.6), rand(1.0, 1.3));
+        const p = this.spawn(K_DUST, spr, P_DUST, px, (gh > -Infinity ? gh : h) + 0.25, side * rand(6, 14), rand(0.5, 2), R * rand(0.4, 0.6), rand(0.65, 0.85));
         if (!p) break;
         p.drag = 3.5;
         p.g = -1.5;
-        p.alpha = 0.7;
+        p.alpha = SMOKE_ALPHA_MAX;
       }
     }
   }
 
   /**
-   * Остаточный дым взрыва (плейтест №2, Б5; AB2): плотное облако мягких клубов, тёмное у основания и светлее
-   * кверху, ≈ 1.2–1.6 с после огня. Клубы рождаются под огненными шарами (слой дыма рисуется раньше огня) через
-   * 0.22–0.3 с, когда шары уже дымят, и проступают, когда те гаснут (0.4–0.9 с); основание всплывает медленно и
-   * тает последним, верх — быстрее и раньше.
-   * 9 частиц (×плотность качества) приоритета взрыва — не вытесняются пылью и обломками того же кадра.
+   * Остаточный дым взрыва (AB2): светлые мягкие клубы — основание чуть темнее, верх светлее; α ≤ 0.55, живут
+   * 0.7–0.9 с (у яйца — белые, 0.6 с), чтобы обрушение и «пуфы» свиней под ними оставались видны. Клубы рождаются
+   * под огненными шарами через 0.12–0.18 с, когда ядро гаснет. На цепочке взрывов клуб, чей центр попадает в живой
+   * клуб, не рождается — живой подновляется (жизнь продлевается): площадь дыма не растёт с числом взрывов.
+   * 9 частиц (×плотность качества; у яйца 5) приоритета взрыва — не вытесняются пылью и обломками того же кадра.
    */
-  private emitBlastSmoke(x: number, y: number, R: number): void {
+  private emitBlastSmoke(x: number, y: number, R: number, egg: boolean): void {
     const h = this.ground(x);
+    const tag = ++this.blastSeq;
     // у земли основание облака ложится на неё (не уходит под землю), в воздухе — вокруг центра
     const baseY = h > -Infinity && y - h < 0.6 * R ? Math.max(y, h + 0.3 * R) : y - 0.1 * R;
     // [спрайт, доля по высоте (0 — основание, 1 — верх), число]
-    const tiers: ReadonlyArray<readonly [number, number, number]> = [
-      [SPR_SMOKE_DARK, 0, 3],
-      [SPR_SMOKE, 0.45, 3],
-      [SPR_SMOKE_LIGHT, 0.9, 3],
-    ];
+    const tiers: ReadonlyArray<readonly [number, number, number]> = egg
+      ? [
+          [SPR_SMOKE_WHITE, 0.2, 3],
+          [SPR_SMOKE_WHITE, 0.8, 2],
+        ]
+      : [
+          [SPR_SMOKE_DARK, 0, 3],
+          [SPR_SMOKE, 0.45, 3],
+          [SPR_SMOKE_LIGHT, 0.9, 3],
+        ];
     for (const [spr, lv, n0] of tiers) {
       const n = this.cnt(n0);
       for (let i = 0; i < n; i++) {
@@ -1068,16 +1294,48 @@ export class Fx {
         const spread = R * lerp(1.0, 0.6, lv);
         const px = x + u * spread + rand(-0.12, 0.12) * R;
         const py = baseY + lv * 0.75 * R + rand(-0.1, 0.1) * R;
-        const p = this.spawn(K_SMOKE, spr, P_BLAST, px, py, u * R * lerp(0.5, 0.25, lv), lerp(0.15, 0.5, lv), R * rand(0.75, 0.95) * lerp(1.1, 0.85, lv), rand(1.75, 2.05) - 0.4 * lv);
+        const life = egg ? rand(0.55, 0.6) : rand(0.78, 0.9) - 0.08 * lv;
+        if (this.refreshSmoke(px, py, life, tag)) continue;
+        const p = this.spawn(K_SMOKE, spr, P_BLAST, px, py, u * R * lerp(0.5, 0.25, lv), lerp(0.15, 0.5, lv), R * rand(0.75, 0.95) * lerp(1.05, 0.8, lv), life);
         if (!p) return;
         if (lv > 0) p.layer = L_SMOKE_HI;
+        p.tag = tag;
         p.drag = 1.4;
         p.g = -lerp(0.5, 1.1, lv); // всплытие: основание ≈ 0.35 м/с, верх ≈ 0.8 м/с
-        p.alpha = lerp(0.95, 0.85, lv);
-        // рождаются, когда огонь уже дымит (раньше их всё равно не видно под шарами, а заливка стоит в пике кадра)
-        p.age = -rand(0.22, 0.3);
+        p.alpha = SMOKE_ALPHA_MAX * lerp(1, 0.88, lv);
+        // рождаются, когда ядро гаснет (раньше их не видно под шарами, а заливка стоит в пике кадра)
+        p.age = -rand(0.12, 0.18);
       }
     }
+  }
+
+  /**
+   * Цепочка взрывов: если точка (x, y) внутри живого клуба дыма, клуб подновляется (живёт ещё ≈ life, не меньше
+   * прежнего остатка) вместо рождения нового. true — подновлён.
+   */
+  private refreshSmoke(x: number, y: number, life: number, tag: number): boolean {
+    const pool = this.pool;
+    for (let i = 0; i < this.n; i++) {
+      const q = pool[i];
+      if (q.kind !== K_SMOKE || q.tag === tag) continue;
+      const r = 0.42 * q.size;
+      const dx = q.x - x;
+      const dy = q.y - y;
+      if (dx * dx + dy * dy > r * r) continue;
+      if (q.age > 0) q.life = Math.max(q.life, q.age + 0.75 * life);
+      return true;
+    }
+    return false;
+  }
+
+  /** Сколько живых частиц закона kind со спрайтом spr в радиусе r от точки. */
+  private liveNear(kind: number, spr: number, x: number, y: number, r: number): number {
+    let c = 0;
+    for (let i = 0; i < this.n; i++) {
+      const q = this.pool[i];
+      if (q.kind === kind && q.spr === spr && (q.x - x) ** 2 + (q.y - y) ** 2 <= r * r) c++;
+    }
+    return c;
   }
 
   private addCloud(x: number, y: number, r: number, life: number, pal: Cloud['pal']): void {
@@ -1096,6 +1354,29 @@ export class Fx {
     if (this.clouds.length > 32) this.clouds.shift();
   }
 
+  /**
+   * Новая экранная вспышка — только через FLASH_GAP после прошлой и не больше FLASH_MAX за секунду (07 §19.3).
+   * Иначе взрыв сливается с текущей: если она ещё видна, её спад начинается заново с текущего уровня (яркость не
+   * растёт — второй перепад был бы новой вспышкой), если уже погасла — экран не мигает.
+   */
+  private noteFlash(alpha: number): void {
+    const t = this.time;
+    const log = this.flashLog;
+    while (log.length && t - log[0] >= 1) log.shift();
+    const last = log.length ? log[log.length - 1] : -Infinity;
+    if (t - last >= FLASH_GAP && log.length < FLASH_MAX) {
+      log.push(t);
+      this.flashA = alpha;
+      this.flashFrom = t;
+      return;
+    }
+    const cur = this.flashAlpha;
+    if (cur > 0) {
+      this.flashA = cur;
+      this.flashFrom = t;
+    }
+  }
+
   private requestShake(amount: number, duration: number): void {
     this.shakeAmt += amount;
     if (duration > this.shakeDur) this.shakeDur = duration;
@@ -1106,4 +1387,9 @@ export class Fx {
 function pickSurface(a: ImpactSurface, b: ImpactSurface): ImpactSurface {
   const rank = (s: ImpactSurface) => (s === 'wood' || s === 'ice' || s === 'stone' ? 5 : s === 'tnt' ? 4 : s === 'egg' ? 3 : s === 'ground' ? 2 : s === 'pig' ? 1 : 0);
   return rank(a) >= rank(b) ? a : b;
+}
+
+/** «Жар» огненного шара по возрасту t, с: 1 → 0 к FIRE_HOT (ядро взрыва 0.2–0.25 с). */
+export function fireHeat(t: number): number {
+  return clamp(1 - (t - 0.05) / (FIRE_HOT - 0.05), 0, 1);
 }

@@ -197,8 +197,17 @@ export const PIGS = {
   king: { radius: 1.17, density: 0.8, friction: 0.65, restitution: 0.1, hpPerKg: 9, helmetHp: 0, damagePoints: 1000 },
 } as const;
 
-/** Демпфирование свиней — против вечного качения (03 §3.5). */
-export const PIG_PHYS = { ANGULAR_DAMPING: 3, LINEAR_DAMPING: 0.1 } as const;
+/**
+ * Демпфирование свиней — против вечного качения (03 §3.5). Катящийся круг с угловым демпфированием c теряет скорость
+ * как e^(−c·t/3) при любом радиусе, а крупную свинью обрушение разгоняет сильнее — король укатывался на 8 м, к рогатке.
+ * Поэтому c растёт с размером: ANGULAR_DAMPING — для small / medium / helmet, BY_TYPE — для крупных
+ * (путь до остановки ≈ v0 / (c/3 + 0.1): при c 3 — v0 / 1.1, у короля при 7 — v0 / 2.4).
+ */
+export const PIG_PHYS = {
+  ANGULAR_DAMPING: 3,
+  ANGULAR_DAMPING_BY_TYPE: { mustache: 4, large: 4.5, king: 7 } as Readonly<Partial<Record<keyof typeof PIGS, number>>>,
+  LINEAR_DAMPING: 0.1,
+} as const;
 
 /** Скорость запуска, при которой откалибрована таблица урона птиц 00 §1.7 (там V_MAX = 24). */
 const DAMAGE_CALIB_V = 24;
@@ -224,10 +233,15 @@ export const DAMAGE = {
   BLOCK_STAGES: [0.75, 0.5, 0.25],
   /** Стадии синяков свиней: ниже порога → стадия 1, 2. */
   PIG_STAGES: [0.66, 0.33],
-  /** Доля урона, которую берёт каска: удар сверху / сбоку и взрыв. Верх — локальная y точки удара > TOP_Y·r. */
+  /**
+   * Доля урона, которую берёт каска: удар сверху / сбоку и взрыв. Верх — локальная y точки удара > TOP_Y·r; снизу
+   * (y < BOTTOM_Y·r — «ноги», падение на землю или на доску) каска не защищает: свинья в каске гибнет от падения,
+   * как medium (раньше «сбоку» считалось и дно — каска держила и падение с 6.5 м вместе с настилом).
+   */
   HELMET_SHARE_TOP: 0.9,
   HELMET_SHARE_SIDE: 0.6,
   HELMET_TOP_Y: 0.1,
+  HELMET_BOTTOM_Y: -0.5,
   /** Пробитие (03 §2.8): птица сохраняет долю скорости clamp(1 − K·HP/dmg, MIN, MAX). */
   PIERCE_KEEP_K: 0.5,
   PIERCE_KEEP_MIN: 0.5,
@@ -254,13 +268,17 @@ export const SETTLE = {
   BOT_AFTER_LAUNCH: 10,
 } as const;
 
-/** «Уход» птицы (00 §1.9). */
+/**
+ * «Уход» птицы (00 §1.9). REST_V 0.4 (было 0.25), REST_W 1.0 (было 0.5 — катящаяся Ред «стояла» лишь при 0.22 м/с),
+ * REST_HOLD 0.3 (было 0.4) и MAX_AFTER_HIT 3 (было 6): птица, качающаяся на крыше или докатывающаяся по обломкам,
+ * уходит вовремя — темп между выстрелами как в AB2 (удар → следующая птица ≤ 3 с).
+ */
 export const RETIRE = {
-  REST_V: 0.25,
-  REST_W: 0.5,
-  REST_HOLD: 0.4,
+  REST_V: 0.4,
+  REST_W: 1.0,
+  REST_HOLD: 0.3,
   MIN_AFTER_HIT: 1.0,
-  MAX_AFTER_HIT: 6.0,
+  MAX_AFTER_HIT: 3.0,
   FLIGHT_MAX: 10.0,
   /** Быстрый пропуск тапом — не раньше, чем через столько секунд после первого контакта. */
   QUICK_SKIP_AFTER_HIT: 1.0,
@@ -275,11 +293,16 @@ export const TIMING = {
   BIRD_HOP_HEIGHT: 1.2,
   QUEUE_SHIFT_TIME: 0.3,
   /**
-   * После ухода птицы: камера задерживается до LINGER_MAX (раньше — при покое CALM_HOLD), затем возвращается к рогатке.
-   * 1.6 (было 0.6): разрушение досматривается — GameScreen держит камеру, пока оно идёт (integ-final Б3).
+   * После ухода птицы камера задерживается на месте событий не меньше LINGER_MIN и, пока идут разрушения, ещё BREAK_QUIET
+   * после последнего (после взрыва — BLAST_QUIET), но не дольше LINGER_MAX; затем едет к рогатке за CAMERA.RETURN_*.
+   * Следующая птица прыгает в кармашек ВО ВРЕМЯ возврата: loading начинается за BIRD_HOP_TIME до приезда камеры, и ready
+   * совпадает с её приездом (пустую рогатку игрок не ждёт). GameScreen сообщает свой отъезд камеры releaseLinger().
+   * Было: LINGER_MAX 1.6 / покой CALM_HOLD 0.5, затем возврат и только потом прыжок — 1–2 с у пустой рогатки.
    */
+  LINGER_MIN: 0.45,
+  BREAK_QUIET: 0.4,
+  BLAST_QUIET: 0.8,
   LINGER_MAX: 1.6,
-  CALM_HOLD: 0.5,
   /** Поражение: покой LOSE_HOLD или таймаут LOSE_TIMEOUT после входа в settling. */
   LOSE_HOLD: 0.6,
   LOSE_TIMEOUT: 7.0,
@@ -348,7 +371,7 @@ export const POPUP = {
 } as const;
 
 export const UI_TIMING = {
-  BANNER_SKIP: 0.3, BONUS_POST: TIMING.BONUS_POST, BONUS_NONE: TIMING.BONUS_NONE, BONUS_SKIP_SPEED: 4, LOST_BANNER: 1.0,
+  BANNER_SKIP: 0.3, BONUS_POST: TIMING.BONUS_POST, BONUS_NONE: TIMING.BONUS_NONE, BONUS_SKIP_SPEED: 4,
   RESTART_FADE_OUT: 0.15, RESTART_FADE_IN: 0.2, IRIS_CLOSE: 0.45, IRIS_OPEN: 0.5, IRIS_MIN_HOLD: 0.12,
   RESULTS_SLIDE: 0.4, STAR_LAND: [0.5, 0.95, 1.4], STAR_LEAD: 0.19, BUTTONS_ACTIVE: 1.7, SCORE_ROLL_FROM: 1.65, SCORE_ROLL: 1.2,
   NEXT_PULSE: 3.15, STAR_LAND_REDUCED: [0.3, 0.55, 0.8], SCORE_ROLL_REDUCED: 0.5,

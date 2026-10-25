@@ -2,10 +2,11 @@
 
 import { describe, expect, it } from 'vitest';
 import type { GameEvent } from '../../core/events';
-import { Fx } from './Fx';
+import { FIRE_HOT, fireHeat, Fx, RUNTIME_DUSTS } from './Fx';
 import { drawTrail } from './trail';
 import { buildGround } from './ground';
-import { SPR_SMOKE_DARK, SPR_SMOKE_LIGHT } from './sprites';
+import { FX_SPRITES, puffSprite, softPuffSprite, SPR_SMOKE_DARK, SPR_SMOKE_LIGHT, SPR_SMOKE_WHITE } from './sprites';
+import { GROUND_DUST, SMOKE, SMOKE_ALPHA_MAX } from './palette';
 import type { ViewInfo } from '../view';
 
 const destroyed = (material: 'wood' | 'ice' | 'stone', x = 0, y = 1, w = 2, h = 0.5): GameEvent => ({
@@ -115,27 +116,77 @@ describe('Fx', () => {
     expect(fx.takeShake()?.amount).toBe(0.35);
   });
 
-  it('дым взрыва: плотный остаточный дым ≈ 1.2–1.6 с после огня, тёмное основание ниже светлого верха', () => {
-    type Pt = { kind: number; spr: number; age: number; life: number; y: number; alpha: number };
+  type SmokePt = { kind: number; spr: number; age: number; life: number; x: number; y: number; alpha: number; size: number };
+  const live = (fx: Fx, kind = 6) =>
+    ((fx as unknown as { pool: SmokePt[] }).pool.slice(0, fx.particleCount) as SmokePt[]).filter((p) => p.kind === kind && p.age >= 0);
+
+  it('дым взрыва: светлые клубы α ≤ 0.55, живут 0.7–0.9 с, основание ниже верха; огненное ядро ≈ 0.22 с', () => {
     const fx = new Fx();
-    const smoke = () => ((fx as unknown as { pool: Pt[] }).pool.slice(0, fx.particleCount) as Pt[]).filter((p) => p.kind === 6 && p.age >= 0);
     fx.handle({ type: 'explosion', x: 0, y: 3, radius: 3, source: 'tnt' });
-    run(fx, 0.35);
-    expect(smoke().length).toBe(9); // все клубы родились под огнём
-    run(fx, 0.65); // t = 1.0
-    const s1 = smoke();
+    run(fx, 0.25);
+    expect(live(fx).length).toBe(9); // все клубы родились, когда ядро погасло
+    for (const p of live(fx)) {
+      expect(p.alpha).toBeLessThanOrEqual(SMOKE_ALPHA_MAX + 1e-9);
+      expect(p.life).toBeGreaterThanOrEqual(0.7 - 1e-9);
+      expect(p.life).toBeLessThanOrEqual(0.9 + 1e-9);
+    }
+    run(fx, 0.35); // t = 0.6
+    const s1 = live(fx);
     const meanY = (spr: number) => {
       const l = s1.filter((p) => p.spr === spr);
       return l.reduce((a, p) => a + p.y, 0) / l.length;
     };
     expect(meanY(SPR_SMOKE_DARK)).toBeLessThan(meanY(SPR_SMOKE_LIGHT) - 1);
-    // плотные (≥ 0.85) и ещё не начали таять больше чем наполовину
-    for (const p of s1) expect(p.alpha).toBeGreaterThanOrEqual(0.85);
-    run(fx, 0.55); // t ≈ 1.55: огня давно нет, дым ещё весь здесь
-    expect(smoke().length).toBe(9);
-    expect(smoke().filter((p) => p.age / p.life < 0.75).length).toBeGreaterThanOrEqual(3); // основание ещё плотное
-    run(fx, 0.85); // t ≈ 2.4 — всё рассеялось (последние клубы к этому времени почти прозрачны)
-    expect(smoke().length).toBe(0);
+    run(fx, 0.55); // t ≈ 1.15 — дыма уже нет, разрушение под ним видно
+    expect(live(fx).length).toBe(0);
+    // ядро: горит в начале, к 0.25 с погасло
+    expect(fireHeat(0.05)).toBe(1);
+    expect(fireHeat(0.2)).toBeGreaterThan(0);
+    expect(fireHeat(0.25)).toBe(0);
+    expect(FIRE_HOT).toBeGreaterThanOrEqual(0.2);
+    expect(FIRE_HOT).toBeLessThanOrEqual(0.25);
+  });
+
+  it('дым светлый: середина клубов #CFCFCF…#E8E8E8 (не тёмно-серый)', () => {
+    const lum = (hex: string) => {
+      const n = parseInt(hex.slice(1), 16);
+      return Math.min((n >> 16) & 255, (n >> 8) & 255, n & 255);
+    };
+    for (const tone of [SMOKE.base, SMOKE.warm, SMOKE.light]) {
+      expect(lum(tone.mid)).toBeGreaterThanOrEqual(0xcf);
+      expect(lum(tone.mid)).toBeLessThanOrEqual(0xe8);
+      expect(lum(tone.bottom)).toBeGreaterThanOrEqual(0xa0); // тень снизу — тоже светлая
+    }
+    expect(lum(SMOKE.white.mid)).toBeGreaterThan(0xe8);
+  });
+
+  it('яйцо Матильды: белые клубы ≈ 0.6 с', () => {
+    const fx = new Fx();
+    fx.handle({ type: 'explosion', x: 0, y: 3, radius: 2.5, source: 'egg' });
+    run(fx, 0.25);
+    const s = live(fx);
+    expect(s.length).toBeGreaterThanOrEqual(4);
+    for (const p of s) {
+      expect(p.spr).toBe(SPR_SMOKE_WHITE);
+      expect(p.life).toBeLessThanOrEqual(0.6 + 1e-9);
+    }
+    run(fx, 0.6);
+    expect(live(fx).length).toBe(0);
+  });
+
+  it('цепочка взрывов (2-9): клубы рядом с живыми не рождаются — площадь дыма не растёт', () => {
+    const fx = new Fx();
+    // четыре TNT через 0.117 с в пределах 1.2 м (как цепочка на 2-9)
+    for (let i = 0; i < 4; i++) {
+      fx.handle({ type: 'explosion', x: i * 0.4, y: 1, radius: 3, source: 'tnt' });
+      run(fx, 0.117);
+    }
+    run(fx, 0.2);
+    const n = live(fx).length;
+    expect(n).toBeLessThanOrEqual(15); // было 36
+    // подновлённый дым всё равно уходит: ≤ 1.3 с после последнего взрыва
+    run(fx, 1.1);
+    expect(live(fx).length).toBe(0);
   });
 
   it('дым взрыва на низком качестве — вдвое меньше клубов, но не пропадает', () => {
@@ -146,6 +197,100 @@ describe('Fx', () => {
     const n = ((fx as unknown as { pool: Array<{ kind: number }> }).pool.slice(0, fx.particleCount)).filter((p) => p.kind === 6).length;
     expect(n).toBeGreaterThanOrEqual(5);
     expect(n).toBeLessThan(9);
+  });
+
+  it('экранная вспышка: цепочка TNT сливается, не больше 3 вспышек за секунду и не чаще раза в 1/3 с (07 §19.3)', () => {
+    // фейковый ctx: считаем начала вспышек по fillRect (как qa/cb/s11-flash.ts)
+    const play = (times: number[], seconds = 5) => {
+      const fx = new Fx();
+      let alpha = 0;
+      let drawn = false;
+      const ctx = new Proxy({}, {
+        get: (_t, k) => (k === 'fillRect' ? () => { drawn = alpha > 0.004; } : () => undefined),
+        set: (_t, k, v) => { if (k === 'globalAlpha') alpha = v; return true; },
+      }) as unknown as CanvasRenderingContext2D;
+      const view: ViewInfo = { screenW: 100, screenH: 100, camX: 0, camY: 0, scale: 10, dpr: 1, time: 0 };
+      const starts: number[] = [];
+      let prev = 0;
+      let on = false;
+      const later = [...times];
+      for (let f = 0; f < seconds * 60; f++) {
+        const now = f / 60;
+        while (later.length && later[0] <= now + 1e-9) {
+          later.shift();
+          fx.handle({ type: 'explosion', x: 0, y: 0, radius: 3, source: 'tnt' });
+        }
+        fx.update(1 / 60);
+        alpha = 0;
+        drawn = false;
+        fx.drawFlash(ctx, view);
+        const a = drawn ? alpha : 0;
+        // начало вспышки — включение или рост яркости (второй перепад — уже новая вспышка)
+        if (a > 0 && (!on || a > prev + 1e-6)) starts.push(now);
+        on = a > 0;
+        prev = a;
+      }
+      return starts;
+    };
+    // 2-9: четыре TNT через 0.117 с (было 4 вспышки за 0.35 с) — первые три сливаются, четвёртая — через 1/3 с
+    const chain = play([3.167, 3.283, 3.4, 3.517]);
+    expect(chain.length).toBeLessThanOrEqual(2);
+    if (chain.length === 2) expect(chain[1] - chain[0]).toBeGreaterThanOrEqual(1 / 3 - 0.02);
+    // 1-9: три TNT за 0.25 с — одна вспышка
+    expect(play([1.483, 1.6, 1.717])).toHaveLength(1);
+    // взрывы раз в 0.2 с полторы секунды — вспышки не чаще раза в 1/3 с и не больше 3 за любую секунду
+    const st = play(Array.from({ length: 8 }, (_, i) => 0.5 + i * 0.2));
+    for (let i = 1; i < st.length; i++) expect(st[i] - st[i - 1]).toBeGreaterThanOrEqual(1 / 3 - 0.02);
+    for (const t of st) expect(st.filter((u) => u >= t && u < t + 1).length).toBeLessThanOrEqual(3);
+    expect(st.length).toBeGreaterThanOrEqual(2);
+    // далёкие взрывы — отдельные вспышки
+    expect(play([0.2, 1.0, 2.0])).toHaveLength(3);
+    // «меньше вспышек» — ни одной
+    const fx = new Fx();
+    fx.reduceFlashes = true;
+    fx.handle({ type: 'explosion', x: 0, y: 0, radius: 3, source: 'tnt' });
+    fx.update(1 / 60);
+    expect(fx.flashAlpha).toBeGreaterThan(0.2);
+    // «Уменьшить движение»: вспышка есть, но не ярче flashMax (07 §19.3: α до 0.12)
+    const alphas: number[] = [];
+    const ctx = { save() {}, restore() {}, setTransform() {}, fillRect() { alphas.push(this.globalAlpha); }, globalAlpha: 1, fillStyle: '' };
+    const view = { screenW: 100, screenH: 50 } as never;
+    fx.flashMax = 0.12;
+    expect(fx.reduceFlashes).toBe(false);
+    fx.drawFlash(ctx as never, view);
+    expect(alphas).toHaveLength(1);
+    expect(alphas[0]).toBeCloseTo(0.12, 5);
+    fx.reduceFlashes = true;
+    fx.drawFlash(ctx as never, view);
+    expect(alphas).toHaveLength(1);
+  });
+
+  it('все цвета пыли, которые эмиттеры выбирают в игре, есть в RUNTIME_DUSTS (prewarm) — новых спрайтов в кадре нет', () => {
+    for (const c of RUNTIME_DUSTS) puffSprite(c);
+    softPuffSprite(GROUND_DUST);
+    const n0 = FX_SPRITES.defCount;
+    const fx = new Fx();
+    const surf = ['wood', 'ice', 'stone', 'bird', 'pig', 'ground', 'tnt', 'egg'] as const;
+    for (const a of surf) for (const b of surf) {
+      fx.handle({ type: 'impact', x: 0, y: 0, impulse: 30, a, b });
+      fx.update(1 / 60);
+    }
+    for (const m of ['wood', 'ice', 'stone'] as const) {
+      fx.handle(destroyed(m));
+      fx.handle({ type: 'blockDamaged', id: 2, material: m, x: 1, y: 1, stage: 3 });
+      fx.update(1 / 60);
+    }
+    for (const bird of ['red', 'blues', 'chuck', 'bomb', 'matilda', 'hal', 'terence', 'silver'] as const) {
+      fx.handle({ type: 'birdLaunched', id: 1, bird, x: 0, y: 2, power: 1 });
+      fx.handle({ type: 'ability', id: 1, bird, x: 1, y: 3 });
+      fx.handle({ type: 'birdImpact', id: 1, bird, x: 2, y: 1, speed: 15 });
+      fx.handle({ type: 'birdRemoved', id: 1, bird, x: 2, y: 1 });
+      fx.update(1 / 60);
+    }
+    fx.handle({ type: 'pigDestroyed', id: 3, pig: 'medium', x: 3, y: 1, radius: 0.6, points: 5000 });
+    for (const source of ['tnt', 'bomb', 'egg'] as const) fx.handle({ type: 'explosion', x: 4, y: 0.5, radius: 3, source });
+    run(fx, 1);
+    expect(FX_SPRITES.defCount).toBe(n0);
   });
 
   it('prewarm без DOM — no-op', () => {

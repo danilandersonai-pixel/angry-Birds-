@@ -12,7 +12,7 @@
 //   settings / setSettings(partial) / reset()          — reset стирает уровни, настройки остаются
 //   hasSeen(key) / markSeen(key)                        — одноразовые подсказки («ability:chuck», «aimTutorial»)
 //   onChange(fn) → отписка; bindStorageEvents() → отписка (синхронизация вкладок)
-//   persistent, readOnly, unlockAll
+//   persistent, readOnly, unlockAll                  — readOnly: запись будущей версии, прогресс не пишется (UI предупреждает тостом)
 
 export const STORAGE_KEY = 'angrybirds.progress.v1';
 /** Ключ, куда откладывается нечитаемая запись (для отладки), прежде чем начать с чистого листа. */
@@ -31,10 +31,12 @@ export type AimAssistPref = 'off' | 'short';
 export interface Settings {
   sfx: boolean;
   music: boolean;
+  /** Музыкальный луп в уровнях (при music = true; в меню музыка играет всегда). */
+  levelMusic: boolean;
   /** Анимации интерфейса: как в системе / уменьшить / полные. */
   motion: MotionPref;
-  /** Тряска камеры. */
-  shake: boolean;
+  /** Тряска камеры: явно вкл/выкл или «авто» — включена, если движение не уменьшено (07 §19.3, см. shakeOn). */
+  shake: boolean | 'auto';
   /** Вибрация (navigator.vibrate) на тач-устройствах. */
   haptics: boolean;
   /** Качество графики (04 §11). */
@@ -60,12 +62,18 @@ interface SaveData {
 export const DEFAULT_SETTINGS: Readonly<Settings> = Object.freeze({
   sfx: true,
   music: true,
+  levelMusic: true,
   motion: 'system',
-  shake: true,
+  shake: 'auto',
   haptics: true,
   quality: 'auto',
   aimAssist: 'off',
 } satisfies Settings);
+
+/** Тряска камеры по настройке: явное вкл/выкл или «авто» — только при неуменьшенном движении (07 §19.3). */
+export function shakeOn(s: Readonly<Pick<Settings, 'shake'>>, reduced: boolean): boolean {
+  return s.shake === 'auto' ? !reduced : s.shake;
+}
 
 const MOTION: readonly MotionPref[] = ['system', 'reduce', 'full'];
 const QUALITY: readonly QualityPref[] = ['auto', 'high', 'med', 'low'];
@@ -75,7 +83,9 @@ const AIM: readonly AimAssistPref[] = ['off', 'short'];
 const ID_RE = /^[A-Za-z0-9_.-]{1,40}$/;
 /** Ключ флага «уже видел». */
 const SEEN_RE = /^[A-Za-z0-9_.:-]{1,48}$/;
-const SEEN_MAX = 256;
+export const SEEN_MAX = 256;
+/** Ключи, которые ставит игра (обучение прицелу, способности, подсказки уровней): при переполнении уходят последними. */
+const SEEN_KNOWN_RE = /^(aimTutorial|ability:[a-z]+|hint:[A-Za-z0-9_.-]+)$/;
 /** Защита от абсурдных значений (переполнение, ручная правка). */
 const MAX_SCORE = 1e9;
 const MAX_FAILS = 9999;
@@ -118,7 +128,8 @@ function sanitizeSettings(v: unknown, base: Readonly<Settings> = DEFAULT_SETTING
   if (!isObj(v)) return s;
   if (typeof v.sfx === 'boolean') s.sfx = v.sfx;
   if (typeof v.music === 'boolean') s.music = v.music;
-  if (typeof v.shake === 'boolean') s.shake = v.shake;
+  if (typeof v.levelMusic === 'boolean') s.levelMusic = v.levelMusic;
+  if (typeof v.shake === 'boolean' || v.shake === 'auto') s.shake = v.shake;
   if (typeof v.haptics === 'boolean') s.haptics = v.haptics;
   if (v.motion !== undefined) s.motion = oneOf(v.motion, MOTION, base.motion);
   if (v.quality !== undefined) s.quality = oneOf(v.quality, QUALITY, base.quality);
@@ -128,6 +139,28 @@ function sanitizeSettings(v: unknown, base: Readonly<Settings> = DEFAULT_SETTING
 
 function emptyData(): SaveData {
   return { schema: SCHEMA_VERSION, updatedAt: 0, levels: {}, fails: {}, seen: [], settings: { ...DEFAULT_SETTINGS } };
+}
+
+/**
+ * Ограничить список «уже видел» SEEN_MAX ключами: сначала уходят самые старые незнакомые (мусор, ключи других версий),
+ * затем — самые старые вообще. keep (только что отмеченный ключ) не вытесняется.
+ */
+function capSeen(keys: readonly string[], keep?: string): string[] {
+  let over = keys.length - SEEN_MAX;
+  if (over <= 0) return [...keys];
+  const out: string[] = [];
+  for (const k of keys) {
+    if (over > 0 && k !== keep && !SEEN_KNOWN_RE.test(k)) {
+      over--;
+      continue;
+    }
+    out.push(k);
+  }
+  while (out.length > SEEN_MAX) {
+    const i = out.findIndex((k) => k !== keep);
+    out.splice(i < 0 ? 0 : i, 1);
+  }
+  return out;
 }
 
 /** Миграции: MIGRATIONS[n] переводит объект схемы n в схему n+1. Пока схема одна. */
@@ -140,8 +173,11 @@ const MIGRATIONS: Record<number, (o: Record<string, unknown>) => Record<string, 
 function sanitize(raw: unknown): { data: SaveData; schema: number } | null {
   if (!isObj(raw)) return null;
   let o = raw;
-  let schema = typeof o.schema === 'number' && Number.isInteger(o.schema) ? o.schema : 0;
-  if (schema < 0) return null;
+  // версия: поля нет — ранний черновик (0); целое ≥ 0 — наша схема; иначе (1.5, −1, «1», null) — не наш формат
+  const v = raw.schema;
+  if (v !== undefined && !(typeof v === 'number' && Number.isInteger(v) && v >= 0)) return null;
+  const rawSchema = v === undefined ? 0 : v;
+  let schema = rawSchema;
   if (schema <= SCHEMA_VERSION) {
     while (schema < SCHEMA_VERSION) {
       const m = MIGRATIONS[schema];
@@ -167,12 +203,12 @@ function sanitize(raw: unknown): { data: SaveData; schema: number } | null {
   }
   if (Array.isArray(o.seen)) {
     const set = new Set<string>();
-    for (const k of o.seen) if (typeof k === 'string' && SEEN_RE.test(k) && set.size < SEEN_MAX) set.add(k);
-    data.seen = [...set];
+    for (const k of o.seen) if (typeof k === 'string' && SEEN_RE.test(k)) set.add(k);
+    data.seen = capSeen([...set]);
   }
   data.settings = sanitizeSettings(o.settings);
   data.updatedAt = clampInt(o.updatedAt, 0, Number.MAX_SAFE_INTEGER);
-  return { data, schema: typeof raw.schema === 'number' ? (raw.schema as number) : 0 };
+  return { data, schema: rawSchema };
 }
 
 /** Безопасно получить window.localStorage (доступ к нему сам может бросить SecurityError). */
@@ -188,7 +224,7 @@ function defaultStorage(): StorageLike | null {
 export class ProgressStore {
   /** true — данные пишутся в хранилище; false — только в памяти (нет доступа, квота, ошибка). */
   persistent: boolean;
-  /** true — в хранилище запись более новой схемы: читаем, но не перезаписываем. */
+  /** true — в хранилище запись более новой схемы (целая версия > SCHEMA_VERSION): читаем, но не перезаписываем. */
   readOnly: boolean;
   /** Отладка: открыть все уровни без записи в хранилище (?unlockAll=1). */
   unlockAll = false;
@@ -292,10 +328,10 @@ export class ProgressStore {
     return n;
   }
 
-  /** Отметить одноразовую подсказку как показанную. */
+  /** Отметить одноразовую подсказку как показанную (список полон — вытесняются самые старые незнакомые ключи). */
   markSeen(key: string): void {
-    if (!SEEN_RE.test(key) || this.data.seen.includes(key) || this.data.seen.length >= SEEN_MAX) return;
-    this.data.seen.push(key);
+    if (!SEEN_RE.test(key) || this.data.seen.includes(key)) return;
+    this.data.seen = capSeen([...this.data.seen, key], key);
     this.commit();
   }
 

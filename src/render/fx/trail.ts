@@ -16,12 +16,19 @@ const POP_TIME = 0.12;
 const births = new Map<number, number>();
 let lastSweep = 0;
 let lastTime = -1;
+let lastPoints: readonly TrailPoint[] = [];
+
+/** Точки, переданные последнему drawTrail (след текущего выстрела): по нему Fx рисует эффекты способностей. */
+export function lastTrail(): readonly TrailPoint[] {
+  return lastPoints;
+}
 
 /** Ключ позиции с точностью 1 см. */
 const keyOf = (x: number, y: number): number => Math.round(x * 100) * 4194304 + Math.round(y * 100);
 
 export function drawTrail(ctx: CanvasRenderingContext2D, view: ViewInfo, points: readonly TrailPoint[]): void {
   const now = view.time;
+  lastPoints = points;
   if (now < lastTime) births.clear(); // сцена перезапущена — время пошло заново
   lastTime = now;
   if (points.length === 0) {

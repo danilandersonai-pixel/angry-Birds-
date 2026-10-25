@@ -26,7 +26,9 @@
 //   readonly screen: ScreenId
 //   showLoading(progress01: number, tip?: string): void
 //   showTitle(): void; showEpisodes(): void; showLevels(episodeId: string): void
-//   showHud(level: LevelDef): void                               // экран игры; раскрывает шторку от рогатки
+//   showHud(level: LevelDef): void                               // экран игры; раскрывает шторку от рогатки.
+//                                       // level.hint не показывает: подсказку уровня приложение показывает само — showHint после облёта.
+//                                       // Пауза, открытая до showHud (поворот/скрытая вкладка), закрывается с onResume или открывается заново
 //   updateHud(s: { score: number; best: number; birdsLeft: number; pigsLeft: number }): void  // можно каждый кадр
 //   showHint(text: string, ms = 4000, opts?: { bird?: BirdType; at?: { x: number; y: number } }): void
 //                                       // облачко под плашкой уровня; говорит opts.bird (по умолчанию первая птица уровня);
@@ -35,6 +37,7 @@
 //   showBanner(text: string, ms = 1500, opts?: { kind?: 'win'|'lose'|'info'; badge?: string }): void  // ms ≤ 0 — до hideBanner()
 //   hideBanner(): void
 //   showPause(): void; hidePause(): void                         // программно, без onPause/onResume
+//   readonly pauseOpen: boolean                                  // открыта панель паузы (для сверки флага паузы приложения)
 //   showWin(r: { levelId; score; best; stars; newRecord; hasNext }): void   // прогресс уже записан приложением;
 //                                       // best — рекорд ДО этой победы (prevBest): строка «Рекорд» видна, только если он есть и не побит
 //   showLose(r: { levelId: string; failStreak?: number; tip?: string; score?: number; pigsLeft?: number }): void
@@ -102,6 +105,12 @@ const SLIDE_IN_DELAY_MS = 130;
 /** Старый экран гаснет быстрее, чем уезжает (прозрачность линейно), чтобы не накладываться на новый. */
 const FADE_OUT_MS = 170;
 const ZOOM_MS = 620;
+/**
+ * Загрузка → титул: сначала гаснет экран загрузки (логотип, полоса, совет), и только потом входит титул — иначе два
+ * логотипа и совет поверх «Играть» (ревью, первое впечатление).
+ */
+const LOADING_OUT_MS = 200;
+const TITLE_IN_MS = 250;
 
 export interface BannerOpts {
   kind?: 'win' | 'lose' | 'info';
@@ -240,12 +249,18 @@ export class UI {
     const s = deps.progress.settings;
     deps.audio?.setSfx(s.sfx);
     deps.audio?.setMusic(s.music);
+    deps.audio?.setLevelMusic?.(s.levelMusic);
   }
 
   // ───────────────────────── публичный API ─────────────────────────
 
   get screen(): ScreenId {
     return this._screen;
+  }
+
+  /** Открыта панель паузы: приложение сверяет с ней свой флаг паузы (пауза без панели — зависшая игра). */
+  get pauseOpen(): boolean {
+    return this.overlay?.kind === 'pause';
   }
 
   showLoading(progress01: number, tip?: string): void {
@@ -265,9 +280,11 @@ export class UI {
     this.clearGame();
     this.swap(new TitleView(this.ctx), this.iris.active ? 'none' : from === 'loading' ? 'fade' : 'back', 'meadow');
     void this.revealMenu();
-    if (!this.deps.progress.persistent && !this.storageWarned) {
+    // прогресс не пишется: хранилище недоступно или в нём запись будущей версии (только чтение)
+    const p = this.deps.progress;
+    if ((!p.persistent || p.readOnly) && !this.storageWarned) {
       this.storageWarned = true;
-      window.setTimeout(() => this.toast(S.toastStorageOff, 3500), 900);
+      window.setTimeout(() => this.toast(p.persistent ? S.toastStorageReadOnly : S.toastStorageOff, 3500), 900);
     }
   }
 
@@ -281,6 +298,9 @@ export class UI {
 
   showHud(level: LevelDef): void {
     window.clearTimeout(this.safetyTimer);
+    // пауза, открытая до нового HUD (поворот или скрытие вкладки под шторкой), закрывается вместе со старым оверлеем:
+    // флаг паузы приложения не должен пережить её панель
+    const wasPaused = this.overlay?.kind === 'pause';
     this.closeOverlay(true);
     this.closeDialogs(true);
     this.hideHint(true);
@@ -320,11 +340,12 @@ export class UI {
     this.hud.focus();
     if (changed) this.notifyScreen(level.theme);
     this.guardHistory();
-    // уровень начался под оверлеем «Поверните устройство» (повернули телефон во время ириса) — сразу пауза
+    // уровень начался под оверлеем «Поверните устройство» (повернули телефон во время ириса) или в скрытой вкладке —
+    // сразу пауза; иначе пауза, закрытая выше, снимается и в приложении
     this.pauseIfRotated();
-    void this.revealGame().then(() => {
-      if (level.hint && this.level === level && !this.overlay) this.showHint(level.hint);
-    });
+    this.pauseIfHidden();
+    if (wasPaused && this.overlay?.kind !== 'pause') this.deps.onResume();
+    void this.revealGame();
   }
 
   updateHud(s: { score: number; best: number; birdsLeft: number; pigsLeft: number }): void {
@@ -732,6 +753,7 @@ export class UI {
       this.birdsLeft = this.level.birds.length;
     }
     this.pauseIfRotated();
+    this.pauseIfHidden();
     await this.revealGame();
   }
 
@@ -826,9 +848,13 @@ export class UI {
     this.view = next;
     this._screen = next.id;
     this.root.dataset.screen = next.id;
-    this.L.screens.append(next.el);
     if (this.menuBg === 'css' && next.id !== 'loading') this.L.bg.classList.add('is-on');
     this.setBgTheme(theme);
+    if (prev instanceof LoadingView && dir === 'fade') {
+      this.swapFromLoading(prev, next, theme);
+      return;
+    }
+    this.L.screens.append(next.el);
     next.enter();
     const reduced = motion.reduced;
     const zoomed = !!zoom && !reduced && dir !== 'none' && this.zoomCard(zoom, next.el);
@@ -850,6 +876,36 @@ export class UI {
     }
     if (prev) this.removeView(prev, zoomed ? 'zoom' : dir);
     next.focus();
+    this.notifyScreen(theme);
+    this.guardHistory();
+  }
+
+  /**
+   * Загрузка → титул по очереди, а не кроссфейдом: полоса добегает до 100 %, экран загрузки гаснет за 0.2 с, затем
+   * вставляется титул (его CSS-вход — буквы, Ред, «Играть» — стартует со вставки) и проявляется. Состояние экрана
+   * меняется сразу; если за это время экран сменили ещё раз, титул не вставляется.
+   */
+  private swapFromLoading(prev: LoadingView, next: View, theme: ThemeId): void {
+    const reduced = motion.reduced;
+    prev.complete();
+    prev.el.setAttribute('inert', '');
+    prev.el.setAttribute('aria-hidden', 'true');
+    const out = anim(prev.el, [{ opacity: 1 }, { opacity: 0 }], { duration: reduced ? 120 : LOADING_OUT_MS, easing: 'linear', fill: 'forwards' });
+    let shown = false;
+    const show = (): void => {
+      if (shown) return;
+      shown = true;
+      prev.destroy?.();
+      prev.el.remove();
+      if (this.view !== next) return;
+      this.L.screens.append(next.el);
+      next.enter();
+      anim(next.el, [{ opacity: 0 }, { opacity: 1 }], { duration: reduced ? 150 : TITLE_IN_MS, easing: CSS_EASE.out, fill: 'backwards' });
+      next.focus();
+    };
+    void done(out).then(show);
+    // страховка: анимация могла не доиграть (вкладка скрыта, WAAPI нет)
+    window.setTimeout(show, (reduced ? 120 : LOADING_OUT_MS) + 250);
     this.notifyScreen(theme);
     this.guardHistory();
   }
@@ -1153,6 +1209,7 @@ export class UI {
     if (settingsChanged) {
       if (s.music !== prev.music) this.deps.audio?.setMusic(s.music);
       if (s.sfx !== prev.sfx) this.deps.audio?.setSfx(s.sfx);
+      if (s.levelMusic !== prev.levelMusic) this.deps.audio?.setLevelMusic?.(s.levelMusic);
       if (s.motion !== prev.motion) this.applyMotion();
       syncToggles(this.ctx, this.root.querySelectorAll<HTMLElement>('[data-toggle]'), true);
       for (const d of this.dialogs) if (d instanceof SettingsDialog) d.sync();
@@ -1292,8 +1349,19 @@ export class UI {
     this.autoPaused = this.overlay !== null;
   }
 
+  /** Уровень стартует в уже скрытой вкладке (скрыли под шторкой, а загрузка успела закончиться) — сразу пауза. */
+  private pauseIfHidden(): void {
+    if (document.visibilityState !== 'hidden' || this._screen !== 'game' || this.overlay) return;
+    this.showPause();
+    this.deps.onPause();
+  }
+
+  /**
+   * Вкладку скрыли — пауза. Под шторкой (переход, загрузка уровня) — нет: игра не идёт, а старый HUD вот-вот
+   * сменит showHud и закрыл бы панель, оставив приложение на паузе без неё; скрытую к старту вкладку ловит pauseIfHidden.
+   */
   private readonly onVisibility = (): void => {
-    if (document.visibilityState === 'hidden' && this._screen === 'game' && !this.overlay && !this.busy) {
+    if (document.visibilityState === 'hidden' && this._screen === 'game' && !this.overlay && !this.busy && !this.iris.active) {
       this.showPause();
       this.deps.onPause();
     }

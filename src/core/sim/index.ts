@@ -9,3 +9,5 @@ export { GRIDS, solveLevel, solveLevelAsync, TAPS } from './solver';
 export type { Batch, BatchEvaluator, BatchResults, GridPreset, SolveOptions, SolveProgress, SolveResult, TapSpec } from './solver';
 export { levelPoints, suggestStars } from './stars';
 export type { LevelPoints, StarSuggestion } from './stars';
+export { fillPlan, jitterShots, NOISE, NoiseTable, quantile, robustBatch, robustness, robustReport } from './robust';
+export type { Noise, RobustOptions, RobustReport } from './robust';

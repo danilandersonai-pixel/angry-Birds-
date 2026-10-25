@@ -5,6 +5,7 @@
 // Контракт с GameScreen: вне экрана игры session() = null или blocked() = true — иначе стрелки, Z, ± и Пробел
 // уходят игре (кроме событий на кнопке/ссылке в фокусе). На смене уровня и рестарте — reset(); каждый кадр — update().
 
+import { LAUNCH } from '../config/constants';
 import type { GameSession } from '../core/api';
 import type { SessionState } from '../core/events';
 import type { Vec } from '../core/types';
@@ -54,6 +55,12 @@ export interface InputHandlers {
    * Нет обработчика — по focusBird(): способность не израсходована и птица ещё не касалась (поза fly/aim) либо это Бомб.
    */
   abilityReady?(): boolean;
+  /**
+   * Дополнительная точка захвата птицы (мир, м) или null: где птица нарисована, если рендер сдвинул её от кармашка
+   * ядра (рука обучения оттягивает её до 1.7 м). Нажатие у неё (GRAB_RADIUS или 44 CSS px) тоже берёт птицу;
+   * первая точка прицела — всё равно кармашек ядра (без выстрела от простого тапа).
+   */
+  grabPoint?(): Vec | null;
 }
 
 export interface InputOptions {
@@ -540,13 +547,18 @@ export class InputController {
 
   // ── Прицел ───────────────────────────────────────────────────
 
-  /** Нажатие в зоне захвата: радиус ядра в метрах или 44 CSS px от центра птицы. */
+  /** Нажатие в зоне захвата: радиус ядра в метрах или 44 CSS px от центра птицы (и от нарисованной птицы — grabPoint). */
   private grabbable(s: GameSession, p: { x: number; y: number }): boolean {
     const w = this.camera.screenToWorld(p.x, p.y);
     if (s.canGrab(w)) return true;
     const pocket = s.slingshot().pocket;
     const bp = this.camera.worldToScreen(pocket.x, pocket.y);
-    return withinGrabPx(p.x, p.y, bp.x, bp.y) && s.canGrab(pocket);
+    if (withinGrabPx(p.x, p.y, bp.x, bp.y) && s.canGrab(pocket)) return true;
+    const g = this.h.grabPoint?.() ?? null;
+    if (!g || !Number.isFinite(g.x) || !Number.isFinite(g.y) || !s.canGrab(pocket)) return false;
+    if (Math.hypot(w.x - g.x, w.y - g.y) <= LAUNCH.GRAB_RADIUS) return true;
+    const gp = this.camera.worldToScreen(g.x, g.y);
+    return withinGrabPx(p.x, p.y, gp.x, gp.y);
   }
 
   /** Сработает ли способность по нажатию сейчас (см. InputHandlers.abilityReady). */

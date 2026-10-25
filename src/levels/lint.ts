@@ -1,7 +1,7 @@
 // Статическая проверка уровней без физики (стадия L конвейера 06 §7.1; правила 06 §4.2, §4.5, 00-summary §4).
 //
 // Что проверяется (коды проблем — в поле code):
-// - данные: id, название, тема, птицы, звёзды, meta (id, name, theme, birds, stars, meta);
+// - данные: id, название, тема, птицы, звёзды (пороги — круглые тысячи), meta (id, name, theme, birds, stars, meta);
 // - геометрия блоков: размеры, толщина ≥ 0.25 (≥ 0.5 по каталогу), сетка U, каталог 00 §1.6 (bad-geom, thin, grid, catalog, angle);
 // - перекрытия тел и тел с рельефом > 0.02 м — касание встык допускается (overlap);
 // - опора: каждое динамическое тело опирается на рельеф или тело под ним (no-support, pig-floating), опирание ≥ 0.25 м
@@ -12,8 +12,12 @@
 // - шары: только со стопорами ≤ 0.1 м или в «лунке» (ball-no-stoppers, ball-slope);
 // - стройность столбов ≤ 8, высота ≤ 17.5 м, отношение масс ≤ 10 (slender, too-tall, mass-ratio);
 // - досягаемость: каждая свинья внутри огибающей хотя бы одной птицы уровня (g, V_MAX, R_MAX — из constants, старт из
-//   оттянутого кармашка), зона целей 16…34 м при V 24 / g 15, масштаб (V/24)² — при V 21 это 12.25…26.0 м
-//   (unreachable, reach-graze, zone);
+//   оттянутого кармашка), зона целей 7…20 м от основания рогатки (+0.9 м на метр холма), свинья не ближе 5 м к рогатке
+//   (unreachable, reach-graze, zone, pig-near-sling);
+// - кадр (ревью «арт и ощущения»): правый край контента ≤ 20 м от рогатки, верх контента ≥ 6 м над самой низкой землёй
+//   (wide, low — предупреждения: точный кадр проверяет tests/levels/campaign.test.ts настоящей камерой);
+// - устойчивость решения: эпизод 1 и вводные уровни птиц (BIRD_INTRO) — линия эксперта под «мелким» шумом выигрывает
+//   ≥ 60 % (meta.calib.robustWin из src/levels/calib.ts, scripts/level-calibrate.ts) (robust);
 // - рогатка: основание = slingshot − (0, 2.7) лежит на поверхности рельефа ±0.05 м, ровная площадка очереди птиц
 //   (slingshot-terrain, queue-not-flat, queue-bounds);
 // - границы и рельеф (out-of-bounds, bounds-right, bounds-top, terrain-invalid, terrain-gap, terrain-slope, terrain-almost-flat);
@@ -62,15 +66,39 @@ export const LINT = {
   MAX_SLENDER: 8,
   MAX_HEIGHT: 17.5,
   MAX_MASS_RATIO: 10,
-  /** Зона целей по x от основания рогатки (00 §4: 16…34 при V 24, ×RANGE_K) и прибавка с холма на 1 м высоты (00 §1.2). */
-  ZONE_MIN: 16 * RANGE_K,
-  ZONE_MAX: 34 * RANGE_K,
+  /**
+   * Зона целей по x от основания рогатки и прибавка с холма на 1 м высоты (00 §1.2). Было 00 §4: 16…34 при V 24
+   * (×RANGE_K — 12.25…26). Ревью «арт и ощущения»: уровни длинные и низкие, на телефоне Ред 22–28 px, неба до 60 %
+   * кадра — сооружения ближе и выше, как в AB2: свиньи на 7…20 м, контент до CONTENT_RIGHT_MAX, верх ≥ CONTENT_TOP_MIN.
+   */
+  ZONE_MIN: 7,
+  ZONE_MAX: 20,
   ZONE_HILL_K: 0.9,
+  /** Правый край контента от основания рогатки, м: дальше — кадр, упёртый в ширину, мелкий (Ред < 50 px на 16:9). */
+  CONTENT_RIGHT_MAX: 20,
+  /** Верх контента над самой низкой землёй в кадре, м: ниже — над сооружением пустое небо (> 40 % кадра). */
+  CONTENT_TOP_MIN: 6,
+  /** Свинья не ближе этого к рогатке по x (ревью: король докатывался до рогатки и Теренс бил его в упор). */
+  PIG_SLING_MIN: 5,
+  /** Эпизод 1 и вводные уровни птиц: линия эксперта под «мелким» шумом (sim/robust.ts) выигрывает не реже. */
+  ROBUST_MIN: 0.6,
   /** Ориентиры числа блоков (верхняя граница) по эпизодам и для боссов (00 §4). */
   BLOCKS_MAX: { '1': 30, '2': 45, '3': 60, boss: 80 } as Record<string, number>,
   /** Диапазоны порога 3★ по эпизодам (00 §1.11). */
   THREE_RANGE: { '1': [25_000, 60_000], '2': [35_000, 80_000], '3': [45_000, 110_000] } as Record<string, [number, number]>,
 } as const;
+
+/** Вводный уровень каждой птицы — закон кампании 00 §4 (на нём подсказка учит способности). */
+export const BIRD_INTRO: Readonly<Record<BirdType, string>> = {
+  red: '1-1',
+  blues: '1-4',
+  chuck: '1-6',
+  bomb: '1-8',
+  matilda: '2-2',
+  hal: '2-5',
+  terence: '3-1',
+  silver: '3-6',
+};
 
 const THEMES: readonly ThemeId[] = ['meadow', 'beach', 'snow'];
 const EP_THEME: Record<string, ThemeId> = { '1': 'meadow', '2': 'beach', '3': 'snow' };
@@ -741,6 +769,10 @@ export function lintLevel(lv: LevelDef, opts: LintOptions = {}): LintResult {
     if (st.one !== 0) add('warning', 'stars', `stars.one = ${st.one}: первая звезда — за прохождение, должно быть 0 (06 §8.1)`, L);
     if (!(st.three > 0)) add('error', 'stars', 'stars.three ≤ 0', L);
     if (st.two >= st.three) add('error', 'stars', `stars.two (${st.two}) ≥ stars.three (${st.three})`, L);
+    // счёт кратен 10, пороги — круглые тысячи (как в AB)
+    for (const [k, x] of [['two', st.two], ['three', st.three]] as const) {
+      if (x % 1000 !== 0) add('error', 'stars', `stars.${k} = ${x} не кратно 1000`, L);
+    }
     const rng = LINT.THREE_RANGE[ep];
     if (rng && st.three > 0 && (st.three < rng[0] || st.three > rng[1])) {
       add('warning', 'stars', `3★ = ${st.three} вне ориентира эпизода ${ep}: ${rng[0]}–${rng[1]} (00 §1.11)`, L);
@@ -751,6 +783,14 @@ export function lintLevel(lv: LevelDef, opts: LintOptions = {}): LintResult {
     add('error', 'meta', `meta.nMin = ${meta.nMin} вне 1…${lv.birds?.length ?? 0} (число птиц)`, L);
   }
   if (meta?.difficulty !== undefined && (meta.difficulty < 1 || meta.difficulty > 10)) add('warning', 'meta', `meta.difficulty = ${meta.difficulty} вне 1…10`, L);
+  // устойчивость решения (ревью: вводные уровни птиц были лотереей — 3–37 % побед при ошибке руки ±0.5°)
+  const intro = Object.values(BIRD_INTRO).includes(lv.id);
+  if (ep === '1' || intro) {
+    const win = meta?.calib?.robustWin;
+    const why = ep === '1' ? 'эпизод 1' : 'вводный уровень птицы';
+    if (win === undefined) add('error', 'robust', `${why}: нет калибровки устойчивости meta.calib.robustWin (npx tsx scripts/level-calibrate.ts ${lv.id})`, L);
+    else if (win < LINT.ROBUST_MIN) add('error', 'robust', `${why}: линия эксперта под «мелким» шумом выигрывает ${Math.round(win * 100)} % < ${LINT.ROBUST_MIN * 100} %`, L);
+  }
 
   // ── 2. Тела ──
   const bodies: LBody[] = [];
@@ -1209,6 +1249,9 @@ export function lintLevel(lv: LevelDef, opts: LintOptions = {}): LintResult {
       } else if (birdSet.length && !center.length) {
         add('warning', 'reach-graze', `${b.ref}: птицы (${touch.join(', ')}) могут лишь задеть свинью краем — центр выше огибающей`, b.target, C.c);
       }
+      if (C.c.x - sling.x < LINT.PIG_SLING_MIN - 1e-6) {
+        add('error', 'pig-near-sling', `${b.ref} ближе ${LINT.PIG_SLING_MIN} м к рогатке (x = ${f2(C.c.x)})`, b.target, C.c);
+      }
       const dx = C.c.x - base.x;
       const zmax = LINT.ZONE_MAX + LINT.ZONE_HILL_K * hs;
       if (dx < LINT.ZONE_MIN - 1e-6 || dx > zmax + 1e-6) {
@@ -1228,6 +1271,21 @@ export function lintLevel(lv: LevelDef, opts: LintOptions = {}): LintResult {
     }
     if (base && (base.x - 1 < bounds.minX || base.x > bounds.maxX)) add('error', 'out-of-bounds', `рогатка (x = ${f2(base.x)}) за границами уровня`, S, base);
     const right = Math.max(-Infinity, ...dyn.map((b) => b.maxX));
+    // кадр вида рогатки (камера держит весь контент): длинный и низкий уровень — мелкие персонажи и пустое небо
+    if (base && Number.isFinite(right)) {
+      if (right - base.x > LINT.CONTENT_RIGHT_MAX + 1e-6) {
+        add('warning', 'wide', `правый край контента в ${f2(right - base.x)} м от рогатки > ${LINT.CONTENT_RIGHT_MAX}: кадр мелкий (ревью: Ред < 50 px на 16:9)`, L, v(right, 0));
+      }
+      let low = Infinity;
+      for (let x = Math.max(bounds.minX, base.x - 12); x <= right + 1e-9; x += 0.25) {
+        const ys = terrainSurfacesAt(lv.terrain ?? [], x);
+        if (ys.length) low = Math.min(low, Math.max(...ys));
+      }
+      const top = Math.max(-Infinity, ...dyn.map((b) => b.maxY));
+      if (Number.isFinite(low) && Number.isFinite(top) && top - low < LINT.CONTENT_TOP_MIN - 1e-6) {
+        add('warning', 'low', `верх контента в ${f2(top - low)} м над землёй < ${LINT.CONTENT_TOP_MIN}: над сооружением пустое небо`, L, v(right, top));
+      }
+    }
     if (Number.isFinite(right) && bounds.maxX - right < 8) add('warning', 'bounds-right', `bounds.maxX = ${bounds.maxX} ближе 8 м к правому краю контента (${f2(right)}); обычно край + 12 (06 §2.3)`, L, v(bounds.maxX, 0));
     const apex = sling ? envelopeApex('red', sling) : -Infinity;
     if (bounds.maxY < apex) add('warning', 'bounds-top', `bounds.maxY = ${bounds.maxY} ниже апекса огибающей Red (≈ ${f2(apex)})`, L);

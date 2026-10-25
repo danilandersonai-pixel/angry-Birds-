@@ -166,6 +166,26 @@ describe('калибровка урона (00 §1.7)', () => {
     }
   });
 
+  it('каска не держит удар снизу: helmet гибнет от падения с 4 м (на землю и вместе с доской), с 3 м — жив', () => {
+    const fall = (h: number, onPlank: boolean) => {
+      const blocks = onPlank
+        ? [rect('wood', 18.5, h / 2, 1, h), rect('wood', 21.5, h / 2, 1, h), rect('wood', 20, h + 0.25, 4, 0.5)]
+        : [];
+      const { pw } = physicsOf(level({ blocks, pigs: [pigOn('helmet', 20, onPlank ? h + 0.5 : 0)] }));
+      const pig = destructibles(pw).find((e) => e.kind === 'pig')!;
+      if (onPlank) {
+        for (const e of destructibles(pw)) if (e.kind === 'block' && e.h === h) pw.remove(e);
+      } else {
+        lift(pig, PIG_R.helmet + h);
+      }
+      stepWorld(pw, 3);
+      return pig.dead;
+    };
+    expect(fall(3, false)).toBe(false);
+    expect(fall(4, false)).toBe(true);
+    expect(fall(4.5, true)).toBe(true);
+  });
+
   it('доска дерева 2×0.5 плашмя убивает medium с 4 м и не убивает с 2 м; лёд 2×0.5 бьётся о землю с 2 м', () => {
     const plank = (h: number) => {
       const { pw } = physicsOf(level({ blocks: [rect('wood', 20, 5, 2, 0.5)], pigs: [pigOn('medium', 20, 0)] }));

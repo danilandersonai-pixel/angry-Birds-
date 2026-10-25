@@ -6,9 +6,13 @@
 // Перебор выдаёт кандидатов пакетами независимых серий: solveLevel считает их в своём процессе,
 // solveLevelAsync — любым оценщиком (например, пулом процессов). Итог от способа оценки не зависит.
 // Найденные выстрелы точно повторяются: simulateShots(level, r.shots, r.seed, { wait: r.wait }).
+// С robust (ревью «арт и ощущения»: решения эксперта были хрупкими — 3–37 % побед при ошибке руки ±0.5°) лучшие
+// кандидаты каждой птицы переоцениваются K прогонами всей серии с шумом исполнения (sim/robust.ts, общие случайные
+// числа) и ранжируются по среднему (или квантилю), а не по одному точному прогону: луч и итог — устойчивая линия.
 
 import type { BirdType, LevelDef } from '../index';
 import { wallMs } from './clock';
+import { jitterShots, NOISE, NoiseTable, quantile, type Noise } from './robust';
 import { simulateShots, type Shot, type ShotLog, type SimResult, type WaitPolicy } from './shots';
 
 export type GridPreset = 'full' | 'fast';
@@ -73,6 +77,25 @@ export interface SolveOptions {
   wait?: WaitPolicy;
   /** Вызывается после каждой птицы. */
   onProgress?: (p: SolveProgress) => void;
+  /**
+   * Устойчивый перебор: top лучших (по точному прогону) различных кандидатов каждого узла луча переоцениваются runs
+   * прогонами серии с шумом noise (по умолчанию 8 × 12, NOISE.fine) и ранжируются по средней ценности (или квантилю,
+   * stat) — −свиньи·10⁶ + очки. Без robust — один точный прогон (как раньше).
+   */
+  robust?: RobustSearch;
+}
+
+export interface RobustSearch {
+  runs?: number;
+  top?: number;
+  noise?: Noise;
+  /** seed шума (по умолчанию 1). */
+  seed?: number;
+  /**
+   * Чем оценивать кандидата по прогонам: 'mean' — средняя ценность (по умолчанию) или квантиль q ∈ (0, 1) — например,
+   * 0.25: «в трёх прогонах из четырёх не хуже» (предпочитает надёжное убийство случайному двойному).
+   */
+  stat?: 'mean' | number;
 }
 
 export interface SolveProgress {
@@ -108,6 +131,8 @@ export interface SolveResult {
   reduced: boolean;
   seed: number;
   wait: WaitPolicy;
+  /** Устойчивый перебор: оценка итоговой серии под шумом (null — без robust или не успели оценить). */
+  robustValue: number | null;
 }
 
 /** Пакет серий выстрелов на оценку — каждая с нуля, независимо от других. */
@@ -125,7 +150,10 @@ interface Node {
   /** Момент тапа, из которого получен последний выстрел (для уточнения соседями). */
   tap: TapSpec;
   result: SimResult;
+  /** Ценность для порядка: точная, а при устойчивом переборе — оценка под шумом (непереоценённые — −∞). */
   value: number;
+  /** Оценка под шумом (устойчивый перебор): средняя или квантиль ценности. */
+  robust?: number;
 }
 
 /** Кандидат: продолжение узла луча from выстрелом под углом и силой с тапом tap. */
@@ -156,6 +184,7 @@ interface Step {
 
 interface Plan {
   taps: (bird: BirdType) => readonly TapSpec[];
+  robust: { runs: number; top: number; noise: Noise; table: NoiseTable; stat: 'mean' | number } | null;
   beam: number;
   refine: number;
   refineLevels: number;
@@ -196,9 +225,12 @@ function tapStep(taps: readonly TapSpec[]): number {
   return times.length === 0 ? 0 : times.length === 1 ? 0.25 : stepOf(times);
 }
 
-/** Оценка числа серий на узел: сетка × тапы и на каждом круге уточнения по 8 (+2 по тапу) соседей у refine лучших. */
-const expandCost = (grid: Grid, taps: readonly TapSpec[], refine: number, levels: number) =>
-  grid.angles.length * grid.powers.length * taps.length + levels * refine * (tapStep(taps) > 0 ? 10 : 8);
+/**
+ * Оценка числа серий на узел: сетка × тапы, на каждом круге уточнения по 8 (+2 по тапу) соседей у refine лучших и
+ * переоценка под шумом (top × runs).
+ */
+const expandCost = (grid: Grid, taps: readonly TapSpec[], refine: number, levels: number, robust = 0) =>
+  grid.angles.length * grid.powers.length * taps.length + levels * refine * (tapStep(taps) > 0 ? 10 : 8) + robust;
 
 /** Продолжения всех узлов луча выстрелом птицы bird: сетка, затем круги уточнения лучших соседями (шаг / 2^k). */
 function* expand(beam: readonly Node[], bird: BirdType, grid: Grid, plan: Plan): Generator<Batch, Node[], BatchResults> {
@@ -267,7 +299,38 @@ function* expand(beam: readonly Node[], bird: BirdType, grid: Grid, plan: Plan):
     });
     yield* tryCands(near);
   }
-  return found.flatMap((nodes) => [...nodes.values()]);
+  const all = found.flatMap((nodes) => [...nodes.values()]);
+  if (plan.robust) yield* reweigh(found, plan.robust);
+  return all;
+}
+
+/**
+ * Устойчивость: top лучших различных кандидатов каждого узла — runs прогонов серии с шумом; ценность — средняя
+ * (или квантиль R.stat).
+ * Остальные кандидаты уходят в конец порядка (−∞); если не успели оценить никого — порядок остаётся точным.
+ */
+function* reweigh(found: ReadonlyArray<Map<string, Node>>, R: NonNullable<Plan['robust']>): Generator<Batch, void, BatchResults> {
+  const picked: Node[] = [];
+  for (const nodes of found) picked.push(...distinct([...nodes.values()].sort(better), R.top));
+  if (picked.length === 0) return;
+  const batch: Shot[][] = [];
+  for (const n of picked) for (let k = 0; k < R.runs; k++) batch.push(jitterShots(n.shots, R.noise, k, R.table));
+  const results = yield batch;
+  let any = false;
+  picked.forEach((n, j) => {
+    const vals: number[] = [];
+    for (let k = 0; k < R.runs; k++) {
+      const r = results[j * R.runs + k];
+      if (!r) return;
+      vals.push(valueOf(r));
+    }
+    // квантиль — с поправкой на среднее (1e-3), чтобы при равном квантиле выигрывал кандидат с лучшим средним
+    const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+    n.robust = R.stat === 'mean' ? mean : quantile(vals.sort((a, b) => a - b), R.stat) + 1e-3 * mean;
+    any = true;
+  });
+  if (!any) return;
+  for (const nodes of found) for (const n of nodes.values()) n.value = n.robust ?? -Infinity;
 }
 
 /** Жадный лучевой перебор по птицам; возвращает лучший узел (не хуже родителя: очки не убывают, свиньи не воскресают). */
@@ -298,6 +361,16 @@ function prepare(level: LevelDef, opts: SolveOptions) {
   const refine = Math.max(0, opts.refine ?? 3);
   const refineLevels = Math.max(0, Math.round(opts.refineLevels ?? 2));
   const taps = (bird: BirdType) => opts.taps?.[bird] ?? TAPS[bird];
+  const robust = opts.robust
+    ? {
+        runs: Math.max(1, Math.round(opts.robust.runs ?? 12)),
+        top: Math.max(1, Math.round(opts.robust.top ?? 8)),
+        noise: opts.robust.noise ?? NOISE.fine,
+        table: new NoiseTable(opts.robust.seed ?? 1),
+        stat: opts.robust.stat ?? 'mean',
+      }
+    : null;
+  const robustCost = robust ? robust.runs * robust.top : 0;
   let evaluations = 0;
   let timedOut = false;
   let reduced = false;
@@ -310,7 +383,9 @@ function prepare(level: LevelDef, opts: SolveOptions) {
   const steps: Step[] = [{ grid: main, nodes: beamWidth }];
   for (const s of [{ grid: GRIDS.fast, nodes: beamWidth }, { grid: GRIDS.coarse, nodes: beamWidth }, { grid: GRIDS.coarse, nodes: 1 }]) {
     const prev = steps[steps.length - 1];
-    if (expandCost(s.grid, [null], refine, refineLevels) * s.nodes < expandCost(prev.grid, [null], refine, refineLevels) * prev.nodes) steps.push(s);
+    if (expandCost(s.grid, [null], refine, refineLevels, robustCost) * s.nodes < expandCost(prev.grid, [null], refine, refineLevels, robustCost) * prev.nodes) {
+      steps.push(s);
+    }
   }
   const N = level.birds.length;
   /**
@@ -323,11 +398,12 @@ function prepare(level: LevelDef, opts: SolveOptions) {
 
   const plan: Plan = {
     taps,
+    robust,
     beam: beamWidth,
     refine,
     refineLevels,
     choose: (bird, beam) => {
-      const units = (s: Step) => Math.min(s.nodes, beam.length) * expandCost(s.grid, taps(level.birds[bird]), refine, refineLevels) * (bird + 1);
+      const units = (s: Step) => Math.min(s.nodes, beam.length) * expandCost(s.grid, taps(level.birds[bird]), refine, refineLevels, robustCost) * (bird + 1);
       const cost = (s: Step) => units(s) * msPerUnit;
       // доля птицы: её серии (bird + 1 ходов) против своих и следующей птицы; у последней — весь остаток
       const weight = bird + 1 < N ? 2 * bird + 3 : bird + 1;
@@ -372,6 +448,7 @@ function prepare(level: LevelDef, opts: SolveOptions) {
         reduced,
         seed,
         wait,
+        robustValue: best.robust ?? null,
       };
     },
   };

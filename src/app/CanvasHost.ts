@@ -1,10 +1,24 @@
-// Холст сцены на весь экран (04 §10.1): CSS-размер × dpr (с потолком качества), ресайз, смена dpr,
-// летербокс 16:9 для режима «Играть так» в портрете (UI сообщает через window 'resize').
+// Холст сцены на весь экран (04 §10.1): CSS-размер × коэффициент холста (dpr с потолком качества и масштабом
+// рендера), ресайз, смена dpr, летербокс 16:9 для режима «Играть так» в портрете (UI сообщает через window 'resize').
+// Ступени ниже HIGH уменьшают число пикселей холста и на мониторе с dpr 1 (там потолок dpr ничего не даёт): холст
+// меньше CSS-размера, браузер растягивает его сам; камера и спрайты считают масштаб от canvas.height.
 
 export type QualityLevel = 'high' | 'med' | 'low';
 
 /** Ступени качества (00 §1.14): потолок dpr. */
 export const QUALITY_DPR: Record<QualityLevel, number> = { high: 2, med: 1.5, low: 1 };
+/** Масштаб рендера ступени: сторона холста — не больше этой доли стороны холста HIGH (на dpr 1: 0.85 и 0.7). */
+export const QUALITY_SCALE: Record<QualityLevel, number> = { high: 1, med: 0.85, low: 0.7 };
+
+/**
+ * Пикселей холста на CSS px для ступени q: min(dpr, потолок ступени, масштаб ступени × коэффициент HIGH), не меньше 0.5.
+ * dpr 1: 1 / 0.85 / 0.7; dpr 2 и выше: 2 / 1.5 / 1 (как раньше); dpr 1.25: 1.25 / 1.06 / 0.875.
+ */
+export function backingRatio(devicePixelRatio: number, q: QualityLevel): number {
+  const d = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0 ? devicePixelRatio : 1;
+  const hi = Math.min(d, QUALITY_DPR.high);
+  return Math.max(0.5, Math.min(d, QUALITY_DPR[q], hi * QUALITY_SCALE[q]));
+}
 
 export class CanvasHost {
   readonly canvas: HTMLCanvasElement;
@@ -12,9 +26,9 @@ export class CanvasHost {
   /** CSS-размер области сцены. */
   cssW = 1;
   cssH = 1;
-  /** Действующий dpr (devicePixelRatio, ограниченный качеством). */
+  /** Действующий коэффициент холста (пикселей холста на CSS px: devicePixelRatio, ограниченный качеством). */
   dpr = 1;
-  private maxDpr = 2;
+  private q: QualityLevel = 'high';
   private letterbox = false;
   private readonly listeners = new Set<() => void>();
   private mql: MediaQueryList | null = null;
@@ -43,14 +57,13 @@ export class CanvasHost {
   }
 
   setQuality(q: QualityLevel): void {
-    const m = QUALITY_DPR[q];
-    if (m === this.maxDpr) return;
-    this.maxDpr = m;
+    if (q === this.q) return;
+    this.q = q;
     this.fit(true);
   }
 
   get quality(): QualityLevel {
-    return this.maxDpr >= 2 ? 'high' : this.maxDpr >= 1.5 ? 'med' : 'low';
+    return this.q;
   }
 
   /** Летербокс 16:9 по ширине (портрет, «Играть так»). */
@@ -66,7 +79,7 @@ export class CanvasHost {
     const vh = Math.max(1, window.innerHeight);
     const w = vw;
     const h = this.letterbox ? Math.min(vh, Math.round((vw * 9) / 16)) : vh;
-    const dpr = Math.max(0.5, Math.min(window.devicePixelRatio || 1, this.maxDpr));
+    const dpr = backingRatio(window.devicePixelRatio || 1, this.q);
     const st = this.canvas.style;
     st.width = `${w}px`;
     st.height = `${h}px`;

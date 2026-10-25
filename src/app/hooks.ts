@@ -3,7 +3,6 @@
 
 import { BIRDS, LAUNCH, WORLD } from '../config/constants';
 import type { App } from './App';
-import { hudLevel } from './GameScreen';
 
 export interface GameHooks {
   /** Экран UI: loading | title | episodes | levels | game. */
@@ -73,13 +72,27 @@ export interface GameHooks {
     spanFrac: number;
     /** Габарит контента (мир, м). */
     content: { left: number; right: number; top: number; ground: number };
+    /** Живых свиней (x ± r, y + r) вне вида рогатки — после хода должно быть 0 (свинья могла укатиться за габарит). */
+    pigsOut: number;
+    /** Камера стоит (или едет) в вид рогатки aimView(): после хода — да, если игрок её не двигал. */
+    aimed: boolean;
   };
   /** Видна ли кнопка «К рогатке». */
   homeVisible(): boolean;
+  /** Камера сейчас в анимации (flyToPose: облёт, возврат к рогатке) — для замера темпа в e2e. */
+  camAnimating(): boolean;
+  /** Запись прогресса уровня (лучший счёт и звёзды) или null — не пройден. */
+  record(id: string): { best: number; stars: number } | null;
+  /**
+   * Журнал звуков audio.play(key) (последние 200 ключей). Первый вызов включает запись (до него журнал пуст и
+   * ничего не стоит) и возвращает [].
+   */
+  sounds(): string[];
 }
 
 export function installHooks(app: App): void {
   const g = app.game;
+  let soundLog: string[] | null = null;
   const settled = (st: string): boolean => st === 'ready' || st === 'won' || st === 'lost';
   const hooks: GameHooks = {
     screen: () => app.ui.screen,
@@ -111,7 +124,7 @@ export function installHooks(app: App): void {
     restart: () => {
       if (!g.level) return;
       g.restart();
-      app.ui.showHud(hudLevel(g.level));
+      app.ui.showHud(g.level);
     },
     paused: () => g.paused,
     fps: () => Math.round(app.fpsValue * 10) / 10,
@@ -197,9 +210,34 @@ export function installHooks(app: App): void {
         skyFrac: (top - f.contentTop) / a.viewH,
         spanFrac: (f.contentRight - f.slingX) / w,
         content: { left: f.contentLeft, right: f.contentRight, top: f.contentTop, ground: f.groundRef },
+        pigsOut: (g.session?.entities() ? [...g.session.entities()] : []).filter(
+          (e) => e.kind === 'pig' && (e.x - e.radius < left - 1e-3 || e.x + e.radius > right + 1e-3 || e.y + e.radius > top + 1e-3),
+        ).length,
+        aimed: (() => {
+          const t = cam.flyTarget ?? { x: cam.x, y: cam.y, viewH: cam.viewH };
+          return Math.abs(t.x - a.x) < 0.06 && Math.abs(t.y - a.y) < 0.06 && Math.abs(t.viewH - a.viewH) < 0.06;
+        })(),
       };
     },
     homeVisible: () => !!document.querySelector('.hud-home:not(.is-hidden)'),
+    camAnimating: () => g.camera.animating,
+    record: (id) => {
+      const r = app.progress.record(id);
+      return r ? { best: r.best, stars: r.stars } : null;
+    },
+    sounds: () => {
+      if (!soundLog) {
+        const log: string[] = (soundLog = []);
+        const a = app.audio;
+        const play = a.play.bind(a);
+        a.play = (...args: Parameters<typeof play>): boolean => {
+          log.push(args[0]);
+          if (log.length > 200) log.shift();
+          return play(...args);
+        };
+      }
+      return soundLog.slice();
+    },
     stats: () => ({
       quality: app.host.quality,
       dpr: app.host.dpr,
@@ -210,6 +248,9 @@ export function installHooks(app: App): void {
       aimViewH: Math.round(g.camera.aimView().viewH * 100) / 100,
       frameMs: Math.round(g.frameMs * 100) / 100,
       frameMsMax: Math.round(g.frameMsMax * 100) / 100,
+      renders: g.renders,
+      frozen: g.frozen,
+      blastT: g.lastBlastT,
       drawn: g.renderer.drawn,
       phases: Object.fromEntries(Object.entries(g.renderer.profile).map(([k, v]) => [k, Math.round(v * 100) / 100])),
       fx: g.fx.count,
@@ -217,6 +258,12 @@ export function installHooks(app: App): void {
       spriteMB: Math.round(app.cache.usedBytes / 2 ** 20),
       generated: app.cache.stats.generated,
       substituted: app.cache.stats.substituted,
+      displayMs: Math.round(app.autoQ.period * 100) / 100,
+      shake: g.camera.shakeEnabled,
+      flashMax: g.fx.flashMax,
+      menuReduced: app.menu.reducedMotion,
+      menuCamX: Math.round(app.menu.view().camX * 1000) / 1000,
+      downgrades: app.autoQ.downgrades,
     }),
   };
   (window as unknown as { __game: GameHooks }).__game = hooks;

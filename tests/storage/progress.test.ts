@@ -5,8 +5,10 @@ import {
   DEFAULT_SETTINGS,
   ProgressStore,
   SCHEMA_VERSION,
+  SEEN_MAX,
   STORAGE_KEY,
   episodeStarsNeeded,
+  shakeOn,
   type StorageLike,
 } from '../../src/storage/progress';
 
@@ -238,6 +240,33 @@ describe('ProgressStore: битые данные и отказы хранили�
     expect(st.map.get(STORAGE_KEY)).toBe(future); // в хранилище — нет
   });
 
+  it('схема 99 (целая, будущая) — только чтение', () => {
+    const st = new FakeStorage();
+    const future = JSON.stringify({ schema: 99, levels: { '1-1': { best: 5, stars: 2 } } });
+    st.map.set(STORAGE_KEY, future);
+    const p = new ProgressStore(st);
+    expect(p.readOnly).toBe(true);
+    expect(p.persistent).toBe(true);
+    p.saveResult('1-2', 100, 1);
+    expect(st.map.get(STORAGE_KEY)).toBe(future);
+  });
+
+  it('нецелая или чужая версия схемы (1.5, −1, «1», null) — в CORRUPT_KEY и с чистого листа, запись идёт', () => {
+    for (const schema of [1.5, -1, '1', null, true, 1e400]) {
+      const st = new FakeStorage();
+      const bad = JSON.stringify({ schema, levels: { '1-1': { best: 5, stars: 2 } } });
+      st.map.set(STORAGE_KEY, bad);
+      const p = new ProgressStore(st);
+      expect(p.readOnly, String(schema)).toBe(false);
+      expect(p.record('1-1')).toBeUndefined();
+      expect(st.map.get(CORRUPT_KEY)).toBe(bad);
+      p.saveResult('1-1', 41230, 3);
+      const raw = JSON.parse(st.map.get(STORAGE_KEY)!);
+      expect(raw.schema).toBe(SCHEMA_VERSION);
+      expect(raw.levels['1-1']).toEqual({ best: 41230, stars: 3 });
+    }
+  });
+
   it('getItem бросает — работа в памяти без ошибок', () => {
     const st = new FakeStorage();
     st.failGet = true;
@@ -288,10 +317,27 @@ describe('ProgressStore: расширенные настройки', () => {
     const p = new ProgressStore(st);
     p.setSettings({ motion: 'reduce', quality: 'low', aimAssist: 'short', shake: false, haptics: false });
     const p2 = new ProgressStore(st);
-    expect(p2.settings).toEqual({ sfx: true, music: true, motion: 'reduce', quality: 'low', aimAssist: 'short', shake: false, haptics: false });
+    expect(p2.settings).toEqual({ sfx: true, music: true, levelMusic: true, motion: 'reduce', quality: 'low', aimAssist: 'short', shake: false, haptics: false });
     p2.setSettings({ motion: 'дёргано' as never, quality: 'ultra' as never });
     expect(p2.settings.motion).toBe('reduce');
     expect(p2.settings.quality).toBe('low');
+  });
+
+  it('тряска «авто» по умолчанию: выкл при уменьшенном движении, явный выбор сильнее (07 §19.3)', () => {
+    expect(DEFAULT_SETTINGS.shake).toBe('auto');
+    expect(shakeOn({ shake: 'auto' }, false)).toBe(true);
+    expect(shakeOn({ shake: 'auto' }, true)).toBe(false);
+    expect(shakeOn({ shake: true }, true)).toBe(true);
+    expect(shakeOn({ shake: false }, false)).toBe(false);
+    const st = new FakeStorage();
+    const p = new ProgressStore(st);
+    p.setSettings({ shake: true, levelMusic: false });
+    p.setSettings({ shake: 'тряско' as never, levelMusic: 1 as never });
+    const p2 = new ProgressStore(st);
+    expect(p2.settings.shake).toBe(true);
+    expect(p2.settings.levelMusic).toBe(false);
+    p2.setSettings({ shake: 'auto' });
+    expect(new ProgressStore(st).settings.shake).toBe('auto');
   });
 
   it('setSettings без изменений не пишет в хранилище', () => {
@@ -328,6 +374,39 @@ describe('ProgressStore: поражения, флаги, подписки', () =
     expect(JSON.parse(st.map.get(STORAGE_KEY)!).seen).toEqual(['ability:chuck']);
     p.reset();
     expect(p.hasSeen('ability:chuck')).toBe(false);
+  });
+
+  it('seen переполнен мусором — markSeen вытесняет самые старые незнакомые ключи, а не молчит', () => {
+    const st = new FakeStorage();
+    const junk = Array.from({ length: SEEN_MAX }, (_, i) => `junk:${i}`);
+    st.map.set(STORAGE_KEY, JSON.stringify({ schema: 1, seen: ['ability:chuck', ...junk] }));
+    const p = new ProgressStore(st);
+    // при загрузке лишний (самый старый мусорный) ключ ушёл, знакомый остался
+    expect(p.hasSeen('ability:chuck')).toBe(true);
+    expect(p.hasSeen('junk:0')).toBe(false);
+    p.markSeen('aimTutorial');
+    p.markSeen('hint:1-2');
+    const seen: string[] = JSON.parse(st.map.get(STORAGE_KEY)!).seen;
+    expect(seen.length).toBe(SEEN_MAX);
+    expect(seen).toContain('aimTutorial');
+    expect(seen).toContain('hint:1-2');
+    expect(seen).toContain('ability:chuck');
+    expect(seen).not.toContain('junk:1');
+    expect(seen).not.toContain('junk:2');
+    expect(seen).toContain('junk:3');
+    expect(new ProgressStore(st).hasSeen('aimTutorial')).toBe(true);
+  });
+
+  it('seen полон знакомыми ключами — новый всё равно записывается (уходит самый старый)', () => {
+    const st = new FakeStorage();
+    const known = Array.from({ length: SEEN_MAX }, (_, i) => `hint:${i}`);
+    st.map.set(STORAGE_KEY, JSON.stringify({ schema: 1, seen: known }));
+    const p = new ProgressStore(st);
+    p.markSeen('future:key');
+    const seen: string[] = JSON.parse(st.map.get(STORAGE_KEY)!).seen;
+    expect(seen.length).toBe(SEEN_MAX);
+    expect(seen[seen.length - 1]).toBe('future:key');
+    expect(seen).not.toContain('hint:0');
   });
 
   it('мусор в fails и seen санитайзится', () => {

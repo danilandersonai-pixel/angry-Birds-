@@ -1,6 +1,7 @@
 // Живая сцена под меню (07 §7.3): фон темы текущего экрана, рельеф, рогатка с птицей, очередь птиц
 // (подпрыгивают и моргают — это делает Renderer), небольшое сооружение со свиньями (моргают), медленный дрейф камеры.
 // Дёшево по CPU: физика стоит (сцена после усадки спит), кадр рисуется не чаще 30 раз в секунду.
+// «Уменьшить движение» (07 §19.3): без дрейфа камеры, облака стоят, очередь не подпрыгивает, кадр — до 8 раз в секунду.
 
 import { createSession } from '../core';
 import type { GameSession } from '../core/api';
@@ -108,6 +109,8 @@ function menuLevel(theme: ThemeId): LevelDef {
 }
 
 const FRAME_MIN = 1 / 30;
+/** «Уменьшить движение»: сцена статична (без дрейфа, облака стоят) — кадр нужен только для моргания. */
+const FRAME_MIN_REDUCED = 1 / 8;
 
 export class MenuScene {
   private readonly renderer: Renderer;
@@ -116,6 +119,7 @@ export class MenuScene {
   private time = 0;
   private sinceDraw = Infinity;
   private dirty = true;
+  private reduced = false;
 
   constructor(
     private readonly host: CanvasHost,
@@ -127,6 +131,18 @@ export class MenuScene {
 
   get currentTheme(): ThemeId | null {
     return this.theme;
+  }
+
+  /** «Уменьшить движение» (07 §19.3): камера не дрейфует, фон стоит, очередь не подпрыгивает. */
+  set reducedMotion(on: boolean) {
+    if (on === this.reduced) return;
+    this.reduced = on;
+    this.renderer.reducedMotion = on;
+    this.dirty = true;
+  }
+
+  get reducedMotion(): boolean {
+    return this.reduced;
   }
 
   /** Тема фона меню (onScreenChange). Сцена строится заново только при смене темы. */
@@ -150,7 +166,7 @@ export class MenuScene {
     const viewH = Math.min(18, Math.max(12.5, 23 / aspect));
     const viewW = viewH * aspect;
     const scale = h.canvas.height / viewH;
-    const drift = 1.2 * Math.sin((time * Math.PI * 2) / 38);
+    const drift = this.reduced ? 0 : 1.2 * Math.sin((time * Math.PI * 2) / 38);
     return {
       screenW: h.canvas.width,
       screenH: h.canvas.height,
@@ -158,7 +174,8 @@ export class MenuScene {
       camY: -1.2 + viewH / 2,
       scale,
       dpr: h.dpr,
-      time,
+      // время фона (дрейф облаков): при «Уменьшить движение» — стоп-кадр
+      time: this.reduced ? 0 : time,
     };
   }
 
@@ -167,7 +184,8 @@ export class MenuScene {
     if (!this.session) this.setTheme('meadow');
     const v = this.view(0);
     await this.renderer.cache.prewarm(this.renderer.warmList([v.scale], this.session!.entities()), { yieldFn, onProgress, sliceMs: 14 });
-    this.renderer.prewarmWorld(v);
+    // фон и рельеф — кусками с уступкой кадра (одной задачей 224 мс при CPU×1, 955 мс при ×4: полоса загрузки замирала)
+    await this.renderer.prewarmWorldAsync(v, { yieldFn, sliceMs: 14 });
   }
 
   /** Кадр меню (не чаще 30 раз в секунду). */
@@ -175,7 +193,7 @@ export class MenuScene {
     if (!this.session) this.setTheme('meadow');
     this.time += dt;
     this.sinceDraw += dt;
-    if (!this.dirty && this.sinceDraw < FRAME_MIN) return;
+    if (!this.dirty && this.sinceDraw < (this.reduced ? FRAME_MIN_REDUCED : FRAME_MIN)) return;
     const adt = Math.min(0.1, this.sinceDraw === Infinity ? 0 : this.sinceDraw);
     this.sinceDraw = 0;
     this.dirty = false;

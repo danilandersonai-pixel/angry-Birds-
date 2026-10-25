@@ -1,6 +1,7 @@
-// Музыкальные треки движка: 'menu' — полька; 'level' — только «постель» фона темы
-// (ветер и птички луга, прибой и чайки пляжа, вьюга снега): в уровне музыки нет (00-summary №14, №32;
-// 05-audio §0.9) — звук разрушений главная награда. Тихий луп «Тихая лужайка» — P2, за флагом LEVEL_MUSIC.
+// Музыкальные треки движка: 'menu' — полька; 'level' — «постель» фона темы (ветер и птички луга, прибой и чайки
+// пляжа, вьюга снега) и поверх неё тихий луп «Тихая лужайка» в варианте темы (music.ts LEVEL_SONGS): AB2 — у уровня
+// своя спокойная музыка, без неё паузы между выстрелами пусты (ревью). Луп на ≈ 7 дБ тише ударов (TRACK_GAIN.level),
+// на взрывах приглушается (duck); выключается отдельно — настройка «Музыка в уровнях» (AudioEngine.setLevelMusic).
 // Плавный вход/выход для кроссфейда. Живой режим — lookahead-секвенсор с таймерами;
 // офлайн-режим (untilS) — всё планируется сразу.
 
@@ -14,12 +15,13 @@ export type TrackId = 'menu' | 'level';
 
 /**
  * Уровень трека на шине music. Полька 0.45 (−5 дБ к прежним 0.8): медиана RMS 100 мс ≈ −25 dBFS на выходе,
- * кнопки меню (≈ −20 dBFS) звучат над ней на ~5 дБ. Луп уровня (P2) тише польки — не маскирует разрушения.
+ * кнопки меню (≈ −20 dBFS) звучат над ней на ~5 дБ. Луп уровня — на 6–8 дБ под ударами материалов
+ * (M max ≈ −28 LUFS против медианы ударов ≈ −21 LUFS, замер scripts/render-audio.mjs) — не маскирует разрушения.
  */
-export const TRACK_GAIN: Readonly<Record<TrackId, number>> = { menu: 0.45, level: 0.35 };
+export const TRACK_GAIN: Readonly<Record<TrackId, number>> = { menu: 0.45, level: 0.22 };
 
-/** P2: тихий музыкальный луп в уровне поверх фона темы (00-summary §3.2). По умолчанию выключен. */
-export const LEVEL_MUSIC = false;
+/** Тихий музыкальный луп в уровне поверх фона темы (по умолчанию включён; настройка — AudioEngine.setLevelMusic). */
+export const LEVEL_MUSIC = true;
 
 export interface TrackHandle {
   readonly id: TrackId;
@@ -75,7 +77,7 @@ export function startTrack(
   let band: M.Band | null = null;
   let seq: M.Sequencer | null = null;
   if (withMusic) {
-    const song = M.SONGS[id];
+    const song = id === 'menu' ? M.SONGS.menu : M.LEVEL_SONGS[theme];
     mg = fadeGain(musicDest, TRACK_GAIN[id]);
     const b = M.createBand(ctx, nb, mg, song.stepS, at);
     band = b;

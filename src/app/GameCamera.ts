@@ -11,6 +11,8 @@
 // Облёт начинается с вида сооружения (высота сооружения + 6 м, вся его ширина), затем отъезд к рогатке.
 // Следование за птицей: кадр заранее отдаляется под прогноз апогея (y + vy²/2g), отдаление быстрее приближения.
 // Общий план (Z, двойной тап) всегда охватывает от очереди до дальнего края сооружения.
+// Живые свиньи (liveProbe): укатившаяся за исходный габарит свинья расширяет контент вида рогатки, облёта при
+// поражении и общего плана (только наружу); габарит пересчитывается при каждом aimView/castleView/overviewTarget.
 // Зум колесом и щипком держит низ кадра на земле, пока игрок сам не поднял камеру панорамой.
 
 import { CAMERA, PIGS, SLINGSHOT, TNT, WORLD } from '../config/constants';
@@ -62,6 +64,18 @@ const G = GAME_CAM;
 const GRAV = Math.abs(WORLD.GRAVITY);
 const clamp = (v: number, a: number, b: number): number => (v < a ? a : v > b ? b : v);
 
+/** Габарит живых свиней (мир, м): левый и правый край, верх. */
+export interface LiveBox {
+  left: number;
+  right: number;
+  top: number;
+}
+
+/** Габарит контента для авто-видов: уровень, расширенный живыми свиньями (key — уровень, для которого посчитан). */
+interface ContentBox extends LiveBox {
+  key: object;
+}
+
 /** Габарит одного тела уровня для проверки «под HUD»: правый край и верх, м. */
 interface Item {
   r: number;
@@ -92,8 +106,16 @@ export class GameCamera extends Camera {
    * h от верха холста до низа блока, CSS px. null — HUD ещё нет (берём формулу hudBox). Ставит GameScreen.
    */
   hudProbe: (() => { w: number; h: number } | null) | null = null;
-  /** Кэш авто-вида; measured — HUD для него взят из замера UI (а не из формулы hudBox). */
-  private memo: { key: object; w: number; h: number; c: boolean; measured: boolean; pose: CameraPose; k: number } | null = null;
+  /**
+   * Габарит живых свиней (x ± r, y + r) или null — свиней нет. Ставит GameScreen (session.entities()). Свинья,
+   * укатившаяся за исходный габарит уровня, расширяет кадр авто-видов; внутри габарита — ничего не меняет.
+   */
+  liveProbe: (() => LiveBox | null) | null = null;
+  /** Габарит контента с живыми свиньями (снимок последнего syncLive); null — исходный габарит уровня. */
+  private box: ContentBox | null = null;
+  /** Кэш авто-вида; measured — HUD для него взят из замера UI (а не из формулы hudBox); box — габарит контента. */
+  private memo: { key: object; w: number; h: number; c: boolean; measured: boolean; box: ContentBox | null; pose: CameraPose; k: number } | null =
+    null;
   /** Доля полосы земли, которую пробует подбор авто-вида (null — вне подбора: берётся из кэша авто-вида). */
   private trialK: number | null = null;
 
@@ -121,7 +143,34 @@ export class GameCamera extends Camera {
     }
     this.items = items;
     this.memo = null;
+    this.box = null;
     super.setLevel(level);
+  }
+
+  /**
+   * Габарит контента для авто-видов: блоки, свиньи и TNT уровня, а если живая свинья укатилась за него — расширенный
+   * до неё (только наружу, с шагом 0.1 м, в границах уровня). Снимок обновляет syncLive().
+   */
+  get content(): LiveBox {
+    const f = this.level;
+    const b = this.box;
+    return b && b.key === f ? b : { left: f.contentLeft, right: f.contentRight, top: f.contentTop };
+  }
+
+  /** Перечитать габарит живых свиней (liveProbe); кэш авто-вида сбрасывается, только если габарит контента изменился. */
+  syncLive(): void {
+    const f = this.level;
+    const p = this.liveProbe?.() ?? null;
+    let { contentLeft: l, contentRight: r, contentTop: t } = f;
+    if (p && Number.isFinite(p.left) && Number.isFinite(p.right) && Number.isFinite(p.top)) {
+      // только расширяем; шаг 0.1 м наружу — дрожь свиньи на месте кэш не сбивает
+      if (p.right > r) r = Math.min(f.maxX, Math.ceil(p.right * 10) / 10);
+      if (p.left < l) l = Math.max(f.minX, Math.floor(p.left * 10) / 10);
+      if (p.top > t) t = Math.min(f.groundRef + CAMERA.VIEW_H_MAX, Math.ceil(p.top * 10) / 10);
+    }
+    const b = this.box;
+    if (b && b.key === f && b.left === l && b.right === r && b.top === t) return;
+    this.box = l === f.contentLeft && r === f.contentRight && t === f.contentTop ? null : { key: f, left: l, right: r, top: t };
   }
 
   /** Жёсткий потолок авто-вида рогатки, м. */
@@ -164,21 +213,27 @@ export class GameCamera extends Camera {
   }
 
   override aimView(): CameraPose {
+    this.syncLive?.(); // undefined, пока идёт конструктор базы
     if (this.userAimViewH === null) return this.autoPose();
     const h = clamp(this.userAimViewH, CAMERA.VIEW_H_MIN, CAMERA.VIEW_H_MAX);
     return this.poseFor(h, false);
   }
 
-  /** Вид сооружения для облёта: level.camera.castle или вся ширина сооружения при высоте сооружения + 6 м. */
+  /**
+   * Вид сооружения для облёта: level.camera.castle или вся ширина сооружения при высоте сооружения + 6 м. Свиньи,
+   * укатившиеся за габарит (облёт при поражении), — тоже в кадре: заданный уровнем вид тогда уступает расчётному.
+   */
   override castleView(): CameraPose {
+    this.syncLive();
     const f = this.level;
-    if (f.castle) return this.clampPose({ ...f.castle });
-    const structH = f.contentTop - f.groundRef;
-    const wNeed = f.contentRight - f.contentLeft + 2 * G.CASTLE_SIDE_PAD;
+    const b = this.content;
+    if (f.castle && this.box === null) return this.clampPose({ ...f.castle });
+    const structH = b.top - f.groundRef;
+    const wNeed = b.right - b.left + 2 * G.CASTLE_SIDE_PAD;
     // над сооружением — столько же неба, сколько при низе кадра на земле − 1.2 м и высоте «сооружение + 6 м»
-    const hTop = this.viewHForTop(f.contentTop + G.CASTLE_EXTRA_H - CAMERA.GROUND_MARGIN);
+    const hTop = this.viewHForTop(b.top + G.CASTLE_EXTRA_H - CAMERA.GROUND_MARGIN);
     const h = clamp(Math.max(structH + G.CASTLE_EXTRA_H, hTop, wNeed / this.aspect), CAMERA.VIEW_H_MIN, CAMERA.VIEW_H_MAX);
-    return this.clampPose({ x: (f.contentLeft + f.contentRight) / 2, y: this.bottomFor(h) + h / 2, viewH: h });
+    return this.clampPose({ x: (b.left + b.right) / 2, y: this.bottomFor(h) + h / 2, viewH: h });
   }
 
   /**
@@ -186,11 +241,13 @@ export class GameCamera extends Camera {
    * не ближе вида рогатки × 1.15 (иначе переключение ничего не даёт). Рогатка в кадре всегда.
    */
   override overviewTarget(): CameraPose {
+    this.syncLive();
     const f = this.level;
+    const b = this.content;
     const aim = this.autoPose();
-    const xL = Math.max(f.minX, Math.min(f.queueLeft, f.contentLeft) - G.OVERVIEW_PAD);
-    const xR = Math.min(f.maxX, f.contentRight + G.OVERVIEW_PAD);
-    const hFit = Math.max((xR - xL) / this.aspect, this.viewHForTop(f.contentTop + G.TOP_PAD + 1));
+    const xL = Math.max(f.minX, Math.min(f.queueLeft, b.left) - G.OVERVIEW_PAD);
+    const xR = Math.min(f.maxX, b.right + G.OVERVIEW_PAD);
+    const hFit = Math.max((xR - xL) / this.aspect, this.viewHForTop(b.top + G.TOP_PAD + 1));
     const h = clamp(Math.max(hFit, aim.viewH * G.OVERVIEW_MIN_K), CAMERA.VIEW_H_MIN, CAMERA.VIEW_H_MAX);
     const w = h * this.aspect;
     // по центру, но рогатка с местом под оттяжку — в кадре
@@ -276,7 +333,7 @@ export class GameCamera extends Camera {
     const w = h * this.aspect;
     let room = this.leftRoom(h);
     if (shift) {
-      const need = f.contentRight + G.RIGHT_PAD - f.slingX;
+      const need = this.content.right + G.RIGHT_PAD - f.slingX;
       if (w - room < need) room = Math.max(this.aimLeftRoom(h), w - need);
     }
     return this.clampPose({ x: f.slingX - room + w / 2, y: this.bottomFor(h) + h / 2, viewH: h });
@@ -284,9 +341,9 @@ export class GameCamera extends Camera {
 
   /** Контент (правый край + 1 м, верх + 0.8 м) в кадре позы p. */
   private fitsContent(p: CameraPose): boolean {
-    const f = this.level;
+    const b = this.content;
     const w = p.viewH * this.aspect;
-    return p.x + w / 2 >= f.contentRight + G.RIGHT_PAD - 1e-6 && p.y + p.viewH / 2 >= f.contentTop + G.TOP_PAD - 1e-6;
+    return p.x + w / 2 >= b.right + G.RIGHT_PAD - 1e-6 && p.y + p.viewH / 2 >= b.top + G.TOP_PAD - 1e-6;
   }
 
   /** Ни одно тело не заходит под HUD справа сверху (с запасом HUD_PAD_PX). */
@@ -337,8 +394,9 @@ export class GameCamera extends Camera {
   private autoState(): { pose: CameraPose; k: number } {
     const f = this.level;
     const coarse = this.pointerCoarse === true;
-    const m = this.memo;
-    const same = m !== null && m.key === f && m.w === this.cssW && m.h === this.cssH && m.c === coarse;
+    const m = this.memo; // undefined, пока идёт конструктор базы
+    const box = this.box ?? null;
+    const same = !!m && m.key === f && m.w === this.cssW && m.h === this.cssH && m.c === coarse && m.box === box;
     if (m && same && m.measured) return m;
     const measured = this.measuredHud();
     if (m && same && measured === null) return m;
@@ -349,7 +407,7 @@ export class GameCamera extends Camera {
     } finally {
       this.trialK = null;
     }
-    this.memo = { key: f, w: this.cssW, h: this.cssH, c: coarse, measured: measured !== null, ...r };
+    this.memo = { key: f, w: this.cssW, h: this.cssH, c: coarse, measured: measured !== null, box, ...r };
     return r;
   }
 
