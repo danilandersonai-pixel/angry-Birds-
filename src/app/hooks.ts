@@ -57,7 +57,7 @@ export interface GameHooks {
   /**
    * Кадр вида рогатки против контента уровня (плейтест №2): насколько правый край контента + 1 м и верх + 0.8 м
    * не влезли (м, ≤ 0 — влезли), упёрся ли вид в жёсткий потолок, сколько тел заходят под HUD справа сверху
-   * (по настоящему прямоугольнику .hud-right), размер Реда в CSS px. Считает по aimView(), а не по текущей камере.
+   * (по ui.hudRect() — прямоугольнику правого блока HUD), размер Реда в CSS px. Считает по aimView(), а не по текущей камере.
    */
   framing(): {
     cutRight: number;
@@ -166,12 +166,11 @@ export function installHooks(app: App): void {
       const right = a.x + w / 2;
       const top = a.y + a.viewH / 2;
       const ppm = cam.cssH / a.viewH;
-      // HUD справа сверху: настоящий прямоугольник в координатах холста
+      // HUD справа сверху: прямоугольник по раскладке UI (ui.hudRect — без анимаций въезда), в координатах холста
       let hudHits = 0;
-      const hud = document.querySelector('.hud-right');
+      const r = app.ui.hudRect() ?? document.querySelector('.hud-right')?.getBoundingClientRect() ?? null;
       const cr = app.host.canvas.getBoundingClientRect();
-      if (hud && g.session) {
-        const r = hud.getBoundingClientRect();
+      if (r && g.session) {
         const hl = r.left - cr.left;
         const hb = r.bottom - cr.top;
         for (const e of g.session.entities()) {

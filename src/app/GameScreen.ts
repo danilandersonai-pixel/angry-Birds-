@@ -51,6 +51,8 @@ const BONUS_INTRO_KEEP = 0.35;
 const BONUS_CAM_T = 0.7;
 /** Подсказка уровня, мс. */
 const HINT_MS = 5000;
+/** Через сколько секунд после открытия окна итогов сцена под ним замирает (панель въезжает 0.42 с, затемнение 0.25 с). */
+const RESULTS_FREEZE_S = 0.6;
 /** Подсказка способности — через столько после выстрела (07 §10.4). */
 const ABILITY_HINT_DELAY = 0.25;
 
@@ -145,6 +147,8 @@ export class GameScreen {
   private homeT = 0;
   private homeOn = false;
   private dirty = true;
+  /** Время (time кадра), когда открыто окно итогов; −1 — не открыто. */
+  private resultsAt = -1;
   /** Время кадра рендера (для fps-зависимых замеров). */
   lastRenderMs = 0;
   /** Сколько занял прогрев эффектов и физики при последней загрузке, мс. */
@@ -185,6 +189,13 @@ export class GameScreen {
     };
     d.host.onChange(sync);
     sync();
+    // HUD справа сверху — замер UI (ui.hudRect, CSS px окна) в координатах холста; до showHud — формула камеры
+    this.camera.hudProbe = () => {
+      const r = d.ui.hudRect();
+      if (!r) return null;
+      const c = d.host.canvas.getBoundingClientRect();
+      return { w: c.right - r.left, h: r.bottom - c.top };
+    };
   }
 
   // ───────────────────────── жизненный цикл уровня ─────────────────────────
@@ -288,6 +299,7 @@ export class GameScreen {
     this.bonusCam = false;
     this.bonusSimT0 = -1;
     this.loseIn = -1;
+    this.resultsAt = -1;
     this.homeT = 0;
     this.tutorT = -1;
     this.setHome(false);
@@ -358,7 +370,11 @@ export class GameScreen {
     }
     if (p.hasSeen(key) && p.failStreak(lv.id) < 2) return;
     p.markSeen(key);
-    this.d.ui.showHint(lv.hint, HINT_MS);
+    // хвостик облачка — к птице на рогатке (облёт закончен: камера в виде рогатки)
+    const sl = lv.slingshot;
+    const c = this.d.host.canvas.getBoundingClientRect();
+    const at = this.camera.worldToScreen(sl.x, sl.y);
+    this.d.ui.showHint(lv.hint, HINT_MS, { at: { x: c.left + at.x, y: c.top + at.y } });
   }
 
   // ───────────────────────── пауза ─────────────────────────
@@ -445,7 +461,10 @@ export class GameScreen {
       if (shake) this.camera.shake(shake.amount, shake.duration);
       this.camera.update(dt);
     }
-    if (this.paused && !this.dirty) {
+    // под окном итогов (после его въезда) сцену не перерисовываем: холст не меняется — композитору не нужно каждый кадр
+    // заново принимать и смешивать полноэкранную текстуру под затемнением (Б10; resize — через invalidate())
+    const frozen = this.resultsAt >= 0 && time - this.resultsAt > RESULTS_FREEZE_S;
+    if ((this.paused || frozen) && !this.dirty) {
       this.hud();
       return;
     }
@@ -628,10 +647,9 @@ export class GameScreen {
     const shots = n - s.birdsLeft;
     const badge = shots === 1 && n >= 2 ? S.winOneShot : shots === 2 && n >= 4 ? S.winClean : undefined;
     this.d.ui.showBanner(S.winBanner, 0, { kind: 'win', badge });
-    // короткий победный звук сразу (джингл победы — по levelEnd, у окна итогов): взмах ленты и звон звезды
+    // «уровень зачищен» сразу (джингл победы — по levelEnd, у окна итогов): взмах ленты и аккорд металлофона, ≈ 0.85 с
     try {
-      this.d.audio.play('ui:whoosh');
-      this.d.audio.play('star:2', { delay: 0.18 });
+      this.d.audio.play('cleared');
     } catch (err) {
       console.error('[audio]', err);
     }
@@ -646,6 +664,7 @@ export class GameScreen {
     const hasNext = next !== null && p.isUnlocked(next, this.d.order);
     // рекорд до этой победы (0 — первой победы; строку «Рекорд» тогда прячет UI — см. отчёт сборки)
     this.d.ui.showWin({ levelId: id, score, best: prevBest, stars, newRecord, hasNext });
+    this.resultsAt = this.time;
   }
 
   private timers(dt: number): void {
@@ -668,7 +687,8 @@ export class GameScreen {
       this.loseIn -= dt;
       if (this.loseIn <= 0) {
         this.loseIn = -1;
-        this.d.ui.showLose({ levelId: this.level!.id, score: s.score });
+        this.d.ui.showLose({ levelId: this.level!.id, score: s.score, pigsLeft: s.pigsLeft });
+        this.resultsAt = this.time;
       }
     }
     // обучение прицелу: 1-1, пока игрок ни разу не стрелял; через 1.5 с ожидания в READY

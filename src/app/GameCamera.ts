@@ -71,6 +71,7 @@ interface Item {
 /**
  * Прямоугольник HUD справа сверху (счёт, рекорд, свиньи), CSS px от правого и верхнего края окна —
  * по формулам styles.css (.hud-right) при пятизначном счёте. Замер: 1600×900 → ≈250×209, 844×390 тач → ≈125×109.
+ * Запасной вариант: пока HUD нет в документе (загрузка уровня); дальше камера берёт замер UI (hudProbe → ui.hudRect()).
  */
 export function hudBox(cssW: number, cssH: number, coarse: boolean): { w: number; h: number } {
   const u = computeUiScale(cssW, cssH, coarse);
@@ -86,7 +87,13 @@ export class GameCamera extends Camera {
   private items: Item[] = [];
   /** Касание — крупнее HUD (UI: coarse ×1.15). Ставит GameScreen. */
   pointerCoarse = false;
-  private memo: { key: object; w: number; h: number; c: boolean; pose: CameraPose; k: number } | null = null;
+  /**
+   * Замер HUD от UI: правый блок (ui.hudRect()) относительно холста — w от правого края холста до левого края блока,
+   * h от верха холста до низа блока, CSS px. null — HUD ещё нет (берём формулу hudBox). Ставит GameScreen.
+   */
+  hudProbe: (() => { w: number; h: number } | null) | null = null;
+  /** Кэш авто-вида; measured — HUD для него взят из замера UI (а не из формулы hudBox). */
+  private memo: { key: object; w: number; h: number; c: boolean; measured: boolean; pose: CameraPose; k: number } | null = null;
   /** Доля полосы земли, которую пробует подбор авто-вида (null — вне подбора: берётся из кэша авто-вида). */
   private trialK: number | null = null;
 
@@ -122,9 +129,15 @@ export class GameCamera extends Camera {
     return clamp(G.AIM_H_HARD * Math.max(1, 16 / 9 / this.aspect), CAMERA.VIEW_H_MIN, CAMERA.VIEW_H_MAX);
   }
 
-  /** HUD справа сверху для текущего окна, CSS px. */
+  /** HUD справа сверху для текущего окна, CSS px: замер UI, а пока HUD нет — формула. */
   get hud(): { w: number; h: number } {
-    return hudBox(this.cssW, this.cssH, this.pointerCoarse === true);
+    return this.measuredHud() ?? hudBox(this.cssW, this.cssH, this.pointerCoarse === true);
+  }
+
+  /** Замер HUD от UI (hudProbe) или null — HUD нет, замер не задан или не число. */
+  private measuredHud(): { w: number; h: number } | null {
+    const m = this.hudProbe?.() ?? null;
+    return m && Number.isFinite(m.w) && Number.isFinite(m.h) ? { w: Math.max(0, m.w), h: Math.max(0, m.h) } : null;
   }
 
   /**
@@ -277,9 +290,8 @@ export class GameCamera extends Camera {
   }
 
   /** Ни одно тело не заходит под HUD справа сверху (с запасом HUD_PAD_PX). */
-  private clearOfHud(p: CameraPose): boolean {
+  private clearOfHud(p: CameraPose, hud: { w: number; h: number }): boolean {
     const ppm = this.cssH / p.viewH;
-    const hud = this.hud;
     const xR = p.x + (p.viewH * this.aspect) / 2;
     const hudL = xR - hud.w / ppm;
     const hudB = p.y + p.viewH / 2 - (hud.h + G.HUD_PAD_PX) / ppm;
@@ -317,19 +329,27 @@ export class GameCamera extends Camera {
     return this.autoState().pose;
   }
 
-  /** Авто-вид рогатки и доля полосы земли (кэш до смены уровня, размера окна или типа указателя). */
+  /**
+   * Авто-вид рогатки и доля полосы земли (кэш до смены уровня, размера окна или типа указателя). Кэш, посчитанный
+   * по формуле HUD (HUD ещё не было), пересчитывается один раз — когда UI начнёт отдавать замер; замер HUD берётся
+   * один раз на подбор, а не на каждую пробу и не каждый кадр.
+   */
   private autoState(): { pose: CameraPose; k: number } {
     const f = this.level;
     const coarse = this.pointerCoarse === true;
     const m = this.memo;
-    if (m && m.key === f && m.w === this.cssW && m.h === this.cssH && m.c === coarse) return m;
+    const same = m !== null && m.key === f && m.w === this.cssW && m.h === this.cssH && m.c === coarse;
+    if (m && same && m.measured) return m;
+    const measured = this.measuredHud();
+    if (m && same && measured === null) return m;
+    const hud = measured ?? hudBox(this.cssW, this.cssH, coarse);
     let r: { pose: CameraPose; k: number };
     try {
-      r = this.pickAuto();
+      r = this.pickAuto(hud);
     } finally {
       this.trialK = null;
     }
-    this.memo = { key: f, w: this.cssW, h: this.cssH, c: coarse, ...r };
+    this.memo = { key: f, w: this.cssW, h: this.cssH, c: coarse, measured: measured !== null, ...r };
     return r;
   }
 
@@ -338,8 +358,9 @@ export class GameCamera extends Camera {
    * верх не влезает — 1.2 м); 2) по возможности — верх сооружения не под HUD: сначала уже полоса земли (кадр выше,
    * масштаб тот же), затем отдаление не больше HUD_OVER_K и снова столько земли, сколько позволяет HUD.
    */
-  private pickAuto(): { pose: CameraPose; k: number } {
+  private pickAuto(hud: { w: number; h: number }): { pose: CameraPose; k: number } {
     const f = this.level;
+    const clear = (p: CameraPose): boolean => this.clearOfHud(p, hud);
     const at = (h: number, k: number, shift = false): CameraPose => {
       this.trialK = k;
       return this.poseFor(h, shift);
@@ -358,12 +379,12 @@ export class GameCamera extends Camera {
     }
     if (h1 === null) return { pose: at(cap, 0, true), k: 0 };
     const hA = h1;
-    if (this.clearOfHud(at(hA, k0))) return { pose: at(hA, k0), k: k0 };
-    const k1 = this.searchK(k0, (k) => this.clearOfHud(at(hA, k)));
+    if (clear(at(hA, k0))) return { pose: at(hA, k0), k: k0 };
+    const k1 = this.searchK(k0, (k) => clear(at(hA, k)));
     if (k1 !== null) return { pose: at(hA, k1), k: k1 };
-    const h2 = this.search(hA, Math.min(cap, hA * G.HUD_OVER_K), (h) => this.clearOfHud(at(h, 0)));
+    const h2 = this.search(hA, Math.min(cap, hA * G.HUD_OVER_K), (h) => clear(at(h, 0)));
     if (h2 === null) return { pose: at(hA, k0), k: k0 }; // HUD не обойти: оставляем кадр с землёй
-    const k2 = this.searchK(k0, (k) => this.clearOfHud(at(h2, k))) ?? 0;
+    const k2 = this.searchK(k0, (k) => clear(at(h2, k))) ?? 0;
     return { pose: at(h2, k2), k: k2 };
   }
 }
