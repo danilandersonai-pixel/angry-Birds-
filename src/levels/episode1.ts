@@ -4,8 +4,11 @@
 //
 // Разметка (06 §2.3): рогатка в (0, 0) → ANCHOR (0, 2.7); очередь птиц на x = −1.6 − 1.1·i; предполье 1.5…15 — только декор;
 // цели на x = 16…34 (с Bomb — до 32). Огибающая Red над x = 20 / 25 / 30: 14.2 / 11.1 / 7.4 м, Bomb — 11.7 / 8.3 / 4.1 м.
-// Звёзды: 1-1 и 1-4 — калибровка лаборатории 06 (§7.5), остальные — черновая формула 06 §8.2 (draftStars),
-// starsSource 'manual': пороги пересчитает калибратор на настоящем ядре.
+// Звёзды (starsSource 'solver'): suggestStars из src/core/sim — формула 06 §8.2 по очкам уровня, 3★ не выше счёта
+// бота-эксперта на настоящем ядре (npx tsx scripts/level-report.ts 1- --solve, решатель по умолчанию). Исключение — 1-1:
+// пороги 25 000 / 35 000 из калибровки 06 §7.5 (закреплены тестом; эксперт на ядре набирает 35 800).
+// meta.calib: expertBirds / expertScore / ms — птиц, счёт и время решателя; typicalWin / k — доля побед «типичного
+// игрока» 06 §7.3 (адаптивный бот с шумом прицела, k прогонов) на настоящем ядре.
 // Декор: y — поверхность, на которой стоит предмет (рисуется рендером без физики).
 
 import type { DecorDef, LevelDef } from '../core/types';
@@ -65,7 +68,7 @@ export function L1_1(): LevelDef {
       difficulty: 1,
       teach: 'оттянуть и отпустить',
       starsSource: 'solver',
-      calib: { expertBirds: 1, expertScore: 36040, typicalWin: 1, q40: 25000, q80: 35000, k: 10 },
+      calib: { expertBirds: 1, expertScore: 35800, ms: 1625, typicalWin: 1, k: 16 },
     },
     decor: [
       dec('sign', 3.2),
@@ -100,8 +103,15 @@ export function L1_2(): LevelDef {
     terrain: [flatGround(), cliff(31.5, 4, 'right', { kind: 'ground' })],
     parts: [shed, tw, teeth],
     pigs: [pigIn('small', shed.spots[0]), pigIn('small', tw.spots[0]), pigIn('medium', tw.spots[1])],
+    stars: { one: 0, two: 17000, three: 28000 },
     hint: 'Лёд разбивается от одного удара',
-    meta: { nMin: 2, difficulty: 2, teach: 'лёд хрупкий, medium прочнее small', starsSource: 'manual' },
+    meta: {
+      nMin: 2,
+      difficulty: 2,
+      teach: 'лёд хрупкий, medium прочнее small',
+      starsSource: 'solver',
+      calib: { expertBirds: 2, expertScore: 31250, ms: 1377, typicalWin: 0.88, k: 16 },
+    },
     decor: [
       dec('bush', 5, 0, 1),
       dec('flower', 8.5),
@@ -138,8 +148,15 @@ export function L1_3(): LevelDef {
     birds: ['red', 'red', 'red', 'red'],
     parts: [trap, zig, floor, house],
     pigs: [pigIn('medium', trap.spots[0]), pigIn('small', trap.spots[1]), pigIn('small', house.spots[0])],
+    stars: { one: 0, two: 29000, three: 40000 },
     hint: 'Камень не разбить — выбейте опоры, и плита раздавит свинью',
-    meta: { nMin: 2, difficulty: 3, teach: 'камень не бьётся, но падающий камень давит', starsSource: 'manual' },
+    meta: {
+      nMin: 2,
+      difficulty: 3,
+      teach: 'камень не бьётся, но падающий камень давит',
+      starsSource: 'solver',
+      calib: { expertBirds: 2, expertScore: 40057, ms: 1777, typicalWin: 0.94, k: 16 },
+    },
     decor: [
       dec('flower', 4.5),
       dec('bush', 7.5, 0, 0.9, true),
@@ -154,10 +171,11 @@ export function L1_3(): LevelDef {
 }
 
 /**
- * 1-4 «Тройняшки» · d 3 · N 3 (nMin 1) · [проверен в лаборатории 06, звёзды 27 000 / 36 000]
+ * 1-4 «Тройняшки» · d 3 · N 3 (nMin 1) · [проверен в лаборатории 06; там звёзды были 27 000 / 36 000]
  * Три ледяные П-рамы на x = 20 / 25 / 30, ледяные крыши iso 4×1.5 на крайних; 4 small — 3 внутри, 1 на средней балке.
  * Учит: тап в полёте — Blues делятся на троих; лёд им по зубам (×2.6). Один сплит на 18° с тапом 0.5 с сносит всё.
- * Геометрия — точная копия лабораторного образца (звёзды откалиброваны на нём).
+ * Геометрия — точная копия лабораторного образца. Звёзды — suggestStars на настоящем ядре: 3★ 43 000 = свиньи, блоки и
+ * 2 сбережённые птицы, то есть сплит, сносящий всё одной птицей (эксперт 45 035).
  */
 export function L1_4(): LevelDef {
   const huts = [20, 25, 30].map((x) => frame({ x, col: 'ice', beam: 'ice' }));
@@ -168,14 +186,14 @@ export function L1_4(): LevelDef {
     birds: ['blues', 'blues', 'red'],
     parts: [...huts, ...roofs],
     pigs: [...huts.map((f) => pigIn('small', f.spots[0])), pigIn('small', huts[1].spots[1])],
-    stars: { one: 0, two: 27000, three: 36000 },
+    stars: { one: 0, two: 32000, three: 43000 },
     hint: 'Коснитесь экрана в полёте — птица разделится на три',
     meta: {
       nMin: 1,
       difficulty: 3,
       teach: 'Blues: разделение в полёте, лёд',
       starsSource: 'solver',
-      calib: { expertBirds: 1, expertScore: 46323, typicalWin: 0.6, k: 10 },
+      calib: { expertBirds: 1, expertScore: 45035, ms: 751, typicalWin: 0.75, k: 16 },
     },
     decor: [
       dec('flower', 4),
@@ -191,51 +209,64 @@ export function L1_4(): LevelDef {
 }
 
 /**
- * 1-5 «Холм» · d 4 · N 4 (nMin 3) · [лаборатория: побед 100 %, 3★ щедрая → добавлены 5 блоков в тыл]
- * Холм-трапеция 18.5 / 23…30.5 / 35 высотой 3 м (откосы 33.7°, не круче 35°). На холме башня в 2 этажа на x = 27:
- * 1-й этаж деревянный (large внутри), 2-й — ледяные колонны под КАМЕННОЙ балкой (small наверху); перед башней камень 1×1.
- * Каменная балка — «крышка»: сбитые ледяные колонны роняют её на 1-й этаж. С деревянной балкой large почти не умирал
- * («типичный игрок» на настоящем ядре — 60 %, с каменной — 9 из 10).
- * Тыл (06 §2.3, 34…40 м — «свиньи только для навеса Red/Blues»): small на земле за холмом (x = 36.2) и поленница
- * 2×2.5 из 4 квадратов и доски. Lint предупреждает zone (36.2 > 34) — так задумано: навес на ~45° почти не чувствителен
- * к углу, это обучающий бросок на дальность.
- * Учит: рельеф, навесной выстрел через холм, large прочнее (внутри 1-го этажа).
+ * 1-5 «Холм» · d 4 · N 4 (nMin 3) · [лаборатория: побед 100 %, 3★ щедрая → больше разрушаемого в тыл]
+ * Холм-трапеция 16 / 20.5…28.5 / 33 высотой 3 м (откосы 33.7°). Три цели, по птице на каждую:
+ * — деревянный помост (балка 4×0.5 на кирпичах 0.5×1) на левом краю верха, x = 22.25: large наверху — прочный,
+ *   его берёт только прямое попадание Red (у Blues по свинье ×0.5); справа камень 1×1 — упор, large не катится к вышке;
+ * — ледяная вышка в 2 этажа (span 2) под ледяной крышей на правом краю верха, x = 27.5: small на 2-м этаже — цель Blues;
+ * — тыл за холмом: small на земле на x = 34 (только навес), за ним поленница 2×2.5 из 4 ящиков и доски.
+ * Правка по замерам на настоящем ядре: в старой версии (large и small в одной башне) одна навесная Red убивала обоих —
+ * эксперт проходил 2 птицами; открытый small наверху вышки «пропускал» Red дальше, в тыл; large под каменной «крышкой»
+ * гиб от осколков Blues вместе с тыловой свиньёй, а за деревянными стенами амбара был не по силам «типичному игроку»
+ * (66 % побед). Сейчас решатель тратит 3 птицы, «типичный игрок» (06 §7.3) побеждает в 27 из 32.
+ * Учит: рельеф, навесной выстрел через холм, large прочнее.
  */
 export function L1_5(): LevelDef {
   const H = 3;
-  // холм: левый откос 16…20.5, ровный верх 20.5…28, правый откос 28…32.5 (оба 33.7°)
-  // A — ледяная вышка в 2 этажа на левом краю верха: small наверху (хрупкое место — цель для Blues)
-  const watch = tower({ x: 21.5, y: H, floors: 2, span: 2, h: 1, mats: 'ice' });
-  // B — амбар на правом краю верха: деревянные колонны, каменная балка-«крышка», деревянная крыша; large внутри
-  const barn = frame({ x: 25.5, y: H, span: 3, h: 2, col: 'wood', beam: 'stone' });
-  const barnRoof = roof({ x: 25.5, y: barn.top, mat: 'wood' });
-  // камень-упор встык к правой колонне: large не скатывается с холма в тыл
-  const stopper = part({ blocks: [blockOn('stone', 'square', 27.5, H)] });
-  // C — тыл за холмом: деревянная сторожка 2×2 с крышей, small внутри; рядом поленница
-  const shed = hut({ x: 34, span: 2, h: 1, col: 'stone', beam: 'wood', roofMat: 'wood' });
+  // холм: левый откос 16…20.5, ровный верх 20.5…28.5, правый откос 28.5…33 (оба 33.7°)
+  // A — деревянный помост 4×1.5 на левом краю верха: large открыто наверху (Red убивает его прямым попаданием,
+  // осколки Blues по свинье и дереву ×0.5 — почти нет)
+  const stand = frame({ x: 22.25, y: H, span: 3, h: 1, col: 'wood', beam: 'wood' });
+  // камень-упор справа от помоста: сбитый large не катится по верху холма к вышке
+  const stopper = part({ blocks: [blockOn('stone', 'square', 24.25, H)] });
+  // B — ледяная вышка в 2 этажа под ледяной крышей на правом краю верха: small на 2-м этаже (Red, пробив лёд, гаснет
+  // и не долетает до свиньи в тылу; Blues по льду ×2.6 — главная цель для них)
+  const watch = tower({ x: 27.5, y: H, floors: 2, span: 2, h: 1, mats: 'ice', roof: 'ice' });
+  // C — тыл за холмом: small на земле (x = 34) — его достаёт только навес; за ним поленница 2×2.5 (4 ящика и доска)
   const woodpile = merge(
-    stack({ x: 36, n: 2, kind: 'square', mat: 'wood' }),
-    stack({ x: 37, n: 1, kind: 'square', mat: 'wood' }),
+    stack({ x: 35.75, n: 2, kind: 'square', mat: 'wood' }),
+    stack({ x: 36.75, n: 2, kind: 'square', mat: 'wood' }),
+    part({ blocks: [blockOn('wood', 'plank', 36.25, 2)] }),
   );
   return level({
     id: '1-5',
     name: 'Холм',
     birds: ['red', 'blues', 'red', 'blues'],
-    terrain: [flatGround(), hill(16, 20.5, 28, 32.5, H)],
-    parts: [watch, barn, barnRoof, stopper, shed, woodpile],
-    pigs: [pigIn('small', watch.spots[2], 0, { fragile: true }), pigIn('large', barn.spots[0]), pigIn('small', shed.spots[0])],
+    terrain: [flatGround(), hill(16, 20.5, 28.5, 33, H)],
+    parts: [stand, stopper, watch, woodpile],
+    pigs: [pigIn('large', stand.spots[1]), pigIn('small', watch.spots[1]), pigOn('small', 34, 0)],
+    stars: { one: 0, two: 18000, three: 30000 },
     hint: 'Свинью за холмом достанет только навесной выстрел',
-    meta: { nMin: 3, difficulty: 4, teach: 'рельеф, навес через холм, large', starsSource: 'manual' },
+    meta: {
+      nMin: 3,
+      difficulty: 4,
+      teach: 'рельеф, навес через холм, large',
+      starsSource: 'solver',
+      calib: { expertBirds: 3, expertScore: 32451, ms: 4210, typicalWin: 0.84, k: 32 },
+    },
     decor: [
       dec('bush', 4.5, 0, 0.9),
       dec('flower', 8),
       dec('grass', 11.5),
-      dec('flower', 15, 0, 0.8),
-      dec('bush', 20, 1, 0.8),
-      dec('flower', 23.4, H, 0.6),
-      dec('grass', 29.8, H, 0.7),
-      dec('flower', 33, 1.33, 0.7, true),
-      dec('bush', 41, 0, 1.2, true),
+      dec('flower', 14.2, 0, 0.8),
+      dec('bush', 18, 1.33, 0.8),
+      dec('grass', 20.6, H, 0.6),
+      dec('sign', 25.6, H, 0.8),
+      dec('flower', 29.2, 2.53, 0.6, true),
+      dec('grass', 31, 1.33, 0.7),
+      dec('rock', 33.2, 0, 0.6),
+      dec('flower', 38.3, 0, 0.8),
+      dec('bush', 40.5, 0, 1.2, true),
       dec('flower', 43.5),
     ],
   });
@@ -269,8 +300,15 @@ export function L1_6(): LevelDef {
     terrain: [flatGround(), cliff(35.5, 5, 'right')],
     parts: [fence, gal, ...roofs, look],
     pigs: [...rooms.map((sp) => pigIn('small', sp)), pigIn('medium', look.spots[1])],
+    stars: { one: 0, two: 25000, three: 37000 },
     hint: 'Коснитесь экрана в полёте — Чак рванёт вперёд и прошьёт дерево',
-    meta: { nMin: 2, difficulty: 4, teach: 'Chuck: рывок пробивает ряд деревянных стоек', starsSource: 'manual' },
+    meta: {
+      nMin: 2,
+      difficulty: 4,
+      teach: 'Chuck: рывок пробивает ряд деревянных стоек',
+      starsSource: 'solver',
+      calib: { expertBirds: 2, expertScore: 41447, ms: 5054, typicalWin: 0.75, k: 16 },
+    },
     decor: [
       dec('grass', 4),
       dec('flower', 7, 0, 0.9),
@@ -313,8 +351,15 @@ export function L1_7(): LevelDef {
       pigIn('small', deck.spots[3]),
       pigIn('small', cabin.spots[0]),
     ],
+    stars: { one: 0, two: 24000, three: 36000 },
     hint: 'Каску пробить трудно — сбейте сваи, и настил рухнет',
-    meta: { nMin: 3, difficulty: 5, teach: 'helmet, сваи и неразрушимые помосты', starsSource: 'manual' },
+    meta: {
+      nMin: 3,
+      difficulty: 5,
+      teach: 'helmet, сваи и неразрушимые помосты',
+      starsSource: 'solver',
+      calib: { expertBirds: 3, expertScore: 42755, ms: 4180, typicalWin: 0.69, k: 16 },
+    },
     decor: [
       dec('flower', 4),
       dec('bush', 7.5, 0, 1),
@@ -329,10 +374,15 @@ export function L1_7(): LevelDef {
 }
 
 /**
- * 1-8 «Бункер» · d 5 · N 4 (nMin 2) · правка 06: крыши бункеров деревянные (с каменными побед было 10 %).
- * Бункер 1 на x = 22 на земле; бункер 2 на x = 29 на скальном уступе высотой 1 м (откосы 34°). Стены каменные
- * 0.5×1.5 (кирпич + кубик), проём 2×1.5 — medium внутри, крыши — деревянные балки 4×0.5.
- * На бункере 2 деревянная вышка span 3, h 1.5, на ней small (открытое место, верх 5 м — цель для Red).
+ * 1-8 «Бункер» · d 5 · N 4 (nMin 2) · правка 06: крыши бункеров не каменные-«неуязвимые» (с каменными побед было 10 %).
+ * Бункер 1 на x = 19 на земле: каменные стены 0.5×1.5, ЛЕДЯНАЯ крыша — medium внутри (Red достаёт его навесом 60–70°,
+ * пробив лёд). Перед ним баррикада из 3 ящиков, между бункерами штабель из 2 ящиков. Бункер 2 на x = 25.5 на скальном
+ * уступе высотой 1 м (24…33.5, откосы 34°): каменные стены и каменная крыша — medium внутри. В 1 м справа от свеса
+ * его крыши — вышка в 2 этажа (1-й деревянный, 2-й на ледяных колоннах), small наверху (x = 31, y = 5.4).
+ * Решения в 2 птицы: (а) Бомб между бункерами (6.5 м между medium: зона, где взрыв берёт обоих, ≈ 0.8 м) + Red по вышке;
+ * (б) Бомб в бункер 2 и вышку + Red навесом в ледяную крышу бункера 1. Правка по замерам на настоящем ядре: при бункерах
+ * на 22 / 29 и вышке на крыше бункера 2 решатель проходил уровень одним Бомбом; вышка у самого бункера 2 падала от его
+ * сорванной крыши; плотный перебор (3640 выстрелов) теперь даёт «все трое одним» лишь в 2 случаях.
  * Учит: Bomb взрывается от тапа и сам через 2.5 с после удара; взрыв берёт свинью и за камнем (радиус medium 3.3 м).
  */
 export function L1_8(): LevelDef {
@@ -354,18 +404,27 @@ export function L1_8(): LevelDef {
     terrain: [flatGround(), plateau(X2 - 1.5, X2 + 8, LEDGE, { slope: 1.5 })],
     parts: [crates1, b1, crates2, b2, look],
     pigs: [pigIn('medium', b1.spots[0]), pigIn('medium', b2.spots[0]), pigIn('small', look.spots[2])],
+    stars: { one: 0, two: 30000, three: 43000 },
     hint: 'Коснитесь экрана — Бомб взорвётся. Или подождите: он взорвётся сам',
-    meta: { nMin: 2, difficulty: 5, teach: 'Bomb: взрыв по тапу и сам; взрыв против камня', starsSource: 'manual' },
+    meta: {
+      nMin: 2,
+      difficulty: 5,
+      teach: 'Bomb: взрыв по тапу и сам; взрыв против камня',
+      starsSource: 'solver',
+      calib: { expertBirds: 2, expertScore: 46199, ms: 2436, typicalWin: 1, k: 16 },
+    },
     decor: [
       dec('grass', 4.5),
-      dec('rock', 8, 0, 0.9),
-      dec('flower', 11),
-      dec('bush', 14.5, 0, 1, true),
-      dec('grass', 18),
-      dec('flower', 24.6, 0, 0.7),
-      dec('rock', 34, 0, 1.2),
-      dec('bush', 37, 0, 1),
-      dec('grass', 40.5, 0, 0.9, true),
+      dec('rock', 7.5, 0, 0.9),
+      dec('flower', 10),
+      dec('bush', 12.5, 0, 1, true),
+      dec('grass', 17.1, 0, 0.7),
+      dec('flower', 23.6, 0.73, 0.6),
+      dec('grass', 28.5, LEDGE, 0.7),
+      dec('flower', 33.2, LEDGE, 0.7, true),
+      dec('rock', 35.8, 0, 1.1),
+      dec('bush', 38.5, 0, 1),
+      dec('grass', 41.5, 0, 0.9, true),
     ],
   });
 }
@@ -391,8 +450,15 @@ export function L1_9(): LevelDef {
     parts: [tw, s1, s2, slab, cap],
     tnt: [tntOn(20.25, 0), tntOn(26, 0), tntOn(28, 0), tntOn(31, 0)],
     pigs: [pigOn('medium', 21.6, 0), pigIn('small', tw.spots[3]), pigOn('small', 27, 0), pigOn('small', 30, 0)],
+    stars: { one: 0, two: 35000, three: 47000 },
     hint: 'Ящики TNT взрываются от удара — и поджигают соседей',
-    meta: { nMin: 2, difficulty: 6, teach: 'TNT и цепочка взрывов', starsSource: 'manual' },
+    meta: {
+      nMin: 2,
+      difficulty: 6,
+      teach: 'TNT и цепочка взрывов',
+      starsSource: 'solver',
+      calib: { expertBirds: 2, expertScore: 55750, ms: 4277, typicalWin: 1, k: 16 },
+    },
     decor: [
       dec('bush', 4, 0, 1),
       dec('flower', 7.5),
@@ -446,9 +512,16 @@ export function L1_10(): LevelDef {
       pigIn('small', gate.spots[0]),
       pigIn('small', shack.spots[0]),
     ],
+    stars: { one: 0, two: 32000, three: 45000 },
     hint: 'Бригадира проще уронить со скалы, чем пробить',
     camera: { castle: { x: 25, y: 6, viewH: 16 } },
-    meta: { nMin: 4, difficulty: 7, teach: 'босс эпизода: всё вместе', starsSource: 'manual' },
+    meta: {
+      nMin: 4,
+      difficulty: 7,
+      teach: 'босс эпизода: всё вместе',
+      starsSource: 'solver',
+      calib: { expertBirds: 4, expertScore: 52249, ms: 19218, typicalWin: 0.81, k: 16 },
+    },
     decor: [
       dec('sign', 3.5),
       dec('flower', 6.5),

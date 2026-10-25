@@ -10,7 +10,9 @@
 //  • visibilitychange во время полёта: пауза, время сессии стоит, после возврата нет «взрыва» (≤ 4 шагов за кадр);
 //  • рестарт клавишей R в полёте: новая сессия, птица снова в рогатке;
 //  • загрузка каждого из 30 уровней по очереди (startLevel + skipIntro + кадр) без ошибок;
-//  • замер FPS на самом тяжёлом уровне (больше всего тел) с разрушением.
+//  • замер FPS на самом тяжёлом уровне (больше всего тел) с разрушением;
+//  • плейтест №1: подсказка уровня не во время облёта, а после него; вид рогатки не мельче ~20 CSS px на Реда;
+//    автокачество в покое не падает.
 // Скриншоты ключевых моментов — в --out (по умолчанию scratchpad/integ/e2e). Код возврата ≠ 0 при ошибках.
 
 import { createServer } from 'vite';
@@ -165,12 +167,16 @@ async function flow(size, idx) {
     check(true, 'уровень 1-1 открыт, идёт облёт');
     await page.waitForTimeout(700);
     await page.screenshot({ path: `${OUT}/${T}-04-intro.png` });
+    check(!(await page.evaluate(() => !!document.querySelector('[data-testid="hint"]'))), 'во время облёта подсказки уровня нет');
     // любой ввод пропускает облёт
     await page.mouse.click(size.w * 0.6, size.h * 0.5);
     await until(page, () => __game.phase() === 'play', null, 3000).catch(() => null);
     check((await page.evaluate('__game.phase()')) === 'play', 'тап пропускает облёт');
     check((await page.evaluate('__game.settle(10)')) === 'ready', 'птица в рогатке (ready)');
     await page.waitForTimeout(300);
+    check(await page.evaluate(() => !!document.querySelector('[data-testid="hint"]')), 'после облёта — подсказка уровня');
+    const red = await page.evaluate((h) => (0.9 * h) / __game.stats().aimViewH, size.h);
+    check(red >= 20, `вид рогатки: Ред ${red.toFixed(0)} CSS px (≥ 20)`);
     // прицел настоящим жестом: тянем влево-вниз (на третьем размере — вправо-вниз: выстрел назад, проверка поражения)
     const p = await page.evaluate('__game.pocketScreen()');
     await page.mouse.move(p.x, p.y);
@@ -333,6 +339,8 @@ async function robustness() {
     notes.push(`FPS ${hid} (${tag(size)}): покой ${idle}, разрушение ${busy}; ${JSON.stringify(stats)}`);
     log(`  · FPS ${hid}: покой ${idle}, во время разрушения ${busy}, кадр рендера ${stats.renderMs} мс, качество ${stats.quality}`);
     check(busy > 0, 'FPS измерен');
+    // автокачество меряет CPU-время кадра (не интервал): в покое и на коротком разрушении не уходит в low
+    check(stats.quality !== 'low', `автокачество не упало в low (${stats.quality})`);
     log(`  · самый «телесный» по замеру: ${heavy.id}`);
   } catch (e) {
     check(false, `надёжность: ${e.message}`);

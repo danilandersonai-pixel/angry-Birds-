@@ -6,6 +6,9 @@
 // физики по alpha (px/py/pangle → x/y/angle). Рендер-сторона анимаций (не влияют на симуляцию, Math.random можно):
 // моргание птиц и свиней, подпрыгивания очереди, сальто прыжка в кармашек, мигание и пульс Бомба перед
 // автоподрывом (отсчёт от birdImpact), поворот спрайта летящей птицы по скорости, лёгкий squash при ударе.
+// Только визуальные поправки к позициям ядра (плейтест №1): очередь сжимается к рогатке, если не влезает в кадр
+// (FrameParams.queueMinX); птица в кармашке в покое приподнята, чтобы передний рог не закрывал мелких птиц
+// (кармашек и резинки — вместе с ней); на обучении кармашек тянется вслед за призрачной рукой.
 
 import { ABILITY, AIM_ASSIST, BIRDS, LAUNCH, SLINGSHOT, TIMING } from '../config/constants';
 import type { BirdPose, EntityView, PigPose, QueuedBirdView, SlingshotView, TrailPoint } from '../core/api';
@@ -67,6 +70,47 @@ export interface FrameParams {
   readonly fx?: Fx | null;
   /** Обучение прицелу (07 §10.5): время в цикле 2.0 с, −1 — нет. */
   readonly tutorial?: number;
+  /** Левее этой точки (мир, м) очередь птиц не рисуется: раскладка сжимается к рогатке (не сильнее QUEUE_K_MIN). */
+  readonly queueMinX?: number;
+}
+
+/** Сжатие очереди при отрисовке: расстояния от первого места — не меньше этой доли раскладки ядра. */
+export const QUEUE_K_MIN = 0.5;
+/** Под такое сжатие камера оставляет место слева от рогатки. */
+export const QUEUE_K_PLAN = 0.62;
+
+/**
+ * Раскладка очереди ядра (BirdQueue.layout) для всех птиц уровня: span — от первого места (основание − QUEUE_X0)
+ * до последнего, м; rLast — радиус последней птицы.
+ */
+export function queueSpan(birds: readonly BirdType[]): { span: number; rLast: number } {
+  let span = 0;
+  for (let i = 1; i < birds.length; i++) {
+    span += Math.max(SLINGSHOT.QUEUE_DX, BIRDS[birds[i - 1]].radius + BIRDS[birds[i]].radius + LAUNCH.QUEUE_GAP);
+  }
+  return { span, rLast: birds.length > 0 ? BIRDS[birds[birds.length - 1]].radius : 0 };
+}
+
+/** Визуальный верх переднего рога (обмотка выше крепления резинки), от основания рогатки, м. */
+const FRONT_PRONG_TOP = SLINGSHOT.PRONG_FRONT.y + 0.14;
+
+/** Насколько приподнять птицу в кармашке в покое: центр не ниже верха переднего рога − 0.3 r. */
+export function pocketLift(type: BirdType | null): number {
+  if (!type) return 0;
+  return Math.max(0, FRONT_PRONG_TOP - 0.3 * BIRDS[type].radius - SLINGSHOT.ANCHOR.y);
+}
+
+/** Толщина резинки, м: в покое → при полном натяжении; не тоньше BAND_MIN_CSS CSS-пикселей. */
+const BAND_REST_M = 0.17;
+const BAND_FULL_M = 0.12;
+const BAND_MIN_CSS = 4;
+
+/** Визуальное состояние кармашка в кадре (позиция ядра + подъём покоя + тяга руки обучения). */
+interface VisSling {
+  pocket: Vec;
+  power: number;
+  /** Текущий подъём покоя, м (для бонусной птицы в кармашке). */
+  lift: number;
 }
 
 const TAU = Math.PI * 2;
@@ -74,6 +118,18 @@ const QUARTER = Math.PI / 2;
 const clamp = (v: number, a: number, b: number): number => (v < a ? a : v > b ? b : v);
 const rand = (a: number, b: number): number => a + Math.random() * (b - a);
 const easeInOutSine = (t: number): number => 0.5 - 0.5 * Math.cos(Math.PI * t);
+const easeInOutCubic = (k: number): number => (k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2);
+/** Гладкая ступенька 0..1 (smoothstep) по аргументу, обрезанному в [0, 1]. */
+const smooth01 = (t: number): number => {
+  const k = clamp(t, 0, 1);
+  return k * k * (3 - 2 * k);
+};
+
+/** Тяга кармашка на обучении (07 §10.5, цикл 2.0 с): 0.9 с к цели (inOutCubic), держит до 1.2 с, отпускание за 0.1 с. */
+function tutorPull(t: number): number {
+  if (t < 1.2) return easeInOutCubic(clamp(t / 0.9, 0, 1));
+  return Math.max(0, 1 - (t - 1.2) / 0.1);
+}
 
 function angleLerp(a: number, b: number, t: number): number {
   let d = (b - a) % TAU;
@@ -176,6 +232,11 @@ export class Renderer {
   /** Высота поверхности рельефа под x — для контактных теней. */
   private ground: GroundFn = () => 0;
   private animT = 0;
+  // сжатие очереди: x' = x0 − k·(x0 − x) для мест левее первого (x0 — первое место очереди)
+  private queueK = 1;
+  private queueX0 = 0;
+  private queueFor: { level: LevelDef | null; minX: number | undefined } = { level: null, minX: undefined };
+  private vis: VisSling = { pocket: { x: 0, y: 0 }, power: 0, lift: 0 };
   // переиспользуемые списки тел по слоям
   private readonly lBlocks: EntityView[] = [];
   private readonly lTnt: EntityView[] = [];
@@ -219,6 +280,35 @@ export class Renderer {
     this.hops.clear();
     this.bonusAt.length = 0;
     this.loadingSince = 0;
+    this.queueFor = { level: null, minX: undefined };
+  }
+
+  /**
+   * Точка ядра (место очереди или кармашек в покое) → где она нарисована: для эффектов бонуса птиц,
+   * чтобы искры и число появлялись на нарисованной птице.
+   */
+  mapQueuePoint(x: number, y: number): Vec {
+    const a = this.level?.slingshot;
+    if (a && Math.abs(x - a.x) < 0.05 && Math.abs(y - a.y) < 0.05) return { x, y: y + this.vis.lift };
+    return this.queuePos(x, y);
+  }
+
+  /** Место очереди ядра → место отрисовки (сжатие к рогатке, высота — от рельефа под новым x). */
+  private queuePos(x: number, y: number): Vec {
+    if (this.queueK >= 1 || x >= this.queueX0) return { x, y };
+    const nx = this.queueX0 - (this.queueX0 - x) * this.queueK;
+    const g0 = this.ground(x);
+    const g1 = this.ground(nx);
+    return { x: nx, y: Number.isFinite(g0) && Number.isFinite(g1) ? y - g0 + g1 : y };
+  }
+
+  /** Пересчитать сжатие очереди (смена уровня или границы кадра). */
+  private updateQueueK(level: LevelDef, minX: number | undefined, baseX: number): void {
+    if (this.queueFor.level === level && this.queueFor.minX === minX) return;
+    this.queueFor = { level, minX };
+    this.queueX0 = baseX - SLINGSHOT.QUEUE_X0;
+    const { span, rLast } = queueSpan(level.birds);
+    this.queueK = minX === undefined || span < 1e-6 ? 1 : clamp((this.queueX0 - minX - rLast) / span, QUEUE_K_MIN, 1);
   }
 
   get background(): Background | null {
@@ -298,6 +388,8 @@ export class Renderer {
     const sl = src.slingshot();
     const baseX = sl.anchor.x - SLINGSHOT.ANCHOR.x;
     const baseY = sl.anchor.y - SLINGSHOT.ANCHOR.y;
+    this.updateQueueK(level, p.queueMinX, baseX);
+    const vis = this.visualSling(src, sl, p.tutorial ?? -1);
     const back = this.cache.get(SLING_BACK, v.scale, slingMake('back'));
     if (back) this.blit(back, baseX, baseY, 0, v);
     // 3. рельеф
@@ -313,8 +405,8 @@ export class Renderer {
     // разложить тела по слоям
     const loadedId = this.sortEntities(src, sl);
     // 6. задняя резинка (до тел — она за птицей)
-    const pouch = this.pouchGeometry(sl, loadedId !== null ? this.loadedRadius(sl) : SLINGSHOT.POUCH_HALF);
-    const thick = (SLINGSHOT.BAND_REST + (SLINGSHOT.BAND_TENSE - SLINGSHOT.BAND_REST) * clamp(sl.power, 0, 1)) * v.scale;
+    const pouch = this.pouchGeometry(sl.anchor, vis.pocket, loadedId !== null ? this.loadedRadius(sl) : SLINGSHOT.POUCH_HALF);
+    const thick = Math.max(BAND_MIN_CSS * v.dpr, (BAND_REST_M + (BAND_FULL_M - BAND_REST_M) * clamp(vis.power, 0, 1)) * v.scale);
     this.band(v, baseX + SLINGSHOT.PRONG_BACK.x, baseY + SLINGSHOT.PRONG_BACK.y, pouch.back, thick);
     // 7. тела
     ctx.imageSmoothingQuality = 'low';
@@ -330,8 +422,8 @@ export class Renderer {
     // 9. подсказка прицела
     if (p.aimAssist && src.state === 'aiming') this.drawAimDots(src, v);
     // 10. птица в кармашке, кармашек, передняя резинка, передний рог
-    if (loadedId !== null && sl.loaded && !this.bonusHidden(sl.pocket.x, sl.pocket.y)) this.drawLoadedBird(src, sl, loadedId, v, dt);
-    this.drawPouchAt(v, sl, pouch, thick);
+    if (loadedId !== null && sl.loaded && !this.bonusHidden(sl.pocket.x, sl.pocket.y)) this.drawLoadedBird(src, sl, vis, loadedId, v, dt);
+    this.drawPouchAt(v, vis.pocket, pouch, thick);
     this.band(v, baseX + SLINGSHOT.PRONG_FRONT.x, baseY + SLINGSHOT.PRONG_FRONT.y, pouch.front, thick);
     const front = this.cache.get(SLING_FRONT, v.scale, slingMake('front'));
     if (front) this.blit(front, baseX, baseY, 0, v);
@@ -347,7 +439,7 @@ export class Renderer {
     // 12. передний план
     drawForeground(ctx, level.theme, v);
     this.resetCtx();
-    if (p.tutorial !== undefined && p.tutorial >= 0 && sl.loaded) this.drawGhostFinger(v, sl.pocket, p.tutorial);
+    if (p.tutorial !== undefined && p.tutorial >= 0 && sl.loaded) this.drawGhostHand(v, vis.pocket, p.tutorial);
     // 13. вспышка экрана
     p.fx?.drawFlash(ctx, v);
     this.resetCtx();
@@ -396,12 +488,45 @@ export class Renderer {
     return Math.max(SLINGSHOT.POUCH_HALF, r * 0.84);
   }
 
+  /**
+   * Где рисовать кармашек: позиция ядра плюс подъём покоя (вес гаснет с оттяжкой, в прыжке растёт с ним) и, на
+   * обучении, тяга вслед за призрачной рукой. Резинки, кармашек и птица в нём рисуются от этой точки.
+   */
+  private visualSling(src: SceneSource, sl: SlingshotView, tutorial: number): VisSling {
+    const st = src.state;
+    let type: BirdType | null = sl.loaded;
+    let w = 0;
+    let power = clamp(sl.power, 0, 1);
+    let px = sl.pocket.x;
+    let py = sl.pocket.y;
+    if (st === 'loading') {
+      type = src.queue()[0]?.type ?? null;
+      w = easeInOutSine(clamp((src.time - this.loadingSince) / TIMING.BIRD_HOP_TIME, 0, 1));
+    } else if (type) {
+      const d = Math.hypot(px - sl.anchor.x, py - sl.anchor.y);
+      w = 1 - smooth01((d - 0.05) / 0.55);
+    }
+    if (tutorial >= 0 && type && st === 'ready') {
+      const k = tutorPull(tutorial);
+      px += -1.6 * k;
+      py += -0.5 * k;
+      power = (Math.hypot(1.6, 0.5) * k) / LAUNCH.R_MAX;
+      w *= 1 - smooth01(k * 1.2);
+    }
+    const lift = pocketLift(type) * w;
+    const vis = this.vis;
+    vis.pocket = { x: px, y: py + lift };
+    vis.power = power;
+    vis.lift = lift;
+    return vis;
+  }
+
   /** Края кармашка (мир): задний край — слева от направления на ANCHOR + (0, 0.5), передний — справа (blocks-report). */
-  private pouchGeometry(sl: SlingshotView, half: number): { back: Vec; front: Vec; ux: number; uy: number; half: number } {
-    const px = sl.pocket.x;
-    const py = sl.pocket.y;
-    const dx = sl.anchor.x - px;
-    const dy = sl.anchor.y + 0.5 - py;
+  private pouchGeometry(anchor: Vec, pocket: Vec, half: number): { back: Vec; front: Vec; ux: number; uy: number; half: number } {
+    const px = pocket.x;
+    const py = pocket.y;
+    const dx = anchor.x - px;
+    const dy = anchor.y + 0.5 - py;
     const d = Math.hypot(dx, dy);
     const ux = d > 1e-6 ? dx / d : 0;
     const uy = d > 1e-6 ? dy / d : 1;
@@ -414,12 +539,12 @@ export class Renderer {
     drawBand(ctx, this.sx(v, x1), this.sy(v, y1), this.sx(v, to.x), this.sy(v, to.y), thick);
   }
 
-  private drawPouchAt(v: ViewInfo, sl: SlingshotView, g: { ux: number; uy: number; half: number }, thick: number): void {
+  private drawPouchAt(v: ViewInfo, pocket: Vec, g: { ux: number; uy: number; half: number }, thick: number): void {
     const ctx = this.ctx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     // экранный угол направления на ANCHOR (Y вниз)
     const ang = Math.atan2(-g.uy, g.ux);
-    drawPouch(ctx, this.sx(v, sl.pocket.x), this.sy(v, sl.pocket.y), ang, g.half * v.scale, thick * 0.85);
+    drawPouch(ctx, this.sx(v, pocket.x), this.sy(v, pocket.y), ang, g.half * v.scale, thick * 0.85);
   }
 
   // ───────────────────────── тела ─────────────────────────
@@ -549,7 +674,7 @@ export class Renderer {
     return st.vis;
   }
 
-  private drawLoadedBird(src: SceneSource, sl: SlingshotView, id: number, v: ViewInfo, dt: number): void {
+  private drawLoadedBird(src: SceneSource, sl: SlingshotView, vis: VisSling, id: number, v: ViewInfo, dt: number): void {
     const type = sl.loaded!;
     const ent = this.loadedEnt;
     const aiming = src.state === 'aiming';
@@ -557,9 +682,9 @@ export class Renderer {
     if (pose === 'idle' && this.blinking(id, 2, 5, type === 'terence' ? 0.25 : 0.12)) pose = 'blink';
     const spr = this.cache.get(birdKey(type, pose), v.scale, birdMake(type, pose));
     if (!spr) return;
-    const t = clamp(sl.power, 0, 1);
-    let x = sl.pocket.x;
-    let y = sl.pocket.y;
+    const t = clamp(vis.power, 0, 1);
+    let x = vis.pocket.x;
+    let y = vis.pocket.y;
     if (aiming && t > 0.9) {
       const r = BIRDS[type].radius;
       x += Math.sin(this.animT * TAU * 30) * 0.02 * r;
@@ -571,7 +696,10 @@ export class Renderer {
     this.drawWithSquash(spr, x, y, ang, v, sq, 1 + 0.15 * t, 1 - 0.08 * t);
   }
 
-  /** Очередь у рогатки: подпрыгивания, моргание; в loading первая птица прыгает в кармашек с сальто. */
+  /**
+   * Очередь у рогатки: подпрыгивания, моргание; в loading первая птица прыгает в кармашек с сальто.
+   * Места ядра сжимаются к рогатке (queueK), рисуем с хвоста: ближняя к рогатке птица — поверх соседки.
+   */
   private drawQueue(src: SceneSource, v: ViewInfo, dt: number): void {
     const q = src.queue();
     if (q.length === 0) return;
@@ -580,9 +708,11 @@ export class Renderer {
     const first = total - src.birdsLeft + (sl.loaded ? 1 : 0);
     const loading = src.state === 'loading';
     const bonus = src.state === 'bonus' || src.state === 'won';
-    for (let i = 0; i < q.length; i++) {
-      const b = q[i];
-      if (this.bonusHidden(b.x, b.y)) continue;
+    for (let i = q.length - 1; i >= 0; i--) {
+      const qb = q[i];
+      if (this.bonusHidden(qb.x, qb.y)) continue;
+      const m = this.queuePos(qb.x, qb.y);
+      const b = { type: qb.type, radius: qb.radius, x: m.x, y: m.y };
       const gi = first + i;
       const style = HOP_STYLE[b.type];
       let y = b.y;
@@ -593,6 +723,8 @@ export class Renderer {
       if (hopping) {
         const k = clamp((src.time - this.loadingSince) / TIMING.BIRD_HOP_TIME, 0, 1);
         ang = -TAU * easeInOutSine(k);
+        // приземление — в приподнятый кармашек
+        y += pocketLift(b.type) * easeInOutSine(k);
       } else {
         const h = this.hopState(gi, b.type, bonus);
         if (h.t > 0) {
@@ -687,46 +819,99 @@ export class Renderer {
   }
 
   /**
-   * Призрачный палец (07 §10.5): появляется на птице, за 0.9 с (inOutCubic) тянет к pocket − (1.6, 0.5) м,
-   * за ним 6 точек; держит 0.3 с, «отпускает» (scale 0.8, fade 0.2 с), пауза 0.6 с. Цикл 2.0 с.
+   * Призрачная рука обучения (07 §10.5): палец прижимает птицу, за 0.9 с (inOutCubic) тянет к pocket − (1.6, 0.5) м
+   * (кармашек, резинки и птица едут следом — см. visualSling), за ним пунктир; держит 0.3 с, «отпускает»
+   * (птица щёлкает назад, рука тает 0.2 с), пауза. Цикл 2.0 с. pocket — уже сдвинутый кармашек.
    */
-  private drawGhostFinger(v: ViewInfo, pocket: Vec, t: number): void {
+  private drawGhostHand(v: ViewInfo, pocket: Vec, t: number): void {
     const ctx = this.ctx;
-    const u = v.dpr * Math.max(0.6, Math.min(1.25, Math.min(v.screenW / v.dpr / 1280, v.screenH / v.dpr / 720)));
-    const ease = (k: number): number => (k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2);
-    const k = ease(clamp(t / 0.9, 0, 1));
+    const u = v.dpr * Math.max(0.7, Math.min(1.3, Math.min(v.screenW / v.dpr / 1280, v.screenH / v.dpr / 720)));
+    const k = tutorPull(t);
     let alpha = t < 0.15 ? t / 0.15 : 1;
-    let scale = 1;
+    let scale = t < 0.15 ? 1.15 - t : 1;
     if (t > 1.2) {
       const r = clamp((t - 1.2) / 0.2, 0, 1);
       alpha = 1 - r;
-      scale = 1 - 0.2 * r;
+      scale = 1 - 0.15 * r;
     }
     if (alpha <= 0) return;
-    const x0 = this.sx(v, pocket.x);
-    const y0 = this.sy(v, pocket.y);
-    const x1 = this.sx(v, pocket.x - 1.6);
-    const y1 = this.sy(v, pocket.y - 0.5);
-    const x = x0 + (x1 - x0) * k;
-    const y = y0 + (y1 - y0) * k;
+    // палец там, где птица; при отпускании рука остаётся в конце хода, птица уезжает назад
+    const drag = t > 1.2 ? 1 : k;
+    const rx = pocket.x + 1.6 * k;
+    const ry = pocket.y + 0.5 * k;
+    // кончик пальца — у нижнего правого края птицы: рука не закрывает её целиком
+    const fx = this.sx(v, rx - 1.6 * drag + 0.22);
+    const fy = this.sy(v, ry - 0.5 * drag - 0.2);
+    const x0 = this.sx(v, rx);
+    const y0 = this.sy(v, ry);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.globalAlpha = 0.6 * alpha;
-    ctx.fillStyle = '#FFFFFF';
+    // пунктир хода
+    ctx.globalAlpha = 0.75 * alpha;
     for (let i = 1; i <= 6; i++) {
-      const q = (i / 7) * k;
+      const q = (i / 7) * drag;
+      const px = x0 + (fx - x0) * q;
+      const py = y0 + (fy - y0) * q;
       ctx.beginPath();
-      ctx.arc(x0 + (x1 - x0) * q, y0 + (y1 - y0) * q, 4 * u, 0, TAU);
+      ctx.arc(px, py, 4.5 * u, 0, TAU);
+      ctx.fillStyle = 'rgba(11,26,43,0.55)';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(px, py, 3 * u, 0, TAU);
+      ctx.fillStyle = '#FFFFFF';
       ctx.fill();
     }
-    const R = 20 * u * scale;
-    ctx.globalAlpha = 0.9 * alpha;
-    ctx.beginPath();
-    ctx.arc(x, y, R, 0, TAU);
-    ctx.fill();
-    ctx.globalAlpha = 0.4 * alpha;
-    ctx.lineWidth = 4 * u;
+    // круг нажатия
+    if (t < 0.35) {
+      const r = t / 0.35;
+      ctx.globalAlpha = 0.7 * (1 - r) * alpha;
+      ctx.lineWidth = 3 * u;
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.beginPath();
+      ctx.arc(fx, fy, (10 + 18 * r) * u, 0, TAU);
+      ctx.stroke();
+    }
+    // рука: кончик пальца в (0, 0), палец вверх; наклон влево, ладонь снизу справа
+    const s = u * scale;
+    const a = -0.38;
+    ctx.setTransform(s * Math.cos(a), s * Math.sin(a), -s * Math.sin(a), s * Math.cos(a), fx, fy);
+    const shape = (): void => {
+      ctx.beginPath();
+      ctx.roundRect(-7, 0, 14, 42, 7);
+      ctx.roundRect(-9, 28, 40, 38, 12);
+      ctx.moveTo(22, 32);
+      ctx.arc(14, 32, 8, 0, TAU);
+      ctx.moveTo(29.5, 36);
+      ctx.arc(22, 36, 7.5, 0, TAU);
+      ctx.moveTo(36, 42);
+      ctx.arc(29, 42, 7, 0, TAU);
+      ctx.ellipse(-11, 47, 7, 13, 0.45, 0, TAU);
+    };
+    ctx.globalAlpha = 0.92 * alpha;
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 6;
     ctx.strokeStyle = '#0B1A2B';
+    shape();
     ctx.stroke();
+    ctx.fillStyle = '#FFFFFF';
+    shape();
+    ctx.fill();
+    // манжета
+    ctx.beginPath();
+    ctx.roundRect(-5, 62, 36, 14, 5);
+    ctx.lineWidth = 5;
+    ctx.stroke();
+    ctx.fillStyle = '#3FA9E8';
+    ctx.fill();
+    // ноготь и складка
+    ctx.lineWidth = 1.8;
+    ctx.strokeStyle = 'rgba(11,26,43,0.45)';
+    ctx.beginPath();
+    ctx.moveTo(-3.5, 9);
+    ctx.quadraticCurveTo(0, 12, 3.5, 9);
+    ctx.moveTo(-4, 24);
+    ctx.lineTo(4, 24);
+    ctx.stroke();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = 1;
   }
 

@@ -36,8 +36,8 @@ export const TAPS: Readonly<Record<BirdType, readonly TapSpec[]>> = {
   chuck: [0.45, 0.7, 0.95],
   bomb: [null, { afterImpact: 0.2 }],
   matilda: [0.6, 0.9, 1.2],
-  hal: [0.5, 0.8, 1.1],
-  silver: [0.4, 0.6, 0.8],
+  hal: [0.5, 0.8, 1.1, 1.4, 1.7],
+  silver: [0.5, 0.8, 1.1, 1.4, 1.7], // петля длится 0.57 с — пике должно начинаться над целью
 };
 
 export interface SolveOptions {

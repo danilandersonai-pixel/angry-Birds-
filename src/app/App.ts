@@ -13,7 +13,7 @@ import { loadFonts } from '../ui/fonts';
 import type { ScreenId } from '../ui/ctx';
 import type { ThemeId } from '../core/types';
 import { CanvasHost, type QualityLevel } from './CanvasHost';
-import { GameScreen } from './GameScreen';
+import { GameScreen, hudLevel } from './GameScreen';
 import { MenuScene } from './MenuScene';
 import { installHooks } from './hooks';
 
@@ -22,6 +22,9 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 /** Минимальное время показа экрана загрузки (07 §6.1). */
 const BOOT_MIN_MS = 700;
+/** Автокачество: CPU-время кадра игры, мс — медленный / быстрый кадр. */
+const SLOW_MS = 13;
+const FAST_MS = 7;
 
 export class App {
   readonly params = new URLSearchParams(location.search);
@@ -47,6 +50,10 @@ export class App {
   private fastT = 0;
   private lastQualityChange = -Infinity;
   private autoQuality = true;
+  /** Сколько раз автокачество понижало уровень: после второго понижения вверх больше не идём (без качелей). */
+  private downgrades = 0;
+  /** Кадр после возврата вкладки / долгой паузы — не мерить. */
+  private skipMeasure = 0;
 
   constructor(root: HTMLElement) {
     this.stage = document.createElement('div');
@@ -159,7 +166,7 @@ export class App {
     const level = findLevel(id);
     if (!level) return false;
     if (!(await this.game.load(level))) return false;
-    this.ui.showHud(level);
+    this.ui.showHud(hudLevel(level));
     this.game.start({ intro: opts.intro !== false });
     return true;
   }
@@ -218,15 +225,17 @@ export class App {
     this.running = true;
     const tick = (now: number): void => {
       requestAnimationFrame(tick);
-      const dt = this.last ? Math.min(0.25, Math.max(0, (now - this.last) / 1000)) : 1 / 60;
+      const raw = this.last ? Math.max(0, (now - this.last) / 1000) : 1 / 60;
+      const dt = Math.min(0.25, raw);
       this.last = now;
       this.time += dt;
-      this.measure(dt);
+      if (raw > 0.25) this.skipMeasure = 2; // вкладка вернулась / долгая пауза
       try {
         this.frame(dt);
       } catch (e) {
         console.error('[frame]', e);
       }
+      this.measure(dt);
     };
     requestAnimationFrame(tick);
   }
@@ -240,7 +249,13 @@ export class App {
     if (this.ui.screen !== 'loading') this.menu.frame(dt);
   }
 
-  /** FPS за последнюю секунду; адаптация качества (04 §10.1): > 20 мс 2 с подряд — вниз; < 12 мс 5 с — вверх. */
+  /**
+   * FPS за последнюю секунду; адаптация качества (04 §10.1, плейтест №1 п. 5) — по CPU-времени кадра игры (шаги +
+   * события + рендер), а не по интервалу между кадрами: на дисплеях 30/50 Гц и в экономии батареи интервал всегда
+   * > 20 мс. Медленный кадр: CPU > SLOW_MS или интервал > 45 мс (явно < 22 fps); быстрый: CPU < FAST_MS.
+   * Медленно 2 с подряд — вниз, быстро 5 с — вверх (не чаще раза в 10 с; после двух понижений вверх не идём).
+   * Не мерим: облёт, первые 3 с уровня, паузу, кадры после возврата вкладки.
+   */
   private measure(dt: number): void {
     this.fpsFrames++;
     this.fpsT += dt;
@@ -249,16 +264,22 @@ export class App {
       this.fpsFrames = 0;
       this.fpsT = 0;
     }
-    if (!this.autoQuality || !this.booted || this.ui.screen !== 'game' || this.game.paused) {
+    const g = this.game;
+    if (this.skipMeasure > 0) {
+      this.skipMeasure--;
+      return;
+    }
+    if (!this.autoQuality || !this.booted || this.ui.screen !== 'game' || g.paused || g.phase !== 'play' || g.playTime < 3) {
       this.slowT = this.fastT = 0;
       return;
     }
-    if (dt > 0.02) {
+    const cpu = g.lastFrameMs;
+    if (cpu > SLOW_MS || dt > 0.045) {
       this.slowT += dt;
       this.fastT = 0;
-    } else if (dt < 0.012) {
+    } else if (cpu < FAST_MS) {
       this.fastT += dt;
-      this.slowT = 0;
+      this.slowT = Math.max(0, this.slowT - dt);
     } else {
       this.slowT = Math.max(0, this.slowT - dt);
       this.fastT = Math.max(0, this.fastT - dt);
@@ -269,7 +290,8 @@ export class App {
       this.setQuality(q === 'high' ? 'med' : 'low');
       this.lastQualityChange = this.time;
       this.slowT = 0;
-    } else if (this.fastT >= 5 && q !== 'high') {
+      this.downgrades++;
+    } else if (this.fastT >= 5 && q !== 'high' && this.downgrades < 2) {
       this.setQuality(q === 'low' ? 'med' : 'high');
       this.lastQualityChange = this.time;
       this.fastT = 0;

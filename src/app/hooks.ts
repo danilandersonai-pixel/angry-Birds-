@@ -2,6 +2,7 @@
 // Используются e2e-смоуком (scripts/e2e.mjs) и для отладки из консоли.
 
 import type { App } from './App';
+import { hudLevel } from './GameScreen';
 
 export interface GameHooks {
   /** Экран UI: loading | title | episodes | levels | game. */
@@ -83,7 +84,7 @@ export function installHooks(app: App): void {
     restart: () => {
       if (!g.level) return;
       g.restart();
-      app.ui.showHud(g.level);
+      app.ui.showHud(hudLevel(g.level));
     },
     paused: () => g.paused,
     fps: () => Math.round(app.fpsValue * 10) / 10,
@@ -124,6 +125,9 @@ export function installHooks(app: App): void {
       dpr: app.host.dpr,
       canvas: [app.host.canvas.width, app.host.canvas.height],
       renderMs: Math.round(g.lastRenderMs * 100) / 100,
+      fxWarmMs: Math.round(g.fxWarmMs),
+      physWarmMs: Math.round(g.physWarmMs),
+      aimViewH: Math.round(g.camera.aimView().viewH * 100) / 100,
       frameMs: Math.round(g.frameMs * 100) / 100,
       frameMsMax: Math.round(g.frameMsMax * 100) / 100,
       drawn: g.renderer.drawn,

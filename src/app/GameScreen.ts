@@ -3,6 +3,9 @@
 // выбрасывается), рендер интерполирует тела по alpha = acc / dt. Каждый кадр: события ядра → Fx, звук, рендер,
 // камера (тряска), HUD, подсказки. Презентационные фазы — здесь: облёт в начале уровня (step() не вызывается,
 // ввод рогатки заблокирован, любой ввод пропускает), пауза, баннеры, результаты.
+// Плейтест №1: камера — GameCamera (вид рогатки ближе, облёт от сооружения); подсказка уровня — после облёта
+// (первая попытка или 2 поражения подряд); баннер победы — через 1 с после последней свиньи (ядро ещё ждёт покоя);
+// при поражении камера показывает свиней; камера задерживается на разрушении, пока оно идёт (≤ LINGER_MAX).
 
 import { AIM_ASSIST, CAMERA, UI_TIMING, WORLD } from '../config/constants';
 import { createSession } from '../core';
@@ -12,7 +15,7 @@ import type { BirdType, LevelDef } from '../core/types';
 import type { AudioEngine } from '../audio/AudioEngine';
 import { InputController } from '../input/Input';
 import { nextLevelId } from '../levels';
-import { Camera, easeInOutSine, easeOutCubic } from '../render/Camera';
+import { easeInOutSine, easeOutCubic } from '../render/Camera';
 import { Fx, type FxQuality } from '../render/fx/Fx';
 import { Renderer } from '../render/Renderer';
 import type { SpriteCache } from '../render/SpriteCache';
@@ -20,14 +23,47 @@ import type { ProgressStore } from '../storage/progress';
 import type { UI } from '../ui/UI';
 import { S } from '../ui/strings';
 import type { CanvasHost } from './CanvasHost';
+import { GameCamera } from './GameCamera';
+import { warmFx } from './fxWarm';
 import { advance } from './loop';
 
 const DT = WORLD.DT;
 const MAX_STEPS = WORLD.MAX_STEPS_PER_FRAME;
-/** Задержка камеры на месте событий после ухода птицы, затем возврат к рогатке (00 §1.12, ≤ LINGER_MAX). */
+/** Задержка камеры на месте событий после ухода птицы, затем возврат к рогатке (00 §1.12). */
 const LINGER = 0.45;
+/** Каждое разрушение во время задержки продлевает её на столько, но не дольше LINGER_MAX от начала (ядро всё равно
+ *  зарядит следующую птицу по своим часам — тогда камера возвращается сразу). */
+const LINGER_EXTEND = 0.6;
+const LINGER_MAX = 2.5;
+/** Баннер победы — через столько после гибели последней свиньи (ядро ждёт покоя до 3.5 с, исход уже не изменится). */
+const WIN_BANNER_DELAY = 1.0;
+/** Подсказка уровня, мс. */
+const HINT_MS = 5000;
 /** Подсказка способности — через столько после выстрела (07 §10.4). */
 const ABILITY_HINT_DELAY = 0.25;
+
+/** Уровень для ui.showHud: без текстовой подсказки — её показывает GameScreen после облёта (плейтест №1, п. 6). */
+export function hudLevel(level: LevelDef): LevelDef {
+  return level.hint === undefined ? level : { ...level, hint: undefined };
+}
+
+/**
+ * Прогрев физики под шторкой: пробный настильный выстрел в отдельной сессии того же уровня (2 с симуляции), чтобы
+ * JIT решателя контактов planck случился сейчас, а не на первом ударе (плейтест №1, п. 4). Возвращает время, мс.
+ */
+export function warmPhysics(level: LevelDef): number {
+  const t0 = performance.now();
+  try {
+    const s = createSession(level, { seed: 1 });
+    for (let i = 0; i < 60 && s.state !== 'ready'; i++) s.step();
+    s.launch(20, 1);
+    for (let i = 0; i < 120; i++) s.step();
+    s.drainEvents();
+  } catch (e) {
+    console.warn('[warm]', e);
+  }
+  return performance.now() - t0;
+}
 
 export type GamePhase = 'none' | 'loading' | 'intro' | 'play' | 'ended';
 
@@ -53,7 +89,7 @@ export interface LoadOptions {
 }
 
 export class GameScreen {
-  readonly camera = new Camera();
+  readonly camera = new GameCamera();
   readonly fx = new Fx();
   readonly renderer: Renderer;
   readonly input: InputController;
@@ -82,7 +118,10 @@ export class GameScreen {
   private shotBird: BirdType | null = null;
   private abilityHintIn = -1;
   private settleT = 0;
+  private lingerFor = LINGER;
   private returned = false;
+  private winBannerIn = -1;
+  private winBannerShown = false;
   private bonusT = -1;
   private bonusCam = false;
   private loseIn = -1;
@@ -91,6 +130,13 @@ export class GameScreen {
   private dirty = true;
   /** Время кадра рендера (для fps-зависимых замеров). */
   lastRenderMs = 0;
+  /** Сколько занял прогрев эффектов и физики при последней загрузке, мс. */
+  fxWarmMs = 0;
+  physWarmMs = 0;
+  /** CPU-время последнего кадра (шаги + события + рендер), мс — для автокачества. */
+  lastFrameMs = 0;
+  /** Сколько секунд идёт фаза play (0 — облёт/загрузка), для автокачества. */
+  playTime = 0;
   /** LOW-качество: фон масштабируется без сглаживания. */
   private fastScaling = false;
   /** Обучение прицелу на 1-1 (07 §10.5): сколько секунд птица ждёт в READY без захвата. */
@@ -146,7 +192,18 @@ export class GameScreen {
     this.camera.jumpTo(castle);
     this.renderer.prewarmWorld(this.camera.view(this.time));
     this.fx.prewarm(scales[0]);
+    // первый удар птицы в игре стоил ~100 мс шага физики (JIT решателя контактов) — пробный выстрел в копии уровня
+    this.physWarmMs = warmPhysics(level);
+    // первое использование эффектов (атлас частиц, шрифт очков) — под шторкой, а не на первом ударе
+    // масштабы: вид рогатки, облёт, затем весь диапазон зума камеры ступенями √2 (полёт отдаляет, щипок приближает)
+    const fxScales = [scales[0], scales[1]];
+    for (let h = CAMERA.VIEW_H_MIN; h <= CAMERA.VIEW_H_MAX * 1.01; h *= Math.SQRT2) fxScales.push(this.d.host.canvas.height / h);
+    this.fxWarmMs = warmFx(fxScales, this.camera.view(0), this.d.host.ctx);
+    await this.d.nextFrame();
+    if (token !== this.loadToken) return false;
     this.camera.jumpTo(this.camera.castleView());
+    // холст после прогрева эффектов — сразу настоящим кадром (стоп-кадр облёта)
+    this.renderer.render(this.session!, { view: this.camera.view(this.time), alpha: 1, dt: 0, fx: this.fx, queueMinX: this.camera.queueMinX() });
     this.phase = 'intro';
     this.introPanning = false;
     this.introT = 0;
@@ -202,7 +259,11 @@ export class GameScreen {
     this.shotBird = null;
     this.abilityHintIn = -1;
     this.settleT = 0;
+    this.lingerFor = LINGER;
     this.returned = true;
+    this.winBannerIn = -1;
+    this.winBannerShown = false;
+    this.playTime = 0;
     this.bonusT = -1;
     this.bonusCam = false;
     this.loseIn = -1;
@@ -256,7 +317,20 @@ export class GameScreen {
   private endIntro(): void {
     this.phase = 'play';
     this.acc = 0;
+    this.playTime = 0;
     this.d.ui.setSkipHint(false);
+    this.levelHint();
+  }
+
+  /** Подсказка уровня после облёта: при первой попытке или после 2 поражений подряд (плейтест №1, п. 6). */
+  private levelHint(): void {
+    const lv = this.level;
+    if (!lv?.hint) return;
+    const p = this.d.progress;
+    const key = `hint:${lv.id}`;
+    if (p.hasSeen(key) && p.failStreak(lv.id) < 2) return;
+    p.markSeen(key);
+    this.d.ui.showHint(lv.hint, HINT_MS);
   }
 
   // ───────────────────────── пауза ─────────────────────────
@@ -310,6 +384,8 @@ export class GameScreen {
     const f0 = performance.now();
     this.frameBody(dt, time);
     const ms = performance.now() - f0;
+    this.lastFrameMs = ms;
+    if (this.phase === 'play' && !this.paused) this.playTime += dt;
     this.frameMs = this.frameMs * 0.9 + ms * 0.1;
     this.frameMsMax = Math.max(this.frameMsMax * 0.995, ms);
   }
@@ -352,6 +428,7 @@ export class GameScreen {
       aimAssist: this.aimAssist(),
       fx: this.fx,
       tutorial: this.tutorial(),
+      queueMinX: this.camera.queueMinX(),
     });
     this.lastRenderMs = performance.now() - t0;
     this.hud();
@@ -391,9 +468,11 @@ export class GameScreen {
     const s = this.session!;
     const listener = { camX: this.camera.x, viewW: this.camera.viewW };
     for (const e of events) {
-      this.fx.handle(e);
+      // бонус птиц — там, где птица нарисована (очередь сжата, кармашек приподнят)
+      const fe = e.type === 'birdBonus' || (e.type === 'score' && e.kind === 'bonus') ? { ...e, ...this.renderer.mapQueuePoint(e.x, e.y) } : e;
+      this.fx.handle(fe);
       try {
-        this.d.audio.handle(e, listener);
+        this.d.audio.handle(fe, listener);
       } catch (err) {
         console.error('[audio]', err);
       }
@@ -433,22 +512,38 @@ export class GameScreen {
         break;
       case 'explosion':
         this.vibrate(e.source === 'egg' ? 25 : 45);
+        this.extendLinger();
         break;
-      case 'birdBonus':
+      case 'birdBonus': {
         // бонусная птица исчезает «пуфом» (02 §8.1): у Fx на birdBonus только искры и перья — даём облачко ухода
-        this.fx.handle({ type: 'birdRemoved', id: -1, bird: e.bird, x: e.x, y: e.y });
+        const m = this.renderer.mapQueuePoint(e.x, e.y);
+        this.fx.handle({ type: 'birdRemoved', id: -1, bird: e.bird, x: m.x, y: m.y });
+        break;
+      }
+      case 'pigDestroyed':
+        if (this.session && this.session.pigsLeft === 0 && this.winBannerIn < 0 && !this.winBannerShown) this.winBannerIn = WIN_BANNER_DELAY;
+        this.extendLinger();
+        break;
+      case 'blockDestroyed':
+      case 'tntDestroyed':
+        this.extendLinger();
         break;
       case 'stateChanged':
         if (e.to === 'settling') {
           this.settleT = 0;
+          this.lingerFor = LINGER;
           this.returned = false;
         } else if (e.to === 'bonus') {
           this.bonusT = 0;
           this.bonusCam = false;
-          this.showWinBanner();
+          this.winBannerIn = -1;
+          if (!this.winBannerShown) this.showWinBanner();
         } else if (e.to === 'lost') {
           ui.showBanner(S.loseBanner, 0, { kind: 'lose' });
           this.loseIn = UI_TIMING.LOST_BANNER;
+          // свиньи смеются — камера на них (плейтест №1, п. 9)
+          this.camera.flyToPose(this.camera.castleView(), 0.6);
+          this.setHome(false);
         }
         break;
       case 'levelEnd':
@@ -464,7 +559,14 @@ export class GameScreen {
     }
   }
 
+  /** Разрушение во время задержки камеры — задержаться ещё (плейтест №1, п. 15). */
+  private extendLinger(): void {
+    if (this.session?.state !== 'settling' || this.returned) return;
+    this.lingerFor = Math.min(LINGER_MAX, Math.max(this.lingerFor, this.settleT + LINGER_EXTEND));
+  }
+
   private showWinBanner(): void {
+    this.winBannerShown = true;
     const s = this.session!;
     const n = this.level!.birds.length;
     const shots = n - s.birdsLeft;
@@ -479,7 +581,8 @@ export class GameScreen {
     this.best = Math.max(prevBest, score);
     const next = nextLevelId(id);
     const hasNext = next !== null && p.isUnlocked(next, this.d.order);
-    this.d.ui.showWin({ levelId: id, score, best: Math.max(prevBest, score), stars, newRecord, hasNext });
+    // рекорд до этой победы (0 — первой победы; строку «Рекорд» тогда прячет UI — см. отчёт сборки)
+    this.d.ui.showWin({ levelId: id, score, best: prevBest, stars, newRecord, hasNext });
   }
 
   private timers(dt: number): void {
@@ -489,6 +592,13 @@ export class GameScreen {
       if (this.abilityHintIn <= 0) {
         this.abilityHintIn = -1;
         if (s.state === 'flying' && !this.impacted && !this.abilityUsed && this.shotBird) this.d.ui.abilityHint(this.shotBird);
+      }
+    }
+    if (this.winBannerIn > 0) {
+      this.winBannerIn -= dt;
+      if (this.winBannerIn <= 0) {
+        this.winBannerIn = -1;
+        if (!this.winBannerShown && s.state !== 'lost' && s.state !== 'won') this.showWinBanner();
       }
     }
     if (this.loseIn > 0) {
@@ -530,7 +640,7 @@ export class GameScreen {
       }
       case 'settling':
         this.settleT += dt;
-        if (!this.returned && s.birdsLeft > 0 && this.settleT >= LINGER) {
+        if (!this.returned && s.birdsLeft > 0 && s.pigsLeft > 0 && this.settleT >= this.lingerFor) {
           this.returned = true;
           cam.flyToPose(cam.aimView(), cam.returnTime());
         }
@@ -563,6 +673,8 @@ export class GameScreen {
   private blocked(): boolean {
     if (this.paused || this.phase !== 'play') return true;
     const st = this.session?.state;
+    // все свиньи повержены — исход решён: новых выстрелов и способностей нет, тап ускоряет бонус
+    if (this.session && this.session.pigsLeft === 0) return true;
     return st === 'bonus' || st === 'won' || st === 'lost';
   }
 
