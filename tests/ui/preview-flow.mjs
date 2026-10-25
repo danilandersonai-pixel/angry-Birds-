@@ -1,5 +1,7 @@
 // Сценарии интерфейса в Chromium на странице предпросмотра dev/preview-ui.html:
-// мышь, клавиатура, фокус, диалоги, сброс прогресса, победа/поражение, баннер, портрет, тач-цели, ошибки консоли.
+// мышь, клавиатура, фокус, диалоги, сброс прогресса, победа/поражение, баннер, портрет, тач-цели, ошибки консоли;
+// вписывание панелей в окно на телефонах (по getBoundingClientRect), текст лент, минимальный кегль результатов,
+// «мёртвый тап» на победе, сквозные касания HUD/подсказки, наложение вложенных диалогов, летербокс.
 // Запуск (не входит в vitest): node tests/ui/preview-flow.mjs [префикс-скриншотов]
 import { createServer } from 'vite';
 import { createRequire } from 'node:module';
@@ -231,6 +233,129 @@ try {
     ok(small.length === 0, `все кнопки ≥ 44 px (${small.join(', ')})`);
     const overflow = await p.evaluate(() => document.documentElement.scrollWidth > innerWidth || document.documentElement.scrollHeight > innerHeight);
     ok(!overflow, 'нет прокрутки страницы на 640×360');
+    await p.close();
+  }
+
+  // 9. Всё помещается в окно (getBoundingClientRect, а не scrollWidth — слои фиксированные), текст лент — в теле ленты,
+  //    панели результатов на телефоне не ужаты (подписи ≥ 14 px)
+  {
+    const sizes = [
+      { width: 640, height: 360, touch: true },
+      { width: 667, height: 375, touch: true },
+      { width: 800, height: 360, touch: true },
+      { width: 844, height: 390, touch: true },
+      { width: 1024, height: 768, touch: false },
+    ];
+    const screens = ['lose3&static=1', 'winmsg&static=1', 'win3&static=1', 'settings', 'pause', 'home', 'banner'];
+    for (const sz of sizes) {
+      for (const s of screens) {
+        const p = await page(`screen=${s}`, { viewport: { width: sz.width, height: sz.height }, hasTouch: sz.touch, isMobile: sz.touch });
+        await p.waitForTimeout(500);
+        const r = await p.evaluate(() => {
+          const vw = innerWidth;
+          const vh = innerHeight;
+          const bad = [];
+          const sel = ['.res', '.res .ribbon', '.res-panel', '.res-btns .btn', '.dlg-panel', '.pause-side', '.pause-card', '.hud-left > *', '.hud-right > *', '.banner .ribbon'];
+          for (const q of sel)
+            for (const el of document.querySelectorAll(q)) {
+              const b = el.getBoundingClientRect();
+              if (b.width === 0 || getComputedStyle(el).visibility === 'hidden') continue;
+              if (b.left < -0.5 || b.top < -0.5 || b.right > vw + 0.5 || b.bottom > vh + 0.5)
+                bad.push(`${q} [${b.left.toFixed(0)},${b.top.toFixed(0)}–${b.right.toFixed(0)},${b.bottom.toFixed(0)}]`);
+            }
+          // текст ленты не шире её тела (624 из 760) за вычетом отступов
+          for (const rib of document.querySelectorAll('.ribbon')) {
+            const t = rib.querySelector('.ribbon-text');
+            const rb = rib.getBoundingClientRect();
+            const tb = t.getBoundingClientRect();
+            const body = (rb.width * 624) / 760;
+            if (tb.width > body * 0.9 + 0.5) bad.push(`лента «${t.textContent}»: текст ${tb.width.toFixed(0)} > ${(body * 0.9).toFixed(0)}`);
+          }
+          // на результатах подписи не мельче 14 px (с учётом ужатия панели)
+          const small = [];
+          for (const el of document.querySelectorAll('.res-panel *')) {
+            if (![...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim())) continue;
+            const b = el.getBoundingClientRect();
+            if (b.width === 0 || el.offsetWidth === 0) continue;
+            const fs = parseFloat(getComputedStyle(el).fontSize) * Math.min(1, b.width / el.offsetWidth);
+            if (fs < 13.8) small.push(`${el.className} ${fs.toFixed(1)}px`);
+          }
+          return { bad, small };
+        });
+        const tag = `${s.replace(/&.*/, '')} ${sz.width}×${sz.height}`;
+        ok(r.bad.length === 0, `помещается: ${tag}${r.bad.length ? ` (${r.bad.join('; ')})` : ''}`);
+        ok(r.small.length === 0, `подписи ≥ 14 px: ${tag}${r.small.length ? ` (${r.small.join('; ')})` : ''}`);
+        await p.close();
+      }
+    }
+  }
+
+  // 10. Кнопки победы во время анимации: первое нажатие доводит анимацию и сразу выполняет действие (07 §12.3)
+  {
+    const p = await page('screen=win3');
+    await p.waitForTimeout(1500); // кнопки уже активны (≈ 1.7 с от показа), счёт ещё бежит
+    const running = await p.evaluate(() => document.querySelector('[data-testid=results-next]')?.getAttribute('aria-disabled') !== 'true');
+    ok(running, 'кнопки победы активны до конца подсчёта');
+    await p.click('[data-testid=results-next]');
+    await p.waitForTimeout(1500);
+    const hud = await p.evaluate(() => document.querySelector('.hud-level .num')?.textContent);
+    ok(hud === '1-4', `«Дальше» во время подсчёта сразу ведёт на следующий уровень (${hud})`);
+    await p.close();
+  }
+
+  // 11. Касания игры: подсказка и правая часть HUD не перехватывают тап (способность в полёте)
+  {
+    const p = await page('screen=game');
+    const hit = await p.evaluate(() => {
+      const at = (sel) => {
+        const el = document.querySelector(sel);
+        if (!el) return 'нет элемента';
+        const b = el.getBoundingClientRect();
+        const top = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+        return top?.id === 'scene' ? 'canvas' : top?.className || top?.tagName;
+      };
+      return { hint: at('[data-testid=hint]'), score: at('[data-testid=hud-score]'), pigs: at('.hud-pigs') };
+    });
+    ok(hit.hint === 'canvas' && hit.score === 'canvas' && hit.pigs === 'canvas', `тап сквозь подсказку и счёт доходит до canvas (${JSON.stringify(hit)})`);
+    await p.close();
+  }
+
+  // 12. Вложенные диалоги: крестик настроек не рисуется поверх подтверждения
+  {
+    const p = await page('screen=confirm');
+    await p.waitForTimeout(400);
+    const top = await p.evaluate(() => {
+      const x = document.querySelector('[data-testid=settings] .dlg-close');
+      if (!x) return 'нет крестика';
+      const b = x.getBoundingClientRect();
+      const el = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+      return el?.closest('.dlg-close') ? 'крестик сверху' : 'ok';
+    });
+    ok(top === 'ok', `подтверждение перекрывает крестик настроек (${top})`);
+    await p.close();
+  }
+
+  // 13. «Играть так»: пауза и результаты — во всё окно, кнопки ≥ 44 px
+  {
+    const p = await page('screen=lose3&static=1', { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+    await p.click('[data-testid=rotate-anyway]', { force: true });
+    await p.waitForTimeout(500);
+    const r = await p.evaluate(() =>
+      [...document.querySelectorAll('.ov button')].map((b) => b.getBoundingClientRect()).filter((b) => b.width < 43.5 || b.height < 43.5).length,
+    );
+    ok(r === 0, `летербокс: кнопки поражения ≥ 44 px (мелких: ${r})`);
+    await p.close();
+  }
+
+  // 14. Системная «Назад» (жест Android, 07 §1.2): в игре — пауза, повторно — выход к уровням
+  {
+    const p = await page('screen=game');
+    await p.evaluate(() => history.back());
+    await p.waitForTimeout(500);
+    ok(await p.locator('[data-testid=pause]').isVisible(), '«Назад» в игре → пауза');
+    await p.evaluate(() => history.back());
+    await p.waitForTimeout(1800);
+    ok((await scr(p)) === 'levels', `«Назад» на паузе → уровни (${await scr(p)})`);
     await p.close();
   }
 } finally {

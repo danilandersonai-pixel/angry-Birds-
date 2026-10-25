@@ -1,7 +1,8 @@
 // Бот-эксперт (06 §7.2): жадно по птицам перебирает сетку «угол × сила × момент способности» и оценивает
 // каждого кандидата повтором с нуля — createSession и все предыдущие выстрелы (снимки planck теряют warm-start
 // контактов и не совпали бы бит-в-бит). Критерий — сначала число живых свиней, затем очки. Лучевой поиск:
-// после каждой птицы остаются `beam` лучших различных продолжений; лучшие кандидаты уточняются соседями по сетке.
+// после каждой птицы остаются `beam` лучших различных продолжений. Сетка грубая (по умолчанию шаг 4°), затем
+// refineLevels кругов уточнения: вокруг refine лучших — соседи на полшага, четверть шага… по углу, силе и тапу.
 // Перебор выдаёт кандидатов пакетами независимых серий: solveLevel считает их в своём процессе,
 // solveLevelAsync — любым оценщиком (например, пулом процессов). Итог от способа оценки не зависит.
 // Найденные выстрелы точно повторяются: simulateShots(level, r.shots, r.seed, { wait: r.wait }).
@@ -14,10 +15,14 @@ export type GridPreset = 'full' | 'fast';
 
 const range = (from: number, to: number, step: number) => Array.from({ length: Math.floor((to - from) / step) + 1 }, (_, i) => from + i * step);
 
-/** Сетки 06 §7.2: полная — 35 углов × 4 силы; быстрая (CI) — шаг угла 4° и 3 силы, ≈ ×0.4 по времени. */
-export const GRIDS: Readonly<Record<GridPreset, { angles: readonly number[]; powers: readonly number[] }>> = {
+/**
+ * Сетки 06 §7.2: полная — 35 углов × 4 силы; быстрая (по умолчанию) — шаг угла 4° и 3 силы, ≈ ×0.4 по времени.
+ * Грубая — только запасной план при нехватке времени (adaptive): шаг 6° и 2 силы, остальное добирает уточнение.
+ */
+export const GRIDS: Readonly<Record<GridPreset | 'coarse', { angles: readonly number[]; powers: readonly number[] }>> = {
   full: { angles: range(4, 72, 2), powers: [0.7, 0.8, 0.9, 1.0] },
   fast: { angles: range(4, 72, 4), powers: [0.8, 0.9, 1.0] },
+  coarse: { angles: range(6, 72, 6), powers: [0.8, 1.0] },
 };
 
 /** Момент тапа: с после запуска; null — без тапа; afterImpact — через столько секунд после первого удара. */
@@ -38,20 +43,30 @@ export const TAPS: Readonly<Record<BirdType, readonly TapSpec[]>> = {
 export interface SolveOptions {
   /** seed сессии (по умолчанию 1). */
   seed?: number;
-  /** Сетка по умолчанию 'full'; angles / powers / taps переопределяют её части. */
+  /**
+   * Сетка (по умолчанию 'fast': шаг 4°, 3 силы — остальное добирают круги уточнения refineLevels; на 2-10 это тот же
+   * итог, что 'full' 06 §7.2, вдвое быстрее). angles / powers / taps переопределяют её части.
+   */
   grid?: GridPreset;
   angles?: readonly number[];
   powers?: readonly number[];
   taps?: Partial<Record<BirdType, readonly TapSpec[]>>;
   /** Ширина луча (по умолчанию 2). */
   beam?: number;
-  /** Сколько лучших кандидатов каждого продолжения уточнять соседями (полшага сетки); 0 — без уточнения. По умолчанию 3. */
+  /** Сколько лучших кандидатов каждого продолжения уточнять соседями; 0 — без уточнения. По умолчанию 3. */
   refine?: number;
+  /**
+   * Сколько раз уточнять (по умолчанию 2): на k-м круге соседи берутся на шаг сетки / 2^k по углу и силе
+   * (и по моменту тапа у птиц с тапом по времени) вокруг refine лучших из всего найденного для узла.
+   */
+  refineLevels?: number;
   /** Лимит времени, мс (по умолчанию 60 000): по истечении возвращается лучшее найденное. */
   maxMs?: number;
   /**
-   * Урезать перебор, если следующая птица не помещается в остаток maxMs (по умолчанию true): сначала быстрая сетка,
-   * затем луч 1. Оценка — по времени прогона на прошлой птице (оно растёт с длиной повторяемой серии).
+   * Урезать перебор, если птица не помещается в свою долю остатка maxMs (по умолчанию true): быстрая сетка,
+   * затем луч 1, затем грубая сетка. Доля — по длине серий этой и следующей птицы (≈ половина остатка): ранние
+   * птицы важнее (каждая убитая ими свинья экономит птиц), но и следующим остаётся время. Цена плана — по замеру
+   * на прошлой птице.
    */
   adaptive?: boolean;
   /** Правило очереди выстрелов (по умолчанию 'calm', как у бота 06 §7.2). */
@@ -143,6 +158,7 @@ interface Plan {
   taps: (bird: BirdType) => readonly TapSpec[];
   beam: number;
   refine: number;
+  refineLevels: number;
   /** План для птицы с индексом bird при текущем луче. */
   choose: (bird: number, beam: readonly Node[]) => Step;
   /** После каждой птицы: true — остановить перебор. */
@@ -174,10 +190,17 @@ function distinct(nodes: readonly Node[], n: number): Node[] {
 /** Порядок кандидатов: выше ценность; при равенстве — раньше найден (сортировка устойчива). */
 const better = (a: Node, b: Node) => b.value - a.value;
 
-/** Оценка числа серий на узел: сетка × тапы и по 8 соседей у refine лучших. */
-const expandCost = (grid: Grid, taps: number, refine: number) => grid.angles.length * grid.powers.length * taps + refine * 8;
+/** Шаг тапа по времени для уточнения: по сетке тапов птицы, у единственного — 0.25 с; 0 — тапов по времени нет. */
+function tapStep(taps: readonly TapSpec[]): number {
+  const times = taps.filter((t): t is number => typeof t === 'number').sort((a, b) => a - b);
+  return times.length === 0 ? 0 : times.length === 1 ? 0.25 : stepOf(times);
+}
 
-/** Продолжения всех узлов луча выстрелом птицы bird: сетка, затем уточнение лучших соседями на полшага. */
+/** Оценка числа серий на узел: сетка × тапы и на каждом круге уточнения по 8 (+2 по тапу) соседей у refine лучших. */
+const expandCost = (grid: Grid, taps: readonly TapSpec[], refine: number, levels: number) =>
+  grid.angles.length * grid.powers.length * taps.length + levels * refine * (tapStep(taps) > 0 ? 10 : 8);
+
+/** Продолжения всех узлов луча выстрелом птицы bird: сетка, затем круги уточнения лучших соседями (шаг / 2^k). */
 function* expand(beam: readonly Node[], bird: BirdType, grid: Grid, plan: Plan): Generator<Batch, Node[], BatchResults> {
   const found = beam.map(() => new Map<string, Node>());
 
@@ -218,21 +241,32 @@ function* expand(beam: readonly Node[], bird: BirdType, grid: Grid, plan: Plan):
   });
   yield* tryCands(cells);
 
-  const dAngle = stepOf(grid.angles) / 2;
-  const dPower = stepOf(grid.powers) / 2;
-  const near: Cand[] = [];
-  found.forEach((nodes, from) => {
-    for (const c of distinct([...nodes.values()].sort(better), plan.refine)) {
-      const last = c.shots[c.shots.length - 1];
-      for (const da of [-dAngle, 0, dAngle]) {
-        for (const dp of [-dPower, 0, dPower]) {
-          const power = round(last.power + dp);
-          if ((da !== 0 || dp !== 0) && power > 0 && power <= 1) near.push({ from, angleDeg: round(last.angleDeg + da), power, tap: c.tap });
+  // уточнение: вокруг лучших из всего найденного (в том числе на прошлых кругах) — соседи на шаг / 2^k
+  const dTap = tapStep(plan.taps(bird));
+  for (let k = 1; k <= plan.refineLevels; k++) {
+    const dAngle = stepOf(grid.angles) / 2 ** k;
+    const dPower = stepOf(grid.powers) / 2 ** k;
+    const near: Cand[] = [];
+    found.forEach((nodes, from) => {
+      for (const c of distinct([...nodes.values()].sort(better), plan.refine)) {
+        const last = c.shots[c.shots.length - 1];
+        for (const da of [-dAngle, 0, dAngle]) {
+          for (const dp of [-dPower, 0, dPower]) {
+            const power = round(last.power + dp);
+            if ((da !== 0 || dp !== 0) && power > 0 && power <= 1) near.push({ from, angleDeg: round(last.angleDeg + da), power, tap: c.tap });
+          }
+        }
+        // момент тапа по времени — тем же выстрелом чуть раньше и чуть позже (не раньше 0.1 с: дребезг пальца в ядре)
+        if (typeof c.tap === 'number' && dTap > 0) {
+          for (const dt of [-dTap / 2 ** k, dTap / 2 ** k]) {
+            const tap = round(c.tap + dt, 1e3);
+            if (tap >= 0.1) near.push({ from, angleDeg: last.angleDeg, power: last.power, tap });
+          }
         }
       }
-    }
-  });
-  yield* tryCands(near);
+    });
+    yield* tryCands(near);
+  }
   return found.flatMap((nodes) => [...nodes.values()]);
 }
 
@@ -257,11 +291,12 @@ function prepare(level: LevelDef, opts: SolveOptions) {
   const started = wallMs();
   const seed = opts.seed ?? 1;
   const wait = opts.wait ?? 'calm';
-  const preset = GRIDS[opts.grid ?? 'full'];
+  const preset = GRIDS[opts.grid ?? 'fast'];
   const main: Grid = { angles: opts.angles ?? preset.angles, powers: opts.powers ?? preset.powers };
   const maxMs = opts.maxMs ?? 60_000;
   const beamWidth = Math.max(1, opts.beam ?? 2);
   const refine = Math.max(0, opts.refine ?? 3);
+  const refineLevels = Math.max(0, Math.round(opts.refineLevels ?? 2));
   const taps = (bird: BirdType) => opts.taps?.[bird] ?? TAPS[bird];
   let evaluations = 0;
   let timedOut = false;
@@ -270,32 +305,43 @@ function prepare(level: LevelDef, opts: SolveOptions) {
   const elapsed = () => wallMs() - started;
   const outOfTime = () => (timedOut ||= elapsed() > maxMs);
 
-  // урезание по времени: от полного плана к быстрой сетке и к лучу 1 — только если становится дешевле
+  // урезание по времени: сначала сетка (full → fast → coarse), и лишь затем луч — без луча жадный бот заметно слабее
+  // (2-10: с лучом 2 решён 4 птицами, с лучом 1 не решён и шестью); шаг берётся, только если становится дешевле
   const steps: Step[] = [{ grid: main, nodes: beamWidth }];
-  for (const s of [{ grid: GRIDS.fast, nodes: beamWidth }, { grid: GRIDS.fast, nodes: 1 }]) {
+  for (const s of [{ grid: GRIDS.fast, nodes: beamWidth }, { grid: GRIDS.coarse, nodes: beamWidth }, { grid: GRIDS.coarse, nodes: 1 }]) {
     const prev = steps[steps.length - 1];
-    if (expandCost(s.grid, 1, refine) * s.nodes < expandCost(prev.grid, 1, refine) * prev.nodes) steps.push(s);
+    if (expandCost(s.grid, [null], refine, refineLevels) * s.nodes < expandCost(prev.grid, [null], refine, refineLevels) * prev.nodes) steps.push(s);
   }
-  /** Время одной серии на один ход по замеру прошлой птицы (мс); 0 — замера ещё нет. */
-  let msPerTurn = 0;
-  let mark = { ms: 0, evaluations: 0 };
+  const N = level.birds.length;
+  /**
+   * Цена «единицы» перебора (одна серия на один ход по оценке expandCost) по замеру прошлой птицы, мс; 0 — замера нет.
+   * Делим на оценку, а не на число прогонов: так поправка сама учитывает повторы соседей, отсеянные дедупликацией.
+   */
+  let msPerUnit = 0;
+  let lastUnits = 0;
+  let markMs = 0;
 
   const plan: Plan = {
     taps,
     beam: beamWidth,
     refine,
+    refineLevels,
     choose: (bird, beam) => {
-      const cost = (s: Step) => Math.min(s.nodes, beam.length) * expandCost(s.grid, taps(level.birds[bird]).length, refine) * msPerTurn * (bird + 1);
-      const left = maxMs - elapsed();
-      const step = opts.adaptive === false || msPerTurn === 0 ? steps[0] : (steps.find((s) => cost(s) <= left) ?? steps[steps.length - 1]);
+      const units = (s: Step) => Math.min(s.nodes, beam.length) * expandCost(s.grid, taps(level.birds[bird]), refine, refineLevels) * (bird + 1);
+      const cost = (s: Step) => units(s) * msPerUnit;
+      // доля птицы: её серии (bird + 1 ходов) против своих и следующей птицы; у последней — весь остаток
+      const weight = bird + 1 < N ? 2 * bird + 3 : bird + 1;
+      const share = ((maxMs - elapsed()) * (bird + 1)) / weight;
+      const step = opts.adaptive === false || msPerUnit === 0 ? steps[0] : (steps.find((s) => cost(s) <= share) ?? steps[steps.length - 1]);
+      lastUnits = units(step);
       stepReduced = step !== steps[0];
       reduced ||= stepReduced;
       return step;
     },
     stopAfter: (bird, best) => {
       const ms = elapsed();
-      if (evaluations > mark.evaluations) msPerTurn = (ms - mark.ms) / (evaluations - mark.evaluations) / bird; // на этой птице серии длиной bird ходов
-      mark = { ms, evaluations };
+      if (lastUnits > 0 && ms > markMs) msPerUnit = (ms - markMs) / lastUnits;
+      markMs = ms;
       opts.onProgress?.({ bird, evaluations, ms, pigsLeft: best.result.pigsLeft, score: best.result.score, reduced: stepReduced });
       return outOfTime();
     },

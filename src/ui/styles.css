@@ -831,11 +831,12 @@
   font-weight: 700;
   --stroke: 0.22em;
 }
+/* совет — в общем столбце под процентами (а не absolute у земли): на 640×360 двухстрочный совет наезжал на «Загрузка… 63%»;
+   место под две строки зарезервировано, чтобы смена совета не двигала столбец */
 .ld-tip {
-  position: absolute;
-  left: 50%;
-  bottom: calc(18% + 24 * var(--u));
-  transform: translateX(-50%);
+  position: relative;
+  min-height: 2.3em;
+  margin-top: calc(4 * var(--u));
   width: min(calc(900 * var(--u)), 90vw);
   text-align: center;
   font-size: max(15px, calc(26 * var(--u)));
@@ -1359,6 +1360,21 @@
   top: 0;
   rotate: 14deg;
 }
+/* светлые темы (снег): пустые звёзды на белом снегу теряются — тёмная подложка-«цоколь» под звёздами плитки */
+.scr-levels[data-theme='snow'] .tile-stars::before {
+  content: '';
+  position: absolute;
+  left: 2%;
+  right: 2%;
+  top: 14%;
+  height: 72%;
+  border-radius: 999px;
+  background: rgba(11, 26, 43, 0.42);
+  box-shadow: 0 0 0 max(1px, calc(2 * var(--u))) rgba(255, 255, 255, 0.35);
+}
+.scr-levels[data-theme='snow'] .tile-stars .st-empty {
+  fill: #a7b0bf;
+}
 .tile-wrap.is-current .tile-pulse {
   animation: pulse 1.2s ease-in-out infinite;
 }
@@ -1385,6 +1401,10 @@
   font-weight: 700;
   white-space: nowrap;
   --stroke: 0.22em;
+}
+/* номер уровня в тексте не переносится («1-» / «10») */
+.nw {
+  white-space: nowrap;
 }
 /* значок звезды внутри текста («Ещё 6 ★ в эпизоде 1») */
 .inl-star {
@@ -1982,11 +2002,11 @@
   background: var(--c, #ffd21f);
 }
 
-/* тосты */
+/* тосты — над нижней строкой («Коснитесь, чтобы пропустить», подвал уровней, версия на титуле), не поверх неё */
 .toast {
   position: absolute;
   left: 50%;
-  bottom: calc(var(--inset-b) + 30 * var(--u));
+  bottom: calc(var(--inset-b) + max(36px, 64 * var(--u)));
   transform: translateX(-50%);
   max-width: min(calc(680 * var(--u)), 88vw);
   padding: calc(14 * var(--u)) calc(26 * var(--u));
@@ -2124,13 +2144,13 @@
   position: absolute;
   right: calc(-10 * var(--u));
   top: calc(-10 * var(--u));
-  min-width: max(20px, calc(30 * var(--u)));
-  height: max(20px, calc(30 * var(--u)));
+  min-width: max(22px, calc(30 * var(--u)));
+  height: max(22px, calc(30 * var(--u)));
   padding: 0.2em 0.3em 0;
   border-radius: 999px;
   background: var(--red);
   border: max(2px, calc(3 * var(--u))) solid var(--red-dk);
-  font-size: max(12px, calc(18 * var(--u)));
+  font-size: max(14px, calc(18 * var(--u)));
   line-height: 1;
   display: grid;
   place-items: center;
@@ -2450,11 +2470,10 @@
   gap: calc(6 * var(--u));
   min-width: 0;
 }
-@media (orientation: portrait) {
-  .abui:not([data-letterbox]) .set-grid,
-  .abui:not([data-letterbox]) .dlg-about {
-    grid-template-columns: minmax(0, 1fr);
-  }
+/* портретное окно (в том числе «Играть так» — диалоги тогда во всё окно): одна колонка */
+.abui[data-orient='portrait'] .set-grid,
+.abui[data-orient='portrait'] .dlg-about {
+  grid-template-columns: minmax(0, 1fr);
 }
 .dlg-body > * {
   flex-shrink: 0;
@@ -2601,7 +2620,7 @@
 .dlg-ver {
   grid-column: 1 / -1;
   margin-top: calc(4 * var(--u)) !important;
-  font-size: 0.85em;
+  font-size: max(14px, 0.85em);
   opacity: 0.8;
 }
 .dlg-text {
@@ -2627,41 +2646,90 @@
 }
 
 /* ───────────── маленькие экраны ───────────── */
-/* Низкий ландшафт (телефон): компактнее заголовки и подписи, чтобы всё влезало в 360 px высоты. */
-/* (полоса летербокса — тоже «низкий экран» 360 px) */
-.abui[data-letterbox] .res-skip {
+/* Низкий экран (data-low: окно ниже 430 px или полоса летербокса 640×360, см. UI.relayout): компактнее
+   панели результатов, чтобы они влезали без уменьшения (fitInto) — иначе подписи падают ниже 14 px. */
+.abui[data-low='1'] .res-skip {
   display: none;
 }
-.abui[data-letterbox] .lose-pig {
+/* поражение: свинья меньше, чтобы панель с советом влезала по высоте */
+.abui[data-low='1'] .lose-pig {
   width: calc(150 * var(--u));
   height: calc(140 * var(--u));
 }
-.abui[data-letterbox] .lose-pig .char {
+.abui[data-low='1'] .lose-pig .char {
   width: calc(var(--sz) * var(--u) * 0.72);
   height: calc(var(--sz) * var(--u) * 0.72);
 }
-@media (max-height: 430px) {
-  .res-skip {
-    display: none;
-  }
-  /* поражение на телефоне: свинья меньше, чтобы панель с советом влезала по высоте */
-  .lose-pig {
-    width: calc(150 * var(--u));
-    height: calc(140 * var(--u));
-  }
-  .lose-pig .char {
-    width: calc(var(--sz) * var(--u) * 0.72);
-    height: calc(var(--sz) * var(--u) * 0.72);
-  }
-  .lose-shadow {
-    width: calc(108 * var(--u));
-    bottom: calc(4 * var(--u));
-  }
-  .dlg-body {
-    padding-top: calc(30 * var(--u));
-  }
+.abui[data-low='1'] .lose-shadow {
+  width: calc(108 * var(--u));
+  bottom: calc(4 * var(--u));
 }
-/* Узкая полоса (летербокс или окно ниже 300 px) — прячем второстепенное. */
+/* победа: звёзды, счёт и кнопки ниже — панель с сообщением помещается в 360 px без масштаба */
+.abui[data-low='1'] .res .ribbon {
+  margin-bottom: calc(-62 * var(--u));
+}
+.abui[data-low='1'] .res-panel {
+  padding-top: calc(50 * var(--u));
+  padding-bottom: calc(14 * var(--u));
+}
+.abui[data-low='1'] .res-level + .res-stars {
+  margin-top: calc(10 * var(--u));
+}
+.abui[data-low='1'] .res-stars {
+  height: calc(100 * var(--u));
+  gap: calc(12 * var(--u));
+  margin-bottom: 0;
+}
+.abui[data-low='1'] .res-star {
+  width: calc(80 * var(--u));
+  height: calc(80 * var(--u));
+  min-width: 44px;
+  min-height: 44px;
+  translate: 0 calc(-4 * var(--u));
+}
+.abui[data-low='1'] .res-star.s1 {
+  width: calc(100 * var(--u));
+  height: calc(100 * var(--u));
+  min-width: 54px;
+  min-height: 54px;
+  translate: 0 calc(-14 * var(--u));
+}
+.abui[data-low='1'] .res-rays,
+.abui[data-low='1'] .res-glow {
+  top: calc(118 * var(--u));
+}
+.abui[data-low='1'] .res-label {
+  line-height: 1;
+}
+.abui[data-low='1'] .res-score {
+  font-size: max(30px, calc(64 * var(--u)));
+  margin: 0;
+}
+.abui[data-low='1'] .res-best-row {
+  min-height: max(24px, calc(40 * var(--u)));
+}
+.abui[data-low='1'] .res-msg {
+  margin-top: 0;
+  line-height: 1.12;
+}
+.abui[data-low='1'] .res-btns {
+  margin-top: calc(6 * var(--u));
+}
+.abui[data-low='1'] .res-btns .btn--l {
+  --size: calc(104 * var(--u));
+  --min: 58px;
+}
+.abui[data-low='1'] .res-btns .btn--m {
+  --min: 48px;
+}
+.abui[data-low='1'] .dlg-body {
+  padding-top: calc(30 * var(--u));
+}
+/* «Играть так»: меню в полосе уменьшены до ≈ 0.6 — подпись версии там нечитаема (она есть в «Настройки → Об игре») */
+.abui[data-letterbox] .tt-version {
+  display: none;
+}
+/* Окно ниже 300 px — прячем второстепенное. */
 @media (max-height: 300px) {
   .tt-version,
   .lv-foot,

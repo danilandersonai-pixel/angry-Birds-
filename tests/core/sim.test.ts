@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import { checkStability, levelPoints, simulateShots, solveLevel, solveLevelAsync, suggestStars } from '../../src/core/sim';
 import type { LevelDef } from '../../src/core/types';
+import { ALL_LEVELS } from '../../src/levels';
 import { flatGround, frame, hutLevel, level, pigOn, rect } from '../fixtures/levels';
 
 /** Простой уровень: одна деревянная рама, свинья внутри, две птицы. */
@@ -20,6 +21,14 @@ describe('checkStability', () => {
     expect(r.maxPigShift!.shift).toBeLessThan(0.02);
     expect(r.settleTime).not.toBeNull();
     expect(r.sleepTime).not.toBeNull();
+  });
+
+  it('без сна planck (keepAwake) башня тоже стоит все 10 с; сна в отчёте нет', () => {
+    const r = checkStability(hutLevel(), 10, { keepAwake: true });
+    expect(r).toMatchObject({ pass: true, keepAwake: true, sleepTime: null });
+    expect(r.maxBlockShift!.shift).toBeLessThan(0.02);
+    expect(r.settleTime).not.toBeNull();
+    expect(checkStability(hutLevel()).keepAwake).toBe(false);
   });
 
   it('висящий блок не проходит: в отчёте его id, индекс и смещение', () => {
@@ -130,6 +139,19 @@ describe('solveLevel', () => {
     expect(sync.reduced).toBe(false);
   }, 60_000);
 
+  it('уточнение соседями только добавляет кандидатов: одна птица — итог не хуже, прогонов больше', () => {
+    const L = level({ birds: ['chuck'], blocks: frame(26), pigs: [pigOn('small', 26, 0)] });
+    const base = { grid: 'fast', angles: [10, 20, 30, 40], powers: [0.8, 1], taps: { chuck: [0.6] }, refine: 2 } as const;
+    const r0 = solveLevel(L, { ...base, refineLevels: 0 });
+    const r2 = solveLevel(L, { ...base, refineLevels: 2 });
+    expect(r0.evaluations).toBe(8);
+    // круг k: по 8 соседей угол × сила на шаг / 2^k и 2 соседа по тапу у 2 лучших (повторы не считаются)
+    expect(r2.evaluations).toBeGreaterThan(r0.evaluations);
+    expect(r2.evaluations).toBeLessThanOrEqual(8 + 2 * 2 * 10);
+    expect(-r2.pigsLeft * 1e6 + r2.score).toBeGreaterThanOrEqual(-r0.pigsLeft * 1e6 + r0.score);
+    expect(r2.shots[0].abilityAt).toBeGreaterThanOrEqual(0.1);
+  }, 60_000);
+
   it('лимит времени: возвращает лучшее найденное и флаг timedOut', () => {
     const r = solveLevel(simpleLevel(), { maxMs: 1 });
     expect(r.timedOut).toBe(true);
@@ -173,5 +195,16 @@ describe('suggestStars', () => {
     const r = suggestStars(L, { solved: true, score: 40_000, birdsUsed: 2 });
     expect(r.nMin).toBe(1);
     expect(r.warnings.join('\n')).toContain('замысел не сходится');
+    const easy = suggestStars({ ...hutLevel(), meta: { nMin: 2 } }, { solved: true, score: 40_000, birdsUsed: 1 });
+    expect(easy.warnings.join('\n')).toContain('эксперту хватило 1 птиц при nMin 2');
+  });
+});
+
+describe('кампания (06 §7.4)', () => {
+  // решатель по всем 30 уровням — ≈ 3–4 мин на 4 ядрах, поэтому здесь только устойчивость; эксперт — npm run levels:report -- --solve
+  it.each(ALL_LEVELS.map((l) => [l.id, l] as const))('%s устойчив без выстрелов', (_id, L) => {
+    const r = checkStability(L);
+    expect(r.failures).toEqual([]);
+    expect(r.pass).toBe(true);
   });
 });

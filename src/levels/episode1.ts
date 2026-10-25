@@ -203,20 +203,27 @@ export function L1_4(): LevelDef {
  */
 export function L1_5(): LevelDef {
   const H = 3;
-  const tw = tower({ x: 27, y: H, floors: 2, mats: ['wood', { col: 'ice', beam: 'stone' }] });
-  const rock = part({ blocks: [blockOn('stone', 'square', 24, H)] });
+  // холм: левый откос 16…20.5, ровный верх 20.5…28, правый откос 28…32.5 (оба 33.7°)
+  // A — ледяная вышка в 2 этажа на левом краю верха: small наверху (хрупкое место — цель для Blues)
+  const watch = tower({ x: 21.5, y: H, floors: 2, span: 2, h: 1, mats: 'ice' });
+  // B — амбар на правом краю верха: деревянные колонны, каменная балка-«крышка», деревянная крыша; large внутри
+  const barn = frame({ x: 25.5, y: H, span: 3, h: 2, col: 'wood', beam: 'stone' });
+  const barnRoof = roof({ x: 25.5, y: barn.top, mat: 'wood' });
+  // камень-упор встык к правой колонне: large не скатывается с холма в тыл
+  const stopper = part({ blocks: [blockOn('stone', 'square', 27.5, H)] });
+  // C — тыл за холмом: деревянная сторожка 2×2 с крышей, small внутри; рядом поленница
+  const shed = hut({ x: 34, span: 2, h: 1, col: 'stone', beam: 'wood', roofMat: 'wood' });
   const woodpile = merge(
-    stack({ x: 37.85, n: 2, kind: 'square', mat: 'wood' }),
-    stack({ x: 38.85, n: 2, kind: 'square', mat: 'wood' }),
-    part({ blocks: [blockOn('wood', 'plank', 38.35, 2)] }),
+    stack({ x: 36, n: 2, kind: 'square', mat: 'wood' }),
+    stack({ x: 37, n: 1, kind: 'square', mat: 'wood' }),
   );
   return level({
     id: '1-5',
     name: 'Холм',
     birds: ['red', 'blues', 'red', 'blues'],
-    terrain: [flatGround(), hill(18.5, 23, 30.5, 35, H)],
-    parts: [tw, rock, woodpile],
-    pigs: [pigIn('large', tw.spots[0]), pigIn('small', tw.spots[2]), pigOn('small', 36.2, 0)],
+    terrain: [flatGround(), hill(16, 20.5, 28, 32.5, H)],
+    parts: [watch, barn, barnRoof, stopper, shed, woodpile],
+    pigs: [pigIn('small', watch.spots[2], 0, { fragile: true }), pigIn('large', barn.spots[0]), pigIn('small', shed.spots[0])],
     hint: 'Свинью за холмом достанет только навесной выстрел',
     meta: { nMin: 3, difficulty: 4, teach: 'рельеф, навес через холм, large', starsSource: 'manual' },
     decor: [
@@ -329,17 +336,24 @@ export function L1_7(): LevelDef {
  * Учит: Bomb взрывается от тапа и сам через 2.5 с после удара; взрыв берёт свинью и за камнем (радиус medium 3.3 м).
  */
 export function L1_8(): LevelDef {
-  const b1 = bunker({ x: 22, roofMat: 'wood' });
+  const X1 = 19;
+  const X2 = 25.5;
+  const b1 = bunker({ x: X1, roofMat: 'ice' });
+  // баррикада из ящиков перед бункером 1 (прикрывает его от прямых выстрелов)
+  const crates1 = merge(stack({ x: X1 - 3, n: 2, kind: 'square', mat: 'wood' }), part({ blocks: [blockOn('wood', 'square', X1 - 4, 0)] }));
+  // штабель ящиков между бункерами: точный взрыв Бомба между ними берёт обоих medium и ящики
+  const crates2 = merge(stack({ x: X1 + 2.75, n: 2, kind: 'square', mat: 'wood' }));
   const LEDGE = 1;
-  const b2 = bunker({ x: 29, y: LEDGE, roofMat: 'wood' });
-  const look = frame({ x: 29, y: b2.top, span: 3, h: 1.5 });
+  const b2 = bunker({ x: X2, y: LEDGE, roofMat: 'stone' });
+  // вышка в 2 этажа (1-й деревянный, 2-й на ледяных колоннах) в 1 м справа от свеса крыши бункера 2; small наверху
+  const look = tower({ x: X2 + 5.5, y: LEDGE, floors: 2, span: 3, h: 1.5, mats: ['wood', { col: 'ice', beam: 'wood' }] });
   return level({
     id: '1-8',
     name: 'Бункер',
     birds: ['bomb', 'red', 'bomb', 'red'],
-    terrain: [flatGround(), plateau(26.5, 31.5, LEDGE, { slope: 1.5 })],
-    parts: [b1, b2, look],
-    pigs: [pigIn('medium', b1.spots[0]), pigIn('medium', b2.spots[0]), pigIn('small', look.spots[1])],
+    terrain: [flatGround(), plateau(X2 - 1.5, X2 + 8, LEDGE, { slope: 1.5 })],
+    parts: [crates1, b1, crates2, b2, look],
+    pigs: [pigIn('medium', b1.spots[0]), pigIn('medium', b2.spots[0]), pigIn('small', look.spots[2])],
     hint: 'Коснитесь экрана — Бомб взорвётся. Или подождите: он взорвётся сам',
     meta: { nMin: 2, difficulty: 5, teach: 'Bomb: взрыв по тапу и сам; взрыв против камня', starsSource: 'manual' },
     decor: [

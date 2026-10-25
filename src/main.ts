@@ -1,3 +1,7 @@
-// Точка входа. Временная заглушка каркаса — заменяется при интеграции.
-const app = document.getElementById('app');
-if (app) app.textContent = 'Сердитые Птицы — каркас';
+// Точка входа: приложение «Сердитые Птицы» (src/app/App.ts) — загрузка шрифтов, прогрев спрайтов, меню и игра.
+
+import { App } from './app/App';
+
+const root = document.getElementById('app') ?? document.body;
+const app = new App(root);
+void app.start();

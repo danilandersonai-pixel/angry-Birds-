@@ -4,15 +4,22 @@
 //   npx tsx scripts/level-report.ts                — устойчивость всех уровней
 //   npx tsx scripts/level-report.ts 1-1 2-         — выбранные уровни (id или префикс эпизода «2-»)
 //   npx tsx scripts/level-report.ts 1-3 --solve    — плюс решатель, счёт и предложенные звёзды
+//   npm run levels:report -- 1- --solve --json   — то же через npm, машинный вывод
 // Ключи:
 //   --solve        бот-эксперт (06 §7.2) и пороги звёзд (06 §8)
-//   --json         результаты в JSON
-//   --fast         урезанная сетка решателя: шаг угла 4°, 3 силы (≈ ×0.4 по времени)
+//   --json         результаты в JSON (stdout; прогресс решателя не печатается)
+//   --awake        устойчивость без сна planck все --seconds секунд (строже игры: видно медленное сползание)
+//   --full         полная сетка решателя 06 §7.2: шаг угла 2°, 4 силы (≈ ×2 по времени; по умолчанию — быстрая:
+//                  шаг 4°, 3 силы, остальное добирают круги уточнения)
 //   --beam=N       ширина луча решателя (2)
+//   --refine=N     сколько лучших кандидатов уточнять соседями (3)
+//   --refine-levels=N  кругов уточнения: шаг сетки / 2, / 4, … (2)
 //   --max-ms=N     лимит решателя на уровень, мс (60000)
 //   --seed=N       seed сессии (1)
 //   --seconds=N    длительность проверки устойчивости, с (10)
 //   --jobs=N       процессов-оценщиков решателя (по умолчанию — число ядер; 1 — в этом процессе)
+// В конце текстового отчёта — сводная таблица (Markdown) и, при --solve, предложенные пороги звёзд
+// готовым фрагментом для вставки в файлы уровней (src/levels/episodeN.ts, поле stars).
 // Код возврата: 0 — все уровни устойчивы (и решены при --solve); 1 — есть проблемы; 2 — уровни не найдены.
 // Итог решателя не зависит от --jobs: кандидаты считаются независимо и сравниваются в одном порядке
 // (кроме остановки по --max-ms — сколько успеет, зависит от скорости машины).
@@ -44,6 +51,8 @@ import {
 interface LevelReport {
   id: string;
   name: string;
+  /** Пороги, заданные в файле уровня. */
+  stars0: LevelDef['stars'];
   stability: StabilityReport;
   solve?: SolveResult;
   stars?: StarSuggestion;
@@ -67,11 +76,14 @@ const opts = {
   solve: flags.has('solve'),
   json: flags.has('json'),
   seconds: num('seconds', 10),
+  awake: flags.has('awake'),
   jobs: Math.max(1, Math.round(num('jobs', availableParallelism()))),
   solver: {
     seed: num('seed', 1),
-    grid: flags.has('fast') ? 'fast' : 'full',
+    grid: flags.has('full') ? 'full' : 'fast',
     beam: num('beam', 2),
+    refine: num('refine', 3),
+    refineLevels: num('refine-levels', 2),
     maxMs: num('max-ms', 60_000),
   } satisfies SolveOptions,
 };
@@ -163,8 +175,8 @@ function poolEvaluator(pool: readonly Evaluator[]): BatchEvaluator {
 // ── Отчёт ───────────────────────────────────────────────────────
 
 async function reportLevel(level: LevelDef, evaluate: BatchEvaluator | null): Promise<LevelReport> {
-  const stability = checkStability(level, opts.seconds, { seed: opts.solver.seed });
-  const head = { id: level.id, name: level.name, stability };
+  const stability = checkStability(level, opts.seconds, { seed: opts.solver.seed, keepAwake: opts.awake });
+  const head = { id: level.id, name: level.name, stars0: level.stars, stability };
   if (!opts.solve) return head;
   const solverOpts: SolveOptions = {
     ...opts.solver,
@@ -189,7 +201,7 @@ const time = (t: number | null) => (t === null ? 'нет' : `${t.toFixed(2)} с`
 
 function formatStability(r: StabilityReport): string[] {
   const lines = [
-    `  устойчивость: ${r.pass ? 'OK' : 'ПРОВАЛ'} (${r.seconds} с симуляции за ${Math.round(r.ms)} мс)`,
+    `  устойчивость: ${r.pass ? 'OK' : 'ПРОВАЛ'} (${r.seconds} с симуляции${r.keepAwake ? ' без сна' : ''} за ${Math.round(r.ms)} мс)`,
     `    блоки: смещение ${shift(r.maxBlockShift)}, поворот ${turn(r.maxBlockRotation)}; свиньи: смещение ${shift(r.maxPigShift)}`,
     `    после усадки ${shift(r.presettleShift)}${(r.presettleShift?.shift ?? 0) > T0_SHIFT ? ` — больше нормы T0 ${T0_SHIFT} м` : ''}; ` +
       `покой ${time(r.settleTime)}, сон ${time(r.sleepTime)}`,
@@ -201,7 +213,7 @@ function formatStability(r: StabilityReport): string[] {
 
 function formatSolve(level: LevelDef, s: SolveResult, stars: StarSuggestion): string[] {
   const nMin = level.meta?.nMin;
-  const shots = s.shots.map((x) => `${x.angleDeg}° × ${x.power.toFixed(2)}${x.abilityAt != null ? ` тап ${x.abilityAt} с` : ''}`).join('; ');
+  const shots = s.shots.map((x) => `${x.angleDeg}° × ${x.power}${x.abilityAt != null ? ` тап ${x.abilityAt} с` : ''}`).join('; '); // без округления: строка повторяема
   const lines = [
     `  решатель: ${s.solved ? 'решён' : 'НЕ решён'} — птиц ${s.birdsUsed} из ${level.birds.length}${nMin !== undefined ? ` (nMin ${nMin})` : ''}, ` +
       `свиней осталось ${s.pigsLeft}, счёт ${pts(s.score)}, звёзд ${s.stars}; ${sec(s.ms)}, прогонов ${s.evaluations}` +
@@ -220,6 +232,56 @@ function formatLevel(level: LevelDef, r: LevelReport): string {
   const lines = [`${r.id} «${r.name}»: птиц ${level.birds.length}, свиней ${level.pigs.length}, блоков и TNT ${bodies}`, ...formatStability(r.stability)];
   if (r.solve && r.stars) lines.push(...formatSolve(level, r.solve, r.stars));
   return lines.join('\n');
+}
+
+/** Сводная таблица в Markdown: по строке на уровень. */
+function summaryTable(levels: readonly LevelDef[], results: readonly LevelReport[]): string[] {
+  const head = ['уровень', 'птиц', 'свиней', 'тел', 'устойчив', 'сдвиг блоков, м', 'поворот, °', 'сдвиг свиней, м', 'сон, с'];
+  if (opts.solve) head.push('решён', 'птиц / nMin', 'счёт', '2★/3★ заданы', '2★/3★ предложено', 'решатель, с');
+  const rows = results.map((r, i) => {
+    const level = levels[i];
+    const st = r.stability;
+    const row = [
+      r.id,
+      String(level.birds.length),
+      String(level.pigs.length),
+      String(level.blocks.length + (level.tnt?.length ?? 0)),
+      st.pass ? 'да' : `**нет** (${st.failures.length})`,
+      (st.maxBlockShift?.shift ?? 0).toFixed(3),
+      (st.maxBlockRotation?.rotateDeg ?? 0).toFixed(1),
+      (st.maxPigShift?.shift ?? 0).toFixed(3),
+      st.sleepTime === null ? '—' : st.sleepTime.toFixed(2),
+    ];
+    if (opts.solve && r.solve && r.stars) {
+      const s = r.solve;
+      row.push(
+        s.solved ? 'да' : `**нет** (свиней ${s.pigsLeft})`,
+        `${s.birdsUsed} / ${level.meta?.nMin ?? '—'}`,
+        pts(s.score),
+        `${pts(level.stars.two)} / ${pts(level.stars.three)}`,
+        `${pts(r.stars.stars.two)} / ${pts(r.stars.stars.three)}`,
+        (s.ms / 1000).toFixed(1) + (s.timedOut ? ' (лимит)' : s.reduced ? ' (урезан)' : ''),
+      );
+    }
+    return row;
+  });
+  return [`| ${head.join(' | ')} |`, `|${head.map(() => '---').join('|')}|`, ...rows.map((row) => `| ${row.join(' | ')} |`)];
+}
+
+const k = (x: number) => (x >= 1000 ? `${Math.floor(x / 1000)}_${String(x % 1000).padStart(3, '0')}` : String(x));
+
+/** Предложенные пороги звёзд решённых уровней — готовые строки для поля stars в src/levels/episodeN.ts. */
+function starsFragment(results: readonly LevelReport[]): string[] {
+  const solved = results.filter((r) => r.solve?.solved && r.stars);
+  if (!solved.length) return [];
+  return [
+    '// предложенные пороги звёзд (06 §8; эксперт — scripts/level-report.ts --solve):',
+    ...solved.map((r) => {
+      const { two, three } = r.stars!.stars;
+      const same = two === r.stars0.two && three === r.stars0.three;
+      return `'${r.id}': { stars: { one: 0, two: ${k(two)}, three: ${k(three)} } },${same ? ' // как задано' : ''}`;
+    }),
+  ];
 }
 
 async function main(): Promise<void> {
@@ -241,6 +303,9 @@ async function main(): Promise<void> {
   if (opts.json) {
     console.log(JSON.stringify(results, null, 2));
   } else {
+    console.log(summaryTable(levels, results).join('\n') + '\n');
+    const fragment = starsFragment(results);
+    if (fragment.length) console.log(fragment.join('\n') + '\n');
     const stable = results.filter((r) => r.stability.pass).length;
     const solved = results.filter((r) => r.solve?.solved).length;
     console.log(

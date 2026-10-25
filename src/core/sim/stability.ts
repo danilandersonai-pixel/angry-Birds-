@@ -1,7 +1,10 @@
 // Проверка устойчивости уровня без выстрелов (06 §7.1, стадии T0 + T1): усадка, как в createSession,
-// затем все тела будятся, урон включён, `seconds` секунд симуляции без принудительного сна (так ползущие тела
-// не «замораживаются» и видны в отчёте). Публичный API сессии не умеет будить тела, поэтому проверка работает
-// напрямую с PhysicsWorld — тем же миром, который строит сессия.
+// затем все тела будятся, урон включён, `seconds` секунд симуляции без принудительного сна игры (SETTLE.SLEEP_HOLD),
+// так что тела засыпают только сном planck; с keepAwake не засыпают вовсе — медленное сползание копится весь прогон.
+// Публичный API сессии не умеет будить тела, поэтому проверка работает напрямую с PhysicsWorld — тем же миром,
+// который строит сессия. «Прошёл»: 0 погибших свиней, 0 разрушенных блоков, смещения < 0.15 м, повороты < 10°
+// (у кругов поворот не считается); пороги меняются через limits. Строгие нормы 06 §7.1 (T0 ≤ 0.05 м, T1 ≤ 0.05 м
+// и 2°) в критерий не входят — смещения и повороты есть в отчёте, сравнить можно по ним.
 
 import type { Body } from 'planck';
 import { SETTLE, WORLD } from '../../config/constants';
@@ -17,6 +20,11 @@ export const STABILITY_LIMITS = { SHIFT: 0.15, ROTATE_DEG: 10 } as const;
 export interface StabilityOptions {
   seed?: number;
   limits?: { shift?: number; rotateDeg?: number };
+  /**
+   * Запретить сон planck на всё время прогона (по умолчанию false). Строже игры: без сна медленное сползание
+   * (< 0.01 м/с, порог сна planck) не останавливается и копится все `seconds` секунд — так видны «ползущие» опоры.
+   */
+  keepAwake?: boolean;
 }
 
 /** Тело уровня: вид, индекс в массиве LevelDef (blocks / tnt / pigs), id из данных и краткое описание. */
@@ -61,8 +69,10 @@ export interface StabilityReport {
   presettleShift: BodyMotion | null;
   /** Когда сцена впервые стала тихой на SETTLE.SLEEP_HOLD (в игре здесь был бы принудительный сон); null — не успокоилась. */
   settleTime: number | null;
-  /** Когда все тела уснули сами (сон planck); null — кто-то не спал до конца прогона. */
+  /** Когда все тела уснули сами (сон planck); null — кто-то не спал до конца прогона (или keepAwake). */
   sleepTime: number | null;
+  /** Прогон шёл без сна planck (StabilityOptions.keepAwake). */
+  keepAwake: boolean;
   /** Тела за порогами смещения или поворота, по убыванию смещения. */
   offenders: BodyMotion[];
   /** Причины провала по-русски. */
@@ -173,6 +183,8 @@ export function checkStability(level: LevelDef, seconds = 10, opts: StabilityOpt
 
   // T1: разбудить всё, урон включён
   pw.damageEnabled = true;
+  const keepAwake = opts.keepAwake ?? false;
+  if (keepAwake) pw.world.setAllowSleeping(false);
   for (const e of pw.ents.values()) if (e.kind !== 'terrain') e.body.setAwake(true);
   const total = Math.round(seconds / WORLD.DT);
   let quiet = 0;
@@ -184,7 +196,7 @@ export function checkStability(level: LevelDef, seconds = 10, opts: StabilityOpt
     measure();
     quiet = pw.isQuiet() ? quiet + 1 : 0;
     if (settleTime === null && quiet >= SETTLE_STEPS) settleTime = step * WORLD.DT;
-    if (!pw.anyAwake()) {
+    if (!keepAwake && !pw.anyAwake()) {
       sleepTime = step * WORLD.DT; // спящий мир без внешних сил дальше не меняется
       break;
     }
@@ -219,6 +231,7 @@ export function checkStability(level: LevelDef, seconds = 10, opts: StabilityOpt
     presettleShift,
     settleTime,
     sleepTime,
+    keepAwake,
     offenders: over.map(motionOf),
     failures,
     ms: wallMs() - started,

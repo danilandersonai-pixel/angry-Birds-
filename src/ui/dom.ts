@@ -139,12 +139,40 @@ export function appendAll(el: HTMLElement, ...children: Array<Node | string | nu
   return el;
 }
 
-/** Текст, где символ ★ заменён значком звезды (в шрифте Rubik такого глифа нет). */
+/** Номер уровня в тексте («1-10»): дефис разрешает перенос строки («1-» / «10») — оборачиваем в неразрывный span. */
+const LEVEL_ID_RE = /(\d+-\d+)/;
+
+/** Добавить кусок текста; номера уровней — неразрывно. */
+function appendNoBreakIds(el: HTMLElement, text: string): void {
+  text.split(LEVEL_ID_RE).forEach((part, i) => {
+    if (!part) return;
+    if (i % 2 === 1) el.append(h('span', { class: 'nw', text: part }));
+    else el.append(part);
+  });
+}
+
+/**
+ * Текст, где символ ★ заменён значком звезды (в шрифте Rubik такого глифа нет),
+ * а номера уровней («1-10») не разрываются переносом строки.
+ */
 export function withStarIcons(el: HTMLElement, text: string): HTMLElement {
   el.textContent = '';
-  text.split('★').forEach((part, i) => {
-    if (i > 0) el.insertAdjacentHTML('beforeend', starSvg('full', 'inl-star'));
-    if (part) el.append(part);
+  const parts = text.split('★');
+  parts.forEach((part, i) => {
+    let head = part;
+    let glue = '';
+    if (i < parts.length - 1) {
+      // слово перед звездой («ещё 9 ★») держим со значком в одной строке: иначе значок уезжает на свою строку
+      const m = /[^ ]*$/.exec(part);
+      glue = m ? m[0] : '';
+      head = part.slice(0, part.length - glue.length);
+    }
+    if (head) appendNoBreakIds(el, head);
+    if (i < parts.length - 1) {
+      const nw = h('span', { class: 'nw' }, glue || null);
+      nw.insertAdjacentHTML('beforeend', starSvg('full', 'inl-star'));
+      el.append(nw);
+    }
   });
   return el;
 }

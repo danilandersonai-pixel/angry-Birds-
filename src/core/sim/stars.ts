@@ -63,6 +63,8 @@ export function suggestStars(level: LevelDef, solve?: Pick<SolveResult, 'solved'
     }
     if (level.meta?.nMin !== undefined && expert.birdsUsed > level.meta.nMin) {
       warnings.push(`замысел не сходится: эксперту нужно ${expert.birdsUsed} птиц при nMin ${level.meta.nMin}`);
+    } else if (level.meta?.nMin !== undefined && expert.birdsUsed < level.meta.nMin) {
+      warnings.push(`эксперту хватило ${expert.birdsUsed} птиц при nMin ${level.meta.nMin}: уровень проще замысла или nMin завышен`);
     }
   } else {
     warnings.push('эксперт не прошёл уровень — пороги только по формуле');

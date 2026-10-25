@@ -3,11 +3,46 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
-    <meta name="theme-color" content="#5bc0f5" />
+    <meta name="theme-color" content="#0b1a2b" />
+    <meta name="description" content="Сердитые Птицы — фан-ремейк в браузере: рогатка, птицы, свиньи и физика." />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <title>Сердитые Птицы</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        overscroll-behavior: none;
+        background: #0b1a2b;
+        -webkit-text-size-adjust: 100%;
+      }
+      #app,
+      #stage {
+        position: fixed;
+        inset: 0;
+        overflow: hidden;
+      }
+      #game {
+        position: absolute;
+        left: 0;
+        top: 0;
+        display: block;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-tap-highlight-color: transparent;
+        outline: none;
+        background: #5bc0f5;
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>
+    <noscript>Для игры нужен JavaScript.</noscript>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

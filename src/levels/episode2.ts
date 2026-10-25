@@ -52,7 +52,7 @@ const dec = (kind: DecorDef['kind'], x: number, y = 0, scale?: number, flip?: bo
  * Свиньи: medium (1-й этаж) + small (2-й этаж) в домике, small в ледяной раме. Учит: косвенное убийство валуном.
  */
 export function L2_1(): LevelDef {
-  const dune = hill(8, 14, 19, 27, 4);
+  const dune = hill(8, 14, 19, 25, 4);
   // два валуна на ровном верху дюны: ⌀1 и ⌀2 из камня, общий средний стопор (зазоры 0.05, 06 S8)
   const boulders = part({
     blocks: [
@@ -63,16 +63,18 @@ export function L2_1(): LevelDef {
       blockOn('wood', 'cube', 18.75, 4, { id: 'стопор-у-кромки' }),
     ],
   });
-  const floor1 = tower({ x: 29.5, floors: 1 });
-  const floor2 = hut({ x: 29.5, y: floor1.top });
-  const iceShed = frame({ x: 34, span: 4, h: 1, col: 'ice', beam: 'ice' });
+  const floor1 = tower({ x: 27, floors: 1 });
+  const floor2 = hut({ x: 27, y: floor1.top });
+  // каменный заслон между домиком и ледяным сараем: валун и обломки домика сарай не задевают — нужен навес
+  const guard = stack({ x: 29.5, n: 2, kind: 'square', mat: 'stone' });
+  const iceShed = hut({ x: 34, span: 4, h: 1, col: 'ice', beam: 'ice', roofMat: 'ice' });
   return level({
     id: '2-1',
     name: 'Валуны',
     birds: ['red', 'chuck', 'blues', 'red'],
     terrain: [flatGround(), dune],
-    parts: [boulders, floor1, floor2, iceShed],
-    blocks: [blockOn('ice', 'cube', 32.25, iceShed.top), blockOn('ice', 'cube', 35.75, iceShed.top)],
+    parts: [boulders, floor1, floor2, guard, iceShed],
+    blocks: [blockOn('stone', 'cube', 29.5, 2)],
     pigs: [pigIn('medium', floor1.spots[0]), pigIn('small', floor2.spots[0]), pigIn('small', iceShed.spots[0])],
     hint: 'Толкните валун — он скатится с дюны и раздавит домик',
     meta: { nMin: 2, difficulty: 4, teach: 'валун в колыбели: сбить стопор или толкнуть шар — косвенное убийство', starsSource: 'manual' },
@@ -92,21 +94,25 @@ export function L2_1(): LevelDef {
  * Свиньи: 2 medium под крышей, small на крыше. Учит: Matilda — сброс яйца сверху.
  */
 export function L2_2(): LevelDef {
-  const screen = stack({ x: 16.5, n: 3, kind: 'square', mat: 'stone' });
-  const post = blockOn('wood', 'longBeam', 23, 0, { vertical: true, id: 'стойка' });
-  const beamL = B('wood', 'rect', 21, 5.25, 4, 0.5, 0, 'крыша-левая');
-  const beamR = B('wood', 'rect', 25, 5.25, 4, 0.5, 0, 'крыша-правая');
-  const slabL = blockOn('stone', 'slab', 21.5, 5.5);
-  const slabR = blockOn('stone', 'slab', 24.5, 5.5);
-  const ridge = blockOn('wood', 'brick', 23, 5.5, { id: 'брусок-на-стыке' });
-  const lookout = frame({ x: 28, y: 5, span: 2, h: 2 });
-  const lookoutCap = roof({ x: 28, y: lookout.top, w: 2, mat: 'wood' });
+  const c = 21; // ось бухты (стойка); бухта c − 3 … c + 3
+  const screen = stack({ x: c - 6.5, n: 3, kind: 'square', mat: 'stone' });
+  const post = blockOn('wood', 'longBeam', c, 0, { vertical: true, id: 'стойка' });
+  const beamL = B('wood', 'rect', c - 2, 5.25, 4, 0.5, 0, 'крыша-левая');
+  const beamR = B('wood', 'rect', c + 2, 5.25, 4, 0.5, 0, 'крыша-правая');
+  const slabL = blockOn('stone', 'slab', c - 1.5, 5.5);
+  const slabR = blockOn('stone', 'slab', c + 1.5, 5.5);
+  const ridge = blockOn('wood', 'square', c, 5.5, { id: 'ящик-на-стыке' });
+  // на ближней скале — низкая будка с small (верх 7.5: не перекрывает полёт Матильды к бухте)
+  const booth = hut({ x: c - 5, y: 5, span: 2, h: 1 });
+  // на дальней скале — двухэтажная вышка и сарай (за целью: не мешают полёту над бухтой)
+  const lookout = tower({ x: c + 5, y: 5, floors: 2, span: 2, mats: ['wood', { col: 'wood', beam: 'ice' }], roof: 'wood' });
+  const shed = hut({ x: c + 8, y: 5, span: 2, h: 2, roofMat: 'ice' });
   return level({
     id: '2-2',
     name: 'Яйцо сверху',
     birds: ['matilda', 'matilda', 'red'],
-    terrain: [flatGround(), plateau(18, 20, 5), plateau(26, 29, 5)],
-    parts: [screen, lookout, lookoutCap],
+    terrain: [flatGround(), plateau(c - 6, c - 3, 5), plateau(c + 3, c + 9, 5)],
+    parts: [screen, booth, lookout, shed],
     blocks: [
       post,
       beamL,
@@ -114,17 +120,21 @@ export function L2_2(): LevelDef {
       slabL,
       slabR,
       ridge,
-      blockOn('wood', 'square', 18.5, 5),
       // ящики у скальных стен внутри бухты и ледяные бруски на концах крыши над скалами
-      blockOn('wood', 'brick', 20.25, 0, { vertical: true }),
-      blockOn('wood', 'brick', 25.75, 0, { vertical: true }),
-      blockOn('ice', 'brick', 19.75, 5.5),
-      blockOn('ice', 'brick', 26.25, 5.5),
+      blockOn('wood', 'brick', c - 2.75, 0, { vertical: true }),
+      blockOn('wood', 'brick', c + 2.75, 0, { vertical: true }),
+      blockOn('ice', 'cube', c - 2.75, 1),
+      blockOn('ice', 'cube', c + 2.75, 1),
+      blockOn('ice', 'brick', c - 3.25, 5.5),
+      blockOn('ice', 'brick', c + 3.25, 5.5),
+      // груз на плитах: деревянные бруски (ещё очки за разрушение и мишень для яйца)
+      blockOn('wood', 'brick', c - 1.5, 6.5),
+      blockOn('wood', 'brick', c + 1.5, 6.5),
     ],
-    pigs: [pigOn('medium', 21.5, 0), pigOn('medium', 24.5, 0), pigOnBlock('small', ridge)],
+    pigs: [pigOn('medium', c - 1.5, 0), pigOn('medium', c + 1.5, 0), pigIn('small', booth.spots[0])],
     hint: 'Коснитесь экрана над целью — Матильда сбросит яйцо',
     meta: { nMin: 2, difficulty: 5, teach: 'Matilda: яйцо сверху пробивает крышу, прямой выстрел упирается в скалу', starsSource: 'manual' },
-    decor: [dec('shell', 4), dec('bush', 9), dec('rock', 14.2, 0, 0.9), dec('grass', 19.3, 5, 0.6), dec('grass', 30, 0), dec('shell', 33, 0, 0.9, true)],
+    decor: [dec('shell', 4), dec('bush', 8), dec('rock', c - 8, 0, 0.9), dec('grass', c + 10, 0), dec('shell', c + 12, 0, 0.9, true)],
   });
 }
 
@@ -141,16 +151,31 @@ export function L2_3(): LevelDef {
   const bridge = B('wood', 'rect', 22.25, 4.25, 5, 0.5, 0, 'мост');
   const iceFrame = frame({ x: 22.25, y: 4.5, span: 3, h: 2, col: 'ice', beam: 'ice' });
   const iceCap = roof({ x: 22.25, y: iceFrame.top, w: 2, mat: 'ice' });
-  const house = hut({ x: 28, y: 4 });
-  const lookout = frame({ x: 31.5, y: 4, span: 2, h: 2, col: 'stone' });
-  const lookoutCap = roof({ x: 31.5, y: lookout.top, w: 2, mat: 'wood' });
+  // на дальнем утёсе — домик на каменных колоннах под деревянной крышей (верх 8 при огибающей 9.7)
+  const house = hut({ x: 28, y: 4, col: 'stone', beam: 'stone', roofMat: 'wood' });
+  const lookout = tower({ x: 31.5, y: 4, floors: 2, span: 2, mats: [{ col: 'stone', beam: 'wood' }, { col: 'wood', beam: 'ice' }], roof: 'wood' });
   return level({
     id: '2-3',
     name: 'Мост над пропастью',
     birds: ['red', 'chuck', 'matilda', 'blues'],
     terrain: [flatGround(), plateau(12, 20, 4, { slope: [6, 0] }), plateau(24.5, 33, 4, { slope: [0, 6] })],
-    parts: [palisade({ x: 18.25, y: 4, n: 3, kind: 'brick', mat: 'stone', vertical: true }), iceFrame, iceCap, house, lookout, lookoutCap],
-    blocks: [bridge, blockOn('ice', 'cube', 20.25, 4.5), blockOn('ice', 'cube', 24.25, 4.5), blockOn('stone', 'square', 25.25, 4)],
+    parts: [palisade({ x: 18.25, y: 4, n: 3, kind: 'brick', mat: 'stone', vertical: true }), iceFrame, iceCap, house, lookout],
+    blocks: [
+      bridge,
+      blockOn('ice', 'cube', 20.25, 4.5),
+      blockOn('ice', 'cube', 24.25, 4.5),
+      blockOn('stone', 'square', 25.25, 4),
+      // ящики на дне ущелья рядом с small: обломки моста ломают их вместе со свиньёй
+      blockOn('wood', 'square', 20.5, 0),
+      blockOn('ice', 'cube', 20.5, 1),
+      blockOn('wood', 'square', 24, 0),
+      // штабель груза перед мостом на ближнем утёсе
+      blockOn('wood', 'square', 14.5, 4),
+      blockOn('wood', 'square', 15.5, 4),
+      blockOn('wood', 'square', 16.5, 4),
+      blockOn('ice', 'square', 15, 5),
+      blockOn('ice', 'square', 16, 5),
+    ],
     pigs: [pigIn('medium', iceFrame.spots[0]), pigIn('medium', house.spots[0]), pigOn('small', 23, 0)],
     hint: 'Сломайте мост — свиньи упадут в пропасть',
     meta: { nMin: 3, difficulty: 5, teach: 'пропасть и мост: смерть от падения', starsSource: 'manual' },
@@ -181,7 +206,7 @@ export function L2_4(): LevelDef {
   // фланговые башенки замка: 2 каменных квадрата + деревянный квадрат + зубец-кубик
   const flank = (x: number) =>
     part({ blocks: [blockOn('stone', 'square', x, 0), blockOn('stone', 'square', x, 1), blockOn('wood', 'square', x, 2), blockOn('wood', 'cube', x, 3)] });
-  const house = hut({ x: 19 });
+  const house = hut({ x: 16.5 });
   return level({
     id: '2-4',
     name: 'Песчаный замок',
@@ -203,19 +228,24 @@ export function L2_4(): LevelDef {
  * Свиньи: 3 small, medium. Учит: Hal — удар с тыла.
  */
 export function L2_5(): LevelDef {
-  const wallS = stack({ x: 22, n: 6, kind: 'square', mat: 'stone' });
-  const buttress = stack({ x: 21, n: 3, kind: 'square', mat: 'stone' });
+  // стена — скала-останец 6 м (статичная: удар в неё не роняет её на постройки, бить можно только навесом или
+  // бумерангом Хэла); у подножия — осыпь из каменных квадратов
+  const rubble = part({
+    blocks: [blockOn('stone', 'square', 19.5, 0), blockOn('stone', 'square', 18.5, 0), blockOn('stone', 'square', 19.5, 1), blockOn('stone', 'square', 22.5, 0), blockOn('stone', 'cube', 22.25, 1)],
+  });
   // фасад к рогатке — каменные колонны, тыл — деревянные: фронтальный удар вязнет, удар Hal с тыла валит постройку
+  // назад (от соседа); между домиком и башней 2.5 м — один бумеранг обе постройки не берёт
   const stoneFront = (p: Part, xFront: number): Part => ({ ...p, blocks: p.blocks.map((b) => (b.x === xFront ? { ...b, material: 'stone' as const } : b)) });
   const house = stoneFront(hut({ x: 26 }), 24.25);
-  const keep = stoneFront(tower({ x: 30.5, floors: 2 }), 28.75);
+  const keep = stoneFront(tower({ x: 31.5, floors: 2 }), 29.75);
   return level({
     id: '2-5',
     name: 'Бумеранг',
     birds: ['hal', 'hal', 'red', 'bomb'],
-    parts: [buttress, wallS, house, keep],
+    terrain: [flatGround(), plateau(20, 22, 6, { kind: 'rock' })],
+    parts: [rubble, house, keep],
     pigs: [pigIn('medium', house.spots[0]), pigIn('small', keep.spots[0]), pigIn('small', keep.spots[1]), pigIn('small', keep.spots[2])],
-    hint: 'Коснитесь экрана в полёте — Хэл развернётся и ударит сзади',
+    hint: 'Перелетите постройки и коснитесь экрана у самой земли — Хэл развернётся и ударит сзади',
     meta: { nMin: 2, difficulty: 5, teach: 'Hal: бумеранг через стену, удар с тыла', starsSource: 'manual' },
     decor: [dec('shell', 4), dec('grass', 8), dec('rock', 13, 0, 0.8), dec('bush', 18), dec('shell', 34.5, 0, 0.9), dec('grass', 37), dec('rock', 41, 0, 1.1, true)],
   });
@@ -232,22 +262,34 @@ export function L2_5(): LevelDef {
  * Свиньи: 2 medium + helmet на настиле, small под ним. Учит: высокие сваи — слабое место.
  */
 export function L2_6(): LevelDef {
-  // крайние сваи — дерево (слабое место), средние под домиком — камень: рывок Chuck валит один пролёт, а не весь пирс
-  const pileMat = (x: number) => (x === 24 || x === 28 ? 'stone' : 'wood');
-  const piles = [20.25, 24, 28, 31.75].flatMap((x) => [blockOn(pileMat(x), 'column', x, 0), blockOn(pileMat(x), 'column', x, 2)]);
-  const deck = [22, 26, 30].map((x) => B('ice', 'rect', x, 4.25, 4, 0.5));
-  const house = hut({ x: 26, y: 4.5 });
-  const crates = [blockOn('wood', 'square', 20.5, 4.5), blockOn('ice', 'square', 31.5, 4.5)];
+  // три независимых пролёта (у каждого свои сваи, между настилами 0.5 м): крайние на деревянных сваях,
+  // средний под домиком — на каменных. Рывок Чака валит ближний пролёт, но вязнет в каменных сваях —
+  // дальний пролёт берётся навесом (Хэл, Ред), домик с каской — яйцом Матильды
+  const span = (x: number, pile: 'wood' | 'stone', deck: 'ice' | 'wood') =>
+    part({
+      blocks: [
+        ...[x - 1.75, x + 1.75].flatMap((px) => [blockOn(pile, 'column', px, 0), blockOn(pile, 'column', px, 2)]),
+        B(deck, 'rect', x, 4.25, 4, 0.5),
+      ],
+    });
+  const near = span(22, 'wood', 'ice');
+  // средний пролёт — на каменных быках из квадратов 1×1 (их рывок Чака не опрокидывает)
+  const mid = part({
+    blocks: [...[25, 28].flatMap((px) => [0, 1, 2, 3].map((k) => blockOn('stone', 'square', px, k))), B('wood', 'rect', 26.5, 4.25, 4, 0.5)],
+  });
+  const far = span(31, 'wood', 'ice');
+  const house = hut({ x: 26.5, y: 4.5 });
+  const crates = [blockOn('wood', 'square', 20.5, 4.5), blockOn('ice', 'cube', 20.5, 5.5), blockOn('ice', 'square', 32.5, 4.5), blockOn('wood', 'cube', 32.5, 5.5)];
   return level({
     id: '2-6',
     name: 'Пирс',
     birds: ['chuck', 'hal', 'matilda', 'red'],
-    parts: [part({ blocks: [...piles, ...deck] }), house],
+    parts: [near, mid, far, house],
     blocks: crates,
-    pigs: [pigOn('medium', 21.7, 4.5), pigIn('helmet', house.spots[0]), pigOn('medium', 30.3, 4.5), pigOn('small', 26, 0)],
+    pigs: [pigOn('medium', 22.3, 4.5), pigIn('helmet', house.spots[0]), pigOn('medium', 30.9, 4.5), pigOn('small', 26.5, 0)],
     hint: 'Выбейте сваю — настил рухнет вместе со свиньями',
     meta: { nMin: 3, difficulty: 6, teach: 'высокие сваи — слабое место, падение с настила', starsSource: 'manual' },
-    decor: [dec('shell', 3.5), dec('grass', 7), dec('sign', 17.5), dec('shell', 23, 0, 0.8), dec('rock', 29, 0, 0.7), dec('shell', 35, 0, 1, true), dec('rock', 38.5, 0, 1.2)],
+    decor: [dec('shell', 3.5), dec('grass', 7), dec('sign', 17.5), dec('shell', 24.2, 0, 0.8), dec('rock', 28.8, 0, 0.7), dec('shell', 35, 0, 1, true), dec('rock', 38.5, 0, 1.2)],
   });
 }
 

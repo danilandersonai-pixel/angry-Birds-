@@ -104,6 +104,8 @@ export interface BannerOpts {
 
 /** Если приложение не вызвало showHud/showLevels после закрытия шторки — открыть её сами через это время. */
 const IRIS_SAFETY_MS = 5000;
+/** Высота окна (CSS px), с которой включается компактная вёрстка панелей (data-low). */
+const LOW_H = 430;
 /** Сколько поражений подряд до совета на экране поражения (07 §13.2). */
 const TIP_AFTER_FAILS = 3;
 
@@ -113,7 +115,7 @@ export class UI {
   /**
    * Полоса 16:9 для меню, оверлеев и диалогов. В обычном режиме — весь экран; в «Играть так» (портрет)
    * верстается как 640×360 и масштабируется в полосу, а HUD, подсказки и тосты остаются в полный размер
-   * в тёмных полосах сверху и снизу (07 §15.1).
+   * в тонированных полосах сверху и снизу (07 §15.1); пауза, результаты и диалоги тогда — во всё окно (placeModalLayers).
    */
   private readonly band: HTMLElement;
   private readonly live: HTMLElement;
@@ -323,6 +325,8 @@ export class UI {
    */
   showHint(text: string, durationMs = 4000, opts: { bird?: BirdType } = {}): void {
     this.hideHint(true);
+    // под паузой/результатами подсказка не нужна (и слой подсказок выше оверлеев — она легла бы поверх панели)
+    if (this.overlay) return;
     const bird = opts.bird ?? this.level?.birds[0] ?? 'red';
     const box = h('div', { class: 'hint-box' }, characterCanvas('bird', bird, 'idle', 24), h('span', { text }));
     const el = h('div', { class: 'hint', role: 'note', 'data-testid': 'hint', 'data-bird': bird }, box);
@@ -855,7 +859,8 @@ export class UI {
     const big = at(s);
     const bigger = at(s * 1.1);
     const card = z.card;
-    card.style.visibility = 'hidden';
+    // прячем прозрачностью, а не visibility: карточка остаётся фокусируемой (Esc с уровней → фокус на её эпизоде)
+    card.style.opacity = '0';
     const frames: Keyframe[] =
       z.mode === 'in'
         ? [
@@ -877,7 +882,7 @@ export class UI {
     });
     void done(a).then(() => {
       clone.remove();
-      card.style.visibility = '';
+      card.style.opacity = '';
     });
     return true;
   }
@@ -1185,6 +1190,9 @@ export class UI {
       this.band.style.removeProperty('--u-menu');
       artScale.u = L.uMenu;
     }
+    // низкий экран (телефон в ландшафте): компактные панели результатов (styles.css). В летербоксе оверлеи —
+    // во всё окно (placeModalLayers), поэтому тоже по высоте окна
+    this.root.dataset.low = L.h <= LOW_H ? '1' : '0';
     this.overlay?.relayout?.();
     const rot = needsRotate(window.innerWidth, window.innerHeight, L.coarse);
     if (rot !== this.rotateOn) {
@@ -1200,12 +1208,29 @@ export class UI {
     if (lb !== this.root.hasAttribute('data-letterbox')) {
       if (lb) this.root.setAttribute('data-letterbox', '');
       else this.root.removeAttribute('data-letterbox');
+      this.placeModalLayers(lb);
       this.relayout();
       // приложению: перечитать ui.letterbox и ужать canvas так же (обработчик resize)
       window.setTimeout(() => window.dispatchEvent(new Event('resize')), 0);
     }
     if (!this.busy) this.pauseIfRotated();
     if (show) focusEl(this.L.rotate.querySelector<HTMLElement>('button'));
+  }
+
+  /**
+   * «Играть так» (летербокс): пауза, результаты и диалоги — во всё окно в полный размер. В полосе 16:9 шириной
+   * с телефон они уменьшены до ≈ 0.6: подписи мельче 9 px, кнопки меньше 44 px. Игра под ними стоит, так что
+   * закрыть тёмные полосы не страшно. Без летербокса слои возвращаются в полосу.
+   */
+  private placeModalLayers(lb: boolean): void {
+    const host = lb ? this.root : this.band;
+    const layers = [this.L.overlays, this.L.dialogs];
+    if (layers.every((l) => l.parentElement === host)) return;
+    const active = document.activeElement as HTMLElement | null;
+    const hadFocus = !!active && layers.some((l) => l.contains(active));
+    // в корне — перед тостами (порядок для читалок; наложение задают z-index слоёв), в полосе — в конец
+    for (const l of layers) host.insertBefore(l, lb ? this.L.toasts : null);
+    if (hadFocus) focusEl(active);
   }
 
   /** Игра под оверлеем «Поверните устройство» не идёт: открыть паузу (если ещё не открыт оверлей). */

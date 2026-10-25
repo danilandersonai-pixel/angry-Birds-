@@ -5,7 +5,7 @@
 import { characterCanvas } from '../art';
 import { CSS_EASE, Timeline, anim, done, motion, popIn } from '../anim';
 import type { OverlayView, UiCtx } from '../ctx';
-import { appendAll, button, fitInto, focusEl, h, ribbon } from '../dom';
+import { appendAll, button, fitInto, focusEl, h, ribbon, withStarIcons } from '../dom';
 import { confetti, starBoom } from '../fx';
 import { starSvg } from '../icons';
 import { S, STARS, TAUNTS, fmt, plural, t } from '../strings';
@@ -191,7 +191,7 @@ export class WinView implements OverlayView {
       h('div', { class: 'res-label', text: S.winScore }),
       this.scoreEl,
       h('div', { class: 'res-best-row' }, this.bestEl, this.badge),
-      ...(msg ? [h('div', { class: 'res-msg', text: msg })] : []),
+      ...(msg ? [withStarIcons(h('div', { class: 'res-msg', 'data-testid': 'results-msg' }), msg)] : []),
       h('div', { class: 'res-btns' }, ...this.btns),
     );
     // тап мимо кнопок — пропустить анимацию
