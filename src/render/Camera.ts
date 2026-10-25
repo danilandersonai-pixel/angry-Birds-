@@ -345,9 +345,28 @@ export class Camera {
   get groundRef(): number {
     return this.frame.groundRef;
   }
-  /** Нижняя граница кадра (под землёй видно не больше GROUND_MARGIN). */
+  /**
+   * Сколько метров под опорной землёй видно в кадре высоты h (полоса земли внизу). Базовая камера — всегда
+   * GROUND_MARGIN (00 §1.10); GameCamera переопределяет долей высоты кадра (земля как в AB2). Правило должно
+   * расти не быстрее h (верх кадра bottomFor(h) + h не убывает с ростом h).
+   */
+  groundMarginFor(_h: number): number {
+    return C.GROUND_MARGIN;
+  }
+
+  /** Низ кадра высоты h в автоматических видах (прижим к земле) и нижний предел пана/зума. */
+  bottomFor(h: number): number {
+    return this.frame.groundRef - this.groundMarginFor(h);
+  }
+
+  /** Наименьшая высота кадра, низ которого прижат к земле, а верх не ниже top, м. */
+  viewHForTop(top: number): number {
+    return top - this.frame.groundRef + C.GROUND_MARGIN;
+  }
+
+  /** Нижняя граница кадра при текущей высоте вида. */
   get bottomY(): number {
-    return this.frame.groundRef - C.GROUND_MARGIN;
+    return this.bottomFor(this.viewH);
   }
 
   /**
@@ -377,7 +396,7 @@ export class Camera {
   aimView(): CameraPose {
     const h = clamp(this.aimViewH, C.VIEW_H_MIN, C.VIEW_H_MAX);
     const x = this.userAimViewH === null ? this.autoAim().x : this.aimXFor(h);
-    return this.clampPose({ x, y: this.bottomY + h / 2, viewH: h });
+    return this.clampPose({ x, y: this.bottomFor(h) + h / 2, viewH: h });
   }
 
   /**
@@ -417,7 +436,7 @@ export class Camera {
     else {
       const xR = f.contentRight + C.AIM_RIGHT_PAD;
       const wNeed = (xR - f.slingX) / ((1 - C.SLING_SCREEN_X) * this.aspect);
-      const hNeed = f.contentTop + C.AIM_TOP_PAD - this.bottomY;
+      const hNeed = this.viewHForTop(f.contentTop + C.AIM_TOP_PAD);
       h = clamp(Math.max(wNeed, hNeed), C.AIM_VIEW_H_MIN, this.aimViewHMax);
       const fits = (hh: number): boolean => this.aimRightFor(hh) >= xR - 1e-6;
       if (!fits(h)) {
@@ -435,7 +454,7 @@ export class Camera {
         } else h = C.VIEW_H_MAX; // и так не влезает: максимум отдаления и жёсткий минимум слева
       }
     }
-    this.autoCache = { x: this.aimXFor(h), y: this.bottomY + h / 2, viewH: h };
+    this.autoCache = { x: this.aimXFor(h), y: this.bottomFor(h) + h / 2, viewH: h };
     return this.autoCache;
   }
 
@@ -444,9 +463,9 @@ export class Camera {
     const f = this.frame;
     const xL = Math.max(f.minX, Math.min(f.queueLeft, f.contentLeft) - 1);
     const xR = Math.min(f.maxX, f.contentRight + C.AIM_RIGHT_PAD);
-    const hFit = Math.max((xR - xL) / this.aspect, f.contentTop + C.AIM_TOP_PAD + 1 - this.bottomY);
+    const hFit = Math.max((xR - xL) / this.aspect, this.viewHForTop(f.contentTop + C.AIM_TOP_PAD + 1));
     const h = clamp(Math.max(hFit, this.autoAimViewH * C.OVERVIEW_MIN_K), C.VIEW_H_MIN, C.VIEW_H_MAX);
-    return this.clampPose({ x: (xL + xR) / 2, y: this.bottomY + h / 2, viewH: h });
+    return this.clampPose({ x: (xL + xR) / 2, y: this.bottomFor(h) + h / 2, viewH: h });
   }
 
   /** Вид сооружения для интро: level.camera.castle или центроид свиней при viewH = max(aimViewH, высота + 6). */
@@ -456,7 +475,7 @@ export class Camera {
     const structH = f.contentTop - f.groundRef;
     const h = clamp(Math.max(this.autoAimViewH, structH + C.CASTLE_EXTRA_H), C.VIEW_H_MIN, C.VIEW_H_MAX);
     const x = f.pigCentroid ? f.pigCentroid.x : (f.contentLeft + f.contentRight) / 2;
-    return this.clampPose({ x, y: this.bottomY + h / 2, viewH: h });
+    return this.clampPose({ x, y: this.bottomFor(h) + h / 2, viewH: h });
   }
 
   /** Длительность панорамы интро (01 §6.3): повтор короче, длинный уровень — дольше. */
@@ -471,7 +490,7 @@ export class Camera {
     return clamp(C.RETURN_BASE + dist * C.RETURN_PER_M, C.RETURN_MIN, C.RETURN_MAX);
   }
 
-  /** Ограничить позу: viewH ∈ [9, 30], x в bounds (если вид шире уровня — по центру), низ ≥ groundRef − 1.2, верх ≤ низ + 30. */
+  /** Ограничить позу: viewH ∈ [9, 30], x в bounds (если вид шире уровня — по центру), низ ≥ bottomFor(h), верх ≤ groundRef − 1.2 + 30. */
   clampPose(p: CameraPose): CameraPose {
     const h = clamp(Number.isFinite(p.viewH) ? p.viewH : C.AIM_VIEW_H_MIN, C.VIEW_H_MIN, C.VIEW_H_MAX);
     const f = this.frame;
@@ -479,9 +498,9 @@ export class Camera {
     let x = Number.isFinite(p.x) ? p.x : f.slingX;
     if (2 * halfW >= f.maxX - f.minX) x = (f.minX + f.maxX) / 2;
     else x = clamp(x, f.minX + halfW, f.maxX - halfW);
-    const b = this.bottomY;
-    const yMin = b + h / 2;
-    const yMax = Math.max(yMin, b + C.VIEW_H_MAX - h / 2);
+    const yMin = this.bottomFor(h) + h / 2;
+    // верх кадра — не выше groundRef − GROUND_MARGIN + VIEW_H_MAX (00 §1.10), при любом правиле полосы земли
+    const yMax = Math.max(yMin, f.groundRef - C.GROUND_MARGIN + C.VIEW_H_MAX - h / 2);
     const y = clamp(Number.isFinite(p.y) ? p.y : yMin, yMin, yMax);
     return { x, y, viewH: h };
   }
@@ -665,7 +684,7 @@ export class Camera {
     const d = clamp(Number.isFinite(dt) ? dt : 0, 0, 0.1);
     const kPos = 1 - Math.exp(-d / C.FOLLOW_TAU_POS);
     const bottom0 = this.y - this.viewH / 2;
-    const needH = target.y + C.HEADROOM - this.bottomY;
+    const needH = this.viewHForTop(target.y + C.HEADROOM);
     const th = clamp(Math.max(this.aimViewH, needH), C.VIEW_H_MIN, C.VIEW_H_MAX);
     this.viewH += (th - this.viewH) * (1 - Math.exp(-d / C.FOLLOW_TAU_ZOOM));
     const w = this.viewW;
@@ -679,7 +698,7 @@ export class Camera {
     // жёсткая страховка: птица не уходит за край кадра по горизонтали (5 % запаса)
     this.x = clamp(this.x, target.x - 0.45 * w, target.x + 0.45 * w);
     // низ кадра плавно к земле: без скачка, если в READY игрок зумил или панорамировал вверх
-    const bottom = bottom0 + (this.bottomY - bottom0) * kPos;
+    const bottom = bottom0 + (this.bottomFor(this.viewH) - bottom0) * kPos;
     this.y = bottom + this.viewH / 2;
     this.clampInPlace();
   }

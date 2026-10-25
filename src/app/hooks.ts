@@ -1,6 +1,7 @@
 // Тестовые хуки window.__game (есть всегда: они крошечные и ничего не стоят без вызова).
 // Используются e2e-смоуком (scripts/e2e.mjs) и для отладки из консоли.
 
+import { BIRDS, LAUNCH, WORLD } from '../config/constants';
 import type { App } from './App';
 import { hudLevel } from './GameScreen';
 
@@ -44,6 +45,10 @@ export interface GameHooks {
   anchor(): { x: number; y: number } | null;
   /** Птица в кармашке (или null). */
   loaded(): string | null;
+  /** Числа выстрела для подбора угла в e2e (чтобы скрипт не хранил свою копию V_MAX): скорость, оттяжка, g, множители птиц. */
+  launchSpec(): { vMax: number; rMax: number; g: number; scale: Record<string, number> };
+  /** За кем следит камера в полёте (птица, центроид Синих, яйцо Матильды) — мир, м; null вне полёта. */
+  focus(): { x: number; y: number; vx: number; vy: number } | null;
   /** Кармашек рогатки в CSS-пикселях окна (для жестов в e2e). */
   pocketScreen(): { x: number; y: number } | null;
   /** Мировая точка → CSS-пиксели окна. */
@@ -54,7 +59,21 @@ export interface GameHooks {
    * не влезли (м, ≤ 0 — влезли), упёрся ли вид в жёсткий потолок, сколько тел заходят под HUD справа сверху
    * (по настоящему прямоугольнику .hud-right), размер Реда в CSS px. Считает по aimView(), а не по текущей камере.
    */
-  framing(): { cutRight: number; cutTop: number; atCap: boolean; viewH: number; hudHits: number; redPx: number; slingFrac: number };
+  framing(): {
+    cutRight: number;
+    cutTop: number;
+    atCap: boolean;
+    viewH: number;
+    hudHits: number;
+    redPx: number;
+    slingFrac: number;
+    /** Плотность кадра: доля высоты под землёй (низ кадра → groundRef), доля неба над верхом контента, доля ширины от рогатки до правого края контента. */
+    groundFrac: number;
+    skyFrac: number;
+    spanFrac: number;
+    /** Габарит контента (мир, м). */
+    content: { left: number; right: number; top: number; ground: number };
+  };
   /** Видна ли кнопка «К рогатке». */
   homeVisible(): boolean;
 }
@@ -117,6 +136,16 @@ export function installHooks(app: App): void {
     },
     anchor: () => (g.level ? { ...g.level.slingshot } : null),
     loaded: () => g.session?.slingshot().loaded ?? null,
+    launchSpec: () => ({
+      vMax: LAUNCH.V_MAX,
+      rMax: LAUNCH.R_MAX,
+      g: Math.abs(WORLD.GRAVITY),
+      scale: Object.fromEntries(Object.entries(BIRDS).map(([k, v]) => [k, v.launchScale])),
+    }),
+    focus: () => {
+      const f = g.session?.state === 'flying' ? g.session.focusBird() : null;
+      return f ? { x: f.x, y: f.y, vx: f.vx, vy: f.vy } : null;
+    },
     pocketScreen: () => {
       const s = g.session;
       if (!s) return null;
@@ -147,9 +176,13 @@ export function installHooks(app: App): void {
         const hb = r.bottom - cr.top;
         for (const e of g.session.entities()) {
           if (e.kind !== 'block' && e.kind !== 'pig' && e.kind !== 'tnt') continue;
-          const ext = Math.max(e.w, e.h) / 2;
-          const sx = (e.x + ext - left) * ppm;
-          const sy = (top - (e.y + ext)) * ppm;
+          // габарит повёрнутого тела (у длинной балки max(w, h)/2 по вертикали завышал верх на полдлины)
+          const c = Math.abs(Math.cos(e.angle));
+          const s = Math.abs(Math.sin(e.angle));
+          const ex = e.shape === 'circle' ? e.radius : (e.w * c + e.h * s) / 2;
+          const ey = e.shape === 'circle' ? e.radius : (e.w * s + e.h * c) / 2;
+          const sx = (e.x + ex - left) * ppm;
+          const sy = (top - (e.y + ey)) * ppm;
           if (sx > hl && sy < hb) hudHits++;
         }
       }
@@ -161,6 +194,10 @@ export function installHooks(app: App): void {
         hudHits,
         redPx: 0.9 * ppm,
         slingFrac: (f.slingX - left) / w,
+        groundFrac: (f.groundRef - (a.y - a.viewH / 2)) / a.viewH,
+        skyFrac: (top - f.contentTop) / a.viewH,
+        spanFrac: (f.contentRight - f.slingX) / w,
+        content: { left: f.contentLeft, right: f.contentRight, top: f.contentTop, ground: f.groundRef },
       };
     },
     homeVisible: () => !!document.querySelector('.hud-home:not(.is-hidden)'),

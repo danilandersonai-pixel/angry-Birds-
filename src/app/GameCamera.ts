@@ -3,7 +3,11 @@
 // и верх сооружения под HUD (счёт, свиньи — справа сверху) не заходит. Ближе AIM_H_MIN кадр не подходит, дальше
 // жёсткого потолка (28 м на 16:9; на узких экранах — та же ширина кадра, до 30 м) не отходит; если и там не
 // влезает — кадр сдвигается вправо (слева остаётся место под полную оттяжку пальцем, очередь сжимается Renderer).
-// Слева в кадре — вся очередь птиц в сжатой раскладке Renderer (рогатка — до 30 % ширины).
+// Слева в кадре — вся очередь птиц: без сжатия, если она умещается в 25 % ширины (рогатка не левее 15 %), иначе
+// в сжатой раскладке Renderer (рогатка — до 30 % ширины).
+// Компактные уровни (V_MAX 21, контент ≤ 25 м): кадр плотный, как в AB2 — полоса земли внизу 12 % высоты кадра
+// (не меньше 1.2 м), рогатка у левого края ровно с местом под очередь. Если верх сооружения заходит под HUD,
+// сначала сужается полоса земли (кадр выше, масштаб тот же), и лишь потом кадр отдаляется.
 // Облёт начинается с вида сооружения (высота сооружения + 6 м, вся его ширина), затем отъезд к рогатке.
 // Следование за птицей: кадр заранее отдаляется под прогноз апогея (y + vy²/2g), отдаление быстрее приближения.
 // Общий план (Z, двойной тап) всегда охватывает от очереди до дальнего края сооружения.
@@ -26,12 +30,21 @@ export const GAME_CAM = {
   /** Запас между низом HUD и верхом сооружения под ним, CSS px; ради этого кадр отдаляется не больше чем в K раз. */
   HUD_PAD_PX: 8,
   HUD_OVER_K: 1.35,
-  /** Рогатка на экране: обычно 20 % ширины, ради очереди без сжатия — до 25 %, со сжатием — до 30 %. */
-  SLING_X: 0.2,
+  /**
+   * Рогатка на экране (компактные уровни, V_MAX 21): слева от неё — ровно очередь без сжатия (+ QUEUE_PAD), но не
+   * меньше 15 % ширины; ради очереди без сжатия — до 25 %, дальше очередь сжимается, рогатка — до 30 %.
+   * Было «всегда 20 %»: кадр шире на 5 % без пользы, персонажи мельче.
+   */
+  SLING_X: 0.15,
   SLING_X_NATURAL: 0.25,
   SLING_X_MAX: 0.3,
   /** Запас слева от последней птицы очереди, м. */
   QUEUE_PAD: 0.4,
+  /**
+   * Полоса земли внизу кадра — доля высоты кадра (как в AB2: земля ~12 %, а не 1.2 м при любом зуме), но не меньше
+   * CAMERA.GROUND_MARGIN. Действует во всех автоматических видах, в следовании и как нижний предел пана.
+   */
+  GROUND_FRAC: 0.12,
   /** Облёт: высота кадра = высота сооружения + это; по бокам сооружения — столько, м. */
   CASTLE_EXTRA_H: 6,
   CASTLE_SIDE_PAD: 2,
@@ -73,7 +86,9 @@ export class GameCamera extends Camera {
   private items: Item[] = [];
   /** Касание — крупнее HUD (UI: coarse ×1.15). Ставит GameScreen. */
   pointerCoarse = false;
-  private memo: { key: object; w: number; h: number; c: boolean; pose: CameraPose } | null = null;
+  private memo: { key: object; w: number; h: number; c: boolean; pose: CameraPose; k: number } | null = null;
+  /** Доля полосы земли, которую пробует подбор авто-вида (null — вне подбора: берётся из кэша авто-вида). */
+  private trialK: number | null = null;
 
   override setLevel(level: LevelDef): void {
     this.birds = level.birds;
@@ -112,6 +127,25 @@ export class GameCamera extends Camera {
     return hudBox(this.cssW, this.cssH, this.pointerCoarse === true);
   }
 
+  /**
+   * Доля полосы земли для уровня и окна: GROUND_FRAC, а если иначе верх сооружения заходит под HUD — меньше
+   * (сначала поднимаем кадр, и лишь потом отдаляем). Подбирает autoPose.
+   */
+  get groundK(): number {
+    return this.trialK ?? this.autoState().k;
+  }
+
+  /** Полоса земли внизу кадра высоты h: groundK · h, не меньше CAMERA.GROUND_MARGIN (растёт медленнее h). */
+  override groundMarginFor(h: number): number {
+    return Math.max(CAMERA.GROUND_MARGIN, this.groundK * h);
+  }
+
+  /** Наименьшая высота кадра с низом на bottomFor(h) и верхом не ниже top: h − max(1.2, k·h) ≥ top − земля. */
+  override viewHForTop(top: number): number {
+    const d = top - this.level.groundRef;
+    return Math.max(d + CAMERA.GROUND_MARGIN, d / (1 - this.groundK));
+  }
+
   override get autoAimViewH(): number {
     return this.autoPose().viewH;
   }
@@ -128,8 +162,10 @@ export class GameCamera extends Camera {
     if (f.castle) return this.clampPose({ ...f.castle });
     const structH = f.contentTop - f.groundRef;
     const wNeed = f.contentRight - f.contentLeft + 2 * G.CASTLE_SIDE_PAD;
-    const h = clamp(Math.max(structH + G.CASTLE_EXTRA_H, wNeed / this.aspect), CAMERA.VIEW_H_MIN, CAMERA.VIEW_H_MAX);
-    return this.clampPose({ x: (f.contentLeft + f.contentRight) / 2, y: this.bottomY + h / 2, viewH: h });
+    // над сооружением — столько же неба, сколько при низе кадра на земле − 1.2 м и высоте «сооружение + 6 м»
+    const hTop = this.viewHForTop(f.contentTop + G.CASTLE_EXTRA_H - CAMERA.GROUND_MARGIN);
+    const h = clamp(Math.max(structH + G.CASTLE_EXTRA_H, hTop, wNeed / this.aspect), CAMERA.VIEW_H_MIN, CAMERA.VIEW_H_MAX);
+    return this.clampPose({ x: (f.contentLeft + f.contentRight) / 2, y: this.bottomFor(h) + h / 2, viewH: h });
   }
 
   /**
@@ -141,12 +177,12 @@ export class GameCamera extends Camera {
     const aim = this.autoPose();
     const xL = Math.max(f.minX, Math.min(f.queueLeft, f.contentLeft) - G.OVERVIEW_PAD);
     const xR = Math.min(f.maxX, f.contentRight + G.OVERVIEW_PAD);
-    const hFit = Math.max((xR - xL) / this.aspect, f.contentTop + G.TOP_PAD + 1 - this.bottomY);
+    const hFit = Math.max((xR - xL) / this.aspect, this.viewHForTop(f.contentTop + G.TOP_PAD + 1));
     const h = clamp(Math.max(hFit, aim.viewH * G.OVERVIEW_MIN_K), CAMERA.VIEW_H_MIN, CAMERA.VIEW_H_MAX);
     const w = h * this.aspect;
     // по центру, но рогатка с местом под оттяжку — в кадре
     const x = Math.min((xL + xR) / 2, f.slingX - this.aimLeftRoom(h) + w / 2);
-    return this.clampPose({ x, y: this.bottomY + h / 2, viewH: h });
+    return this.clampPose({ x, y: this.bottomFor(h) + h / 2, viewH: h });
   }
 
   /** Z / двойной тап. Если игрок сам отдалил вид рогатки до общего плана — «назад» ведёт в авто-вид рогатки. */
@@ -167,9 +203,9 @@ export class GameCamera extends Camera {
 
   /** Зум с якорем по X; низ кадра, стоявший на земле, остаётся на земле. */
   override zoomAt(factor: number, cssX: number, cssY: number): void {
-    const pinned = Math.abs(this.y - this.viewH / 2 - this.bottomY) < G.GROUND_PIN;
+    const pinned = Math.abs(this.y - this.viewH / 2 - this.bottomFor(this.viewH)) < G.GROUND_PIN;
     super.zoomAt(factor, cssX, cssY);
-    if (pinned) this.y = this.bottomY + this.viewH / 2;
+    if (pinned) this.y = this.bottomFor(this.viewH) + this.viewH / 2;
   }
 
   /**
@@ -183,7 +219,7 @@ export class GameCamera extends Camera {
     const yLook = Math.max(target.y, apex + G.APEX_HEADROOM - CAMERA.HEADROOM);
     const h0 = this.viewH;
     super.follow({ x: target.x, y: yLook, vx: target.vx, vy }, dt);
-    const need = clamp(Math.max(this.aimViewH, yLook + CAMERA.HEADROOM - this.bottomY), CAMERA.VIEW_H_MIN, CAMERA.VIEW_H_MAX);
+    const need = clamp(Math.max(this.aimViewH, this.viewHForTop(yLook + CAMERA.HEADROOM)), CAMERA.VIEW_H_MIN, CAMERA.VIEW_H_MAX);
     if (need <= this.viewH + 1e-6) return;
     const d = clamp(Number.isFinite(dt) ? dt : 0, 0, 0.1);
     const fast = h0 + (need - h0) * (1 - Math.exp(-d / G.FOLLOW_TAU_OUT));
@@ -214,8 +250,8 @@ export class GameCamera extends Camera {
     const w = h * this.aspect;
     const natural = this.queueNeed(1);
     let room: number;
-    if (natural <= G.SLING_X * w) room = G.SLING_X * w;
-    else if (natural <= G.SLING_X_NATURAL * w) room = natural;
+    // очередь без сжатия (не меньше 15 % ширины), а если она длиннее 25 % — сжатая раскладка, рогатка до 30 %
+    if (natural <= G.SLING_X_NATURAL * w) room = Math.max(natural, G.SLING_X * w);
     else room = clamp(this.queueNeed(QUEUE_K_PLAN), G.SLING_X * w, G.SLING_X_MAX * w);
     // место под полную оттяжку пальцем (базовая камера)
     return Math.max(room, this.aimLeftRoom(h));
@@ -230,7 +266,7 @@ export class GameCamera extends Camera {
       const need = f.contentRight + G.RIGHT_PAD - f.slingX;
       if (w - room < need) room = Math.max(this.aimLeftRoom(h), w - need);
     }
-    return this.clampPose({ x: f.slingX - room + w / 2, y: this.bottomY + h / 2, viewH: h });
+    return this.clampPose({ x: f.slingX - room + w / 2, y: this.bottomFor(h) + h / 2, viewH: h });
   }
 
   /** Контент (правый край + 1 м, верх + 0.8 м) в кадре позы p. */
@@ -263,26 +299,71 @@ export class GameCamera extends Camera {
     return hi;
   }
 
-  /** Авто-вид рогатки (кэш до смены уровня, размера окна или типа указателя). */
+  /** Наибольшая доля земли в [0, hi], для которой ok (ok выполняется при меньших долях); null — не выполняется и при 0. */
+  private searchK(hi: number, ok: (k: number) => boolean): number | null {
+    if (ok(hi)) return hi;
+    if (!ok(0)) return null;
+    let lo = 0;
+    for (let i = 0; i < 30 && hi - lo > 1e-4; i++) {
+      const mid = (lo + hi) / 2;
+      if (ok(mid)) lo = mid;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  /** Авто-вид рогатки. */
   private autoPose(): CameraPose {
+    return this.autoState().pose;
+  }
+
+  /** Авто-вид рогатки и доля полосы земли (кэш до смены уровня, размера окна или типа указателя). */
+  private autoState(): { pose: CameraPose; k: number } {
     const f = this.level;
     const coarse = this.pointerCoarse === true;
     const m = this.memo;
-    if (m && m.key === f && m.w === this.cssW && m.h === this.cssH && m.c === coarse) return m.pose;
-    let pose: CameraPose;
-    if (f.aimViewH !== null) pose = this.poseFor(clamp(f.aimViewH, CAMERA.VIEW_H_MIN, CAMERA.VIEW_H_MAX), false);
-    else {
-      const cap = this.aimHardCap;
-      const lo = Math.min(G.AIM_H_MIN, cap);
-      // 1) обязательно: контент целиком (до жёсткого потолка); 2) по возможности — верх сооружения не под HUD
-      const h1 = this.search(lo, cap, (h) => this.fitsContent(this.poseFor(h, false)));
-      if (h1 === null) pose = this.poseFor(cap, true);
-      else {
-        const h2 = this.search(h1, Math.min(cap, h1 * G.HUD_OVER_K), (h) => this.clearOfHud(this.poseFor(h, false)));
-        pose = this.poseFor(h2 ?? h1, false);
-      }
+    if (m && m.key === f && m.w === this.cssW && m.h === this.cssH && m.c === coarse) return m;
+    let r: { pose: CameraPose; k: number };
+    try {
+      r = this.pickAuto();
+    } finally {
+      this.trialK = null;
     }
-    this.memo = { key: f, w: this.cssW, h: this.cssH, c: coarse, pose };
-    return pose;
+    this.memo = { key: f, w: this.cssW, h: this.cssH, c: coarse, ...r };
+    return r;
+  }
+
+  /**
+   * Подбор авто-вида: 1) обязательно — контент целиком (до жёсткого потолка), полоса земли GROUND_FRAC (если с ней
+   * верх не влезает — 1.2 м); 2) по возможности — верх сооружения не под HUD: сначала уже полоса земли (кадр выше,
+   * масштаб тот же), затем отдаление не больше HUD_OVER_K и снова столько земли, сколько позволяет HUD.
+   */
+  private pickAuto(): { pose: CameraPose; k: number } {
+    const f = this.level;
+    const at = (h: number, k: number, shift = false): CameraPose => {
+      this.trialK = k;
+      return this.poseFor(h, shift);
+    };
+    if (f.aimViewH !== null) {
+      const h = clamp(f.aimViewH, CAMERA.VIEW_H_MIN, CAMERA.VIEW_H_MAX);
+      return { pose: at(h, G.GROUND_FRAC), k: G.GROUND_FRAC };
+    }
+    const cap = this.aimHardCap;
+    const lo = Math.min(G.AIM_H_MIN, cap);
+    let k0: number = G.GROUND_FRAC;
+    let h1 = this.search(lo, cap, (h) => this.fitsContent(at(h, k0)));
+    if (h1 === null) {
+      k0 = 0;
+      h1 = this.search(lo, cap, (h) => this.fitsContent(at(h, k0)));
+    }
+    if (h1 === null) return { pose: at(cap, 0, true), k: 0 };
+    const hA = h1;
+    if (this.clearOfHud(at(hA, k0))) return { pose: at(hA, k0), k: k0 };
+    const k1 = this.searchK(k0, (k) => this.clearOfHud(at(hA, k)));
+    if (k1 !== null) return { pose: at(hA, k1), k: k1 };
+    const h2 = this.search(hA, Math.min(cap, hA * G.HUD_OVER_K), (h) => this.clearOfHud(at(h, 0)));
+    if (h2 === null) return { pose: at(hA, k0), k: k0 }; // HUD не обойти: оставляем кадр с землёй
+    const k2 = this.searchK(k0, (k) => this.clearOfHud(at(h2, k))) ?? 0;
+    return { pose: at(h2, k2), k: k2 };
   }
 }

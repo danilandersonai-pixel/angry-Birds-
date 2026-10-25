@@ -11,11 +11,15 @@
 //  • рестарт клавишей R в полёте: новая сессия, птица снова в рогатке;
 //  • загрузка каждого из 30 уровней по очереди (startLevel + skipIntro + кадр) без ошибок;
 //  • замер FPS на самом тяжёлом уровне (больше всего тел) с разрушением;
-//  • плейтест №1: подсказка уровня не во время облёта, а после него; вид рогатки не мельче ~20 CSS px на Реда (1-1);
+//  • плейтест №1: подсказка уровня не во время облёта, а после него; вид рогатки — Ред не мельче порога размера (1-1);
 //    автокачество в покое не падает.
 //  • плейтест №2: вид рогатки показывает весь контент (30 уровней × все размеры; тела не под HUD); на 1-1 вместо
-//    текста — рука обучения; после гибели последней свиньи нет «К рогатке», от неё до итогов ≤ 4.5 с с тапом
-//    (без тапа — по таймингам ядра); кадр рендера на первом взрыве ≤ 20 мс.
+//    текста — рука обучения; после гибели последней свиньи нет «К рогатке», баннер ≤ 1 с, от неё до итогов ≤ 4.5 с
+//    и с тапом, и без тапа (тайминги ядра Б3); кадр рендера на первом взрыве ≤ 20 мс.
+//  • компактные уровни (V_MAX 21): Ред в виде рогатки на всех 30 уровнях не мельче порога размера (RED_MIN),
+//    полоса земли внизу кадра 8…15 % высоты.
+//  • полёт на полной силе (30°/45°/60°): птица всё время в кадре (по горизонтали и под верхом кадра), навес долетает
+//    до дальней части уровня, камера возвращается в вид рогатки.
 // Скриншоты ключевых моментов — в --out (по умолчанию scratchpad/integ/e2e). Код возврата ≠ 0 при ошибках.
 
 import { createServer } from 'vite';
@@ -69,11 +73,12 @@ const BASE = `http://127.0.0.1:${server.httpServer.address().port}`;
 // без --autoplay-policy: звук заблокирован до первого жеста, как у игрока (00 §2 ревью, п. 3)
 const browser = await chromium.launch();
 
-/** Подобрать выстрел (угол°, сила) в точку без учёта препятствий — дискретная модель planck. */
+/** Подобрать выстрел (угол°, сила) в точку без учёта препятствий — дискретная модель planck; числа — из игры (launchSpec). */
 const SOLVE = `(tx, ty, lowFirst) => {
   const a0 = __game.anchor(); const bird = __game.loaded() || 'red';
-  const K = { red: 1, blues: 1, chuck: 1, bomb: 0.95, matilda: 0.97, hal: 1, terence: 0.88, silver: 1 }[bird] || 1;
-  const V = 24, R = 2, G = 15, h = 1 / 60;
+  const L = __game.launchSpec();
+  const K = L.scale[bird] || 1;
+  const V = L.vMax, R = L.rMax, G = L.g, h = 1 / 60;
   let best = null;
   for (let a = 3; a <= 75; a += 0.25) for (let p = 0.5; p <= 1.0001; p += 0.005) {
     const r = a * Math.PI / 180, dx = Math.cos(r), dy = Math.sin(r);
@@ -106,6 +111,13 @@ async function newPage(size, touch = false) {
 }
 
 const tag = (size) => `${size.w}x${size.h}${size.dpr !== 1 ? `@${size.dpr}` : ''}`;
+
+/**
+ * Минимальный размер Реда (диаметр, CSS px) в виде рогатки после компактизации уровней: цели 06/отчётов уровней —
+ * 40 px на 1600×900 и 22 px на телефоне 844×390; на 4:3 — 32 px; для прочих размеров — 20 px (как в плейтесте №1).
+ */
+const RED_MIN = { '1600x900': 40, '844x390@2': 22, '1280x960': 32 };
+const redMin = (size) => RED_MIN[tag(size)] ?? 20;
 
 async function tap(page, sel) {
   const loc = page.locator(sel).first();
@@ -180,7 +192,7 @@ async function flow(size, idx) {
     // 1-1 с чистым профилем: учит рука обучения — текстовой подсказки нет (плейтест №2, п. 9); текст — на 1-2
     check(!(await page.evaluate(() => !!document.querySelector('[data-testid="hint"]'))), '1-1: вместо текстовой подсказки — рука обучения');
     const red = await page.evaluate((h) => (0.9 * h) / __game.stats().aimViewH, size.h);
-    check(red >= 20, `вид рогатки: Ред ${red.toFixed(0)} CSS px (≥ 20)`);
+    check(red >= redMin(size), `вид рогатки: Ред ${red.toFixed(0)} CSS px (≥ ${redMin(size)})`);
     // прицел настоящим жестом: тянем влево-вниз (на третьем размере — вправо-вниз: выстрел назад, проверка поражения)
     const p = await page.evaluate('__game.pocketScreen()');
     await page.mouse.move(p.x, p.y);
@@ -371,8 +383,12 @@ async function framing(size) {
     const bad = [];
     const atCap = [];
     const hud = [];
-    let redMin = Infinity;
+    let redLo = Infinity;
+    let redLoId = '';
     let redSum = 0;
+    let gndLo = Infinity;
+    let gndHi = -Infinity;
+    let gndSum = 0;
     let n = 0;
     for (let ep = 1; ep <= 3; ep++) {
       for (let i = 1; i <= 10; i++) {
@@ -384,18 +400,28 @@ async function framing(size) {
         const cut = Math.max(f.cutRight, f.cutTop);
         if (cut > 0.05) (f.atCap ? atCap : bad).push(`${id} −${cut.toFixed(1)} м (h ${f.viewH.toFixed(1)})`);
         if (f.hudHits > 0 && !f.atCap) hud.push(`${id}: ${f.hudHits}`);
-        redMin = Math.min(redMin, f.redPx);
+        if (f.redPx < redLo) {
+          redLo = f.redPx;
+          redLoId = id;
+        }
         redSum += f.redPx;
+        gndLo = Math.min(gndLo, f.groundFrac);
+        gndHi = Math.max(gndHi, f.groundFrac);
+        gndSum += f.groundFrac;
         n++;
         if (!QUICK && (id === '1-1' || id === '2-5' || id === '3-10')) await page.screenshot({ path: `${OUT}/frame-${tag(size)}-${id}.png` });
       }
     }
-    check(bad.length === 0, `весь контент в кадре вида рогатки (${n} уровней)${bad.length ? `: ${bad.join(', ')}` : ''}`);
-    if (atCap.length) notes.push(`[${tag(size)}] не влезает и на жёстком потолке камеры (нужны уровни ближе, Б1): ${atCap.join(', ')}`);
+    // уровни компактные (Б1 закрыт): контент влезает на всех размерах, в том числе на 4:3, без упора в потолок
+    const cutAll = [...bad, ...atCap.map((c) => `${c} — на потолке`)];
+    check(cutAll.length === 0, `весь контент в кадре вида рогатки (${n} уровней)${cutAll.length ? `: ${cutAll.join(', ')}` : ''}`);
     // HUD: допускается, только если отдалять дальше нельзя (запас ×1.35 исчерпан) — тогда в заметки
     if (hud.length) notes.push(`[${tag(size)}] тела под HUD (запас отдаления исчерпан): ${hud.join(', ')}`);
-    check(hud.length <= 3, `верх сооружения не под HUD (исключений ${hud.length} ≤ 3)`);
-    notes.push(`[${tag(size)}] Ред в виде рогатки: мин ${redMin.toFixed(0)} px, среднее ${(redSum / n).toFixed(0)} px`);
+    check(hud.length <= 2, `верх сооружения не под HUD (исключений ${hud.length} ≤ 2)`);
+    check(redLo >= redMin(size), `Ред в виде рогатки не мельче ${redMin(size)} px на всех уровнях (мин ${redLo.toFixed(1)} px — ${redLoId})`);
+    // полоса земли внизу кадра — как в AB2: ~12 % (уже — только ради HUD), но не меньше 1.2 м
+    check(gndLo >= 0.04 && gndHi <= 0.13 && gndSum / n >= 0.1, `полоса земли внизу кадра ${(100 * gndLo).toFixed(0)}…${(100 * gndHi).toFixed(0)} %, в среднем ${((100 * gndSum) / n).toFixed(1)} % (≥ 10 %)`);
+    notes.push(`[${tag(size)}] Ред в виде рогатки: мин ${redLo.toFixed(1)} px (${redLoId}), среднее ${(redSum / n).toFixed(1)} px`);
   } catch (e) {
     check(false, `кадр ${tag(size)}: ${e.message}`);
   }
@@ -444,10 +470,7 @@ async function victory() {
       if ((await page.evaluate('__game.pigsLeft()')) !== 0) {
         await until(page, () => __game.pigsLeft() === 0 || __game.state() === 'lost', null, 15000).catch(() => null);
       }
-      if ((await page.evaluate('__game.pigsLeft()')) !== 0) {
-        notes.push(`финал победы (${withTap ? 'тап' : 'без тапа'}): не удалось победить 1-1 — пропуск`);
-        continue;
-      }
+      if (!check((await page.evaluate('__game.pigsLeft()')) === 0, `финал победы (${withTap ? 'тап' : 'без тапа'}): 1-1 выигран`)) continue;
       if (withTap) {
         await until(page, () => window.__vic.banner !== null, null, 8000).catch(() => null);
         await page.mouse.click(size.w * 0.5, size.h * 0.62);
@@ -459,17 +482,88 @@ async function victory() {
       if (!withTap) await page.screenshot({ path: `${OUT}/v-01-results.png` });
       check(!v.home, `${withTap ? 'с тапом' : 'без тапа'}: после последней свиньи нет кнопки «К рогатке»`);
       check(banner <= 1.0, `${withTap ? 'с тапом' : 'без тапа'}: баннер победы через ${banner.toFixed(2)} с (≤ 1.0)`);
-      if (withTap) check(total <= 4.5, `с тапом: от последней свиньи до итогов ${total.toFixed(2)} с (≤ 4.5)`);
-      else {
-        // без тапа финал задают тайминги ядра (VICTORY_MAX, CLEARED_BANNER — Б3): ≤ 4.5 с — цель, ≤ 6.5 с — страховка
-        check(total <= 6.5, `без тапа: от последней свиньи до итогов ${total.toFixed(2)} с (≤ 6.5; цель ≤ 4.5 — патч ядра Б3)`);
-        if (total > 4.5) notes.push(`финал победы без тапа ${total.toFixed(2)} с > 4.5 с — ждёт патча TIMING ядра (Б3)`);
-      }
+      // тайминги ядра Б3 (VICTORY_MAX 2.0, CLEARED_BANNER 0.4) уже в constants: и без тапа финал ≤ 4.5 с
+      check(total <= 4.5, `${withTap ? 'с тапом' : 'без тапа'}: от последней свиньи до итогов ${total.toFixed(2)} с (≤ 4.5)`);
+      notes.push(`финал победы 1-1 ${withTap ? 'с тапом' : 'без тапа'}: баннер ${banner.toFixed(2)} с, итоги ${total.toFixed(2)} с`);
     }
   } catch (e) {
     check(false, `финал победы: ${e.message}`);
   }
   check(errors.length === 0, `финал победы: ошибок консоли нет${errors.length ? `:\n    ${errors.join('\n    ')}` : ''}`);
+  await ctx.close();
+}
+
+/**
+ * Полёт на полной силе (компактные уровни, V_MAX 21): 1-1 (над башней путь свободен) под 30°/45°/60°, каждый раз
+ * с рестарта. Птица всё время в кадре — по горизонтали и под верхом кадра; навес (60°) долетает до дальней части
+ * уровня (за правый край контента), но не за границу уровня; после хода камера возвращается в вид рогатки.
+ */
+async function flight(size) {
+  const touch = size.dpr > 1 && size.w < 1000;
+  log(`\n▶ Полёт на полной силе: камера следит и возвращается (${tag(size)}${touch ? ', тач' : ''})`);
+  const { ctx, page, errors } = await newPage(size, touch);
+  try {
+    await page.goto(`${BASE}/index.html?mute=1&unlockAll=1&fresh=1&level=1-1&intro=0&seed=5`, { waitUntil: 'load' });
+    await until(page, () => window.__game && __game.screen() === 'game' && __game.phase() === 'play', null, 90000);
+    for (const ang of [30, 45, 60]) {
+      await page.evaluate('__game.restart()');
+      await page.evaluate('__game.skipIntro()');
+      check((await page.evaluate('__game.settle(10)')) === 'ready', `${ang}°: птица в рогатке`);
+      await page.waitForTimeout(300);
+      const aim0 = await page.evaluate('__game.camera()');
+      const fr = await page.evaluate('__game.framing()');
+      await page.evaluate(() => {
+        const aspect = innerWidth / innerHeight;
+        window.__fl = { n: 0, inX: 0, inTop: 0, maxX: -Infinity, jump: 0, stop: false, prev: null };
+        const tick = () => {
+          const r = window.__fl;
+          const c = { ...__game.camera(), t: performance.now() };
+          const f = __game.focus();
+          const w = c.viewH * aspect;
+          if (f) {
+            r.n++;
+            if (Math.abs(f.x - c.x) <= w / 2) r.inX++;
+            if (f.y <= c.y + c.viewH / 2) r.inTop++;
+            r.maxX = Math.max(r.maxX, f.x);
+          }
+          // рывок камеры: смещение центра (доля ширины) и зума (доля высоты) за 1/60 с — длинный кадр не считается рывком
+          if (r.prev) {
+            const k = 1000 / 60 / Math.max(1000 / 60, c.t - r.prev.t);
+            r.jump = Math.max(r.jump, (k * Math.abs(c.x - r.prev.x)) / w, (k * Math.abs(c.viewH - r.prev.viewH)) / c.viewH);
+          }
+          r.prev = c;
+          if (!r.stop) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      });
+      const ok = await page.evaluate(`__game.launch(${ang}, 1)`);
+      check(ok, `${ang}°: выстрел на полной силе`);
+      const end = await page.evaluate('__game.settle(25)');
+      await page.waitForTimeout(end === 'ready' ? 1600 : 200);
+      const r = await page.evaluate(() => {
+        window.__fl.stop = true;
+        const { n, inX, inTop, maxX, jump } = window.__fl;
+        return { n, inX, inTop, maxX, jump };
+      });
+      const aim1 = await page.evaluate('__game.camera()');
+      check(r.n > 30 && r.inX === r.n, `${ang}°: птица в кадре по горизонтали весь полёт (${r.inX}/${r.n} кадров)`);
+      check(r.inTop === r.n, `${ang}°: птица не уходит за верх кадра (${r.inTop}/${r.n})`);
+      check(r.jump < 0.06, `${ang}°: камера без рывков (макс. за кадр ${(100 * r.jump).toFixed(1)} % ширины/высоты < 6 %)`);
+      if (ang === 60) {
+        check(r.maxX >= fr.content.right, `60°: навес долетает до дальней части уровня (x ${r.maxX.toFixed(1)} ≥ правый край контента ${fr.content.right.toFixed(1)})`);
+        check(r.maxX <= fr.content.right + 12, `60°: навес не улетает далеко за уровень (x ${r.maxX.toFixed(1)} ≤ ${(fr.content.right + 12).toFixed(1)})`);
+      }
+      if (end === 'ready') {
+        const back = Math.abs(aim1.x - aim0.x) < 0.05 && Math.abs(aim1.viewH - aim0.viewH) < 0.05 && Math.abs(aim1.y - aim0.y) < 0.05;
+        check(back, `${ang}°: камера вернулась в вид рогатки (h ${aim0.viewH.toFixed(2)} → ${aim1.viewH.toFixed(2)})`);
+      }
+      notes.push(`[${tag(size)}] 1-1 ${ang}° полная сила: дальше всего x ${r.maxX.toFixed(1)} м, итог хода ${end}`);
+    }
+    if (!QUICK) await page.screenshot({ path: `${OUT}/fl-${tag(size)}.png` });
+  } catch (e) {
+    check(false, `полёт ${tag(size)}: ${e.message}`);
+  }
+  check(errors.length === 0, `полёт ${tag(size)}: ошибок консоли нет${errors.length ? `:\n    ${errors.join('\n    ')}` : ''}`);
   await ctx.close();
 }
 
@@ -522,6 +616,7 @@ try {
   }
   await robustness();
   for (const sz of SIZES) await framing(sz);
+  for (const sz of QUICK ? SIZES.slice(0, 1) : SIZES.slice(0, 2)) await flight(sz);
   await victory();
   for (const sz of QUICK ? SIZES.slice(0, 1) : SIZES.slice(0, 2)) await blast(sz);
 } finally {

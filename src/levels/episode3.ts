@@ -69,12 +69,12 @@ function sandwich(x: number, y: number, legs: 'square' | 'brick' = 'square'): Pa
 
 /**
  * Этаж каменного «донжона» (3-1, 3-8): бункер с кладкой стен из каменных квадратов 1×1 (стена 1 м толщиной, 2 м
- * высотой — два квадрата друг на друге), проём 2×2 под large, перекрытие — ледяная балка 4×0.5. Квадрат (HP 59.4)
+ * высотой — два квадрата друг на друге), проём 2×2 под large, перекрытие — балка 4×0.5 (лёд или камень). Квадрат (HP 59.4)
  * Теренс разбивает прямым ударом, а цельную плиту 1×2 (HP 119) — нет: кладка показывает, что камень ему по силам.
  * spots: [0] — внутри, [1] — на перекрытии.
  */
-function keepFloor(x: number, y: number): Part {
-  const shell = bunker({ x, y, inner: 2, h: 2, wallW: 1, mat: 'stone', roofMat: 'ice' });
+function keepFloor(x: number, y: number, roofMat: 'ice' | 'stone' = 'ice'): Part {
+  const shell = bunker({ x, y, inner: 2, h: 2, wallW: 1, mat: 'stone', roofMat });
   const walls = [x - 1.5, x + 1.5].flatMap((wx) => [blockOn('stone', 'square', wx, y), blockOn('stone', 'square', wx, y + 1)]);
   return { ...shell, blocks: [...walls, shell.blocks[shell.blocks.length - 1]] };
 }
@@ -121,8 +121,8 @@ export function L3_1(): LevelDef {
     ],
     pigs: [pigIn('large', f1.spots[0]), pigIn('large', f2.spots[0]), pigIn('small', booth.spots[0])],
     hint: 'Теренс тяжёлый: он проломит каменную кладку, а камень Реду не по зубам',
-    stars: { one: 0, two: 22_000, three: 35_000 },
-    meta: { nMin: 2, difficulty: 6, teach: 'Terence: масса 5 кг ломает камень, цели ближе (дальность ≈ 21.6 м)', starsSource: 'solver', calib: { expertBirds: 2, expertScore: 35294, solverSec: 4.2, evaluations: 249 } },
+    stars: { one: 0, two: 21_000, three: 33_000 },
+    meta: { nMin: 2, difficulty: 6, teach: 'Terence: масса 5 кг ломает камень, цели ближе (дальность ≈ 21.6 м)', starsSource: 'solver', calib: { expertBirds: 2, expertScore: 34255, solverSec: 3.3, evaluations: 248 } },
     decor: [dec('pine', 2.8), dec('snowman', 5.6), dec('pine', 7, 0, 0.8), dec('sign', 9.9, 0, 0.9), dec('rock', 20.6, 0, 0.6), dec('pine', 25.6, ledge, 0.8), dec('pine', 28, ledge, 1.2), dec('snowman', 30.5, ledge, 0.9, true)],
   });
 }
@@ -135,6 +135,8 @@ export function L3_1(): LevelDef {
  * зубцами. 1-й этаж башни на каменных колоннах: настильный залп Синих, прошедший сквозь левое крыло, башню целиком не
  * роняет. Лёд на льду скользит (μ 0.25): выбитая колонна — и этажи съезжают. Blues колют лёд ×2.6, Chuck — рывком.
  * Свиньи: medium и small в башне (1-й и 3-й этаж), small на 2-м этаже левого крыла, medium и small в правом крыле.
+ * Эксперт решает двумя птицами (как и до сжатия): Синие против льда очень сильны — настильный залп роняет левое крыло
+ * и башню. Крепче башня (каменные колонны 2-го этажа, деревянные балки) — хуже: тяжёлая башня, падая, сносит всё.
  * Учит: лёд хрупкий и скользкий, Blues против льда.
  */
 export function L3_2(): LevelDef {
@@ -159,9 +161,9 @@ export function L3_2(): LevelDef {
       pigIn('small', wingR.spots[1]),
     ],
     hint: 'Лёд скользкий и хрупкий: Синие колют его лучше всех',
-    stars: { one: 0, two: 32_000, three: 46_000 },
-    meta: { nMin: 3, difficulty: 6, teach: 'ледяные конструкции: хрупкость и скольжение (μ 0.25), Blues против льда', starsSource: 'solver', calib: { expertBirds: 2, expertScore: 65986, solverSec: 5.1, evaluations: 461 } },
-    decor: [dec('pine', 2.5), dec('rock', 5, 0, 0.7), dec('snowman', 6.8), dec('pine', 11.5, 0, 0.6), dec('pine', 26.5, 0, 1.1), dec('snowman', 29, 0, 0.9, true)],
+    stars: { one: 0, two: 32_000, three: 45_000 },
+    meta: { nMin: 3, difficulty: 6, teach: 'ледяные конструкции: хрупкость и скольжение (μ 0.25), Blues против льда', starsSource: 'solver', calib: { expertBirds: 2, expertScore: 64322, solverSec: 7.7, evaluations: 462 } },
+    decor: [dec('pine', 2.5), dec('rock', 5, 0, 0.7), dec('snowman', 6.8), dec('pine', 26.5, 0, 1.1), dec('snowman', 29, 0, 0.9, true)],
   });
 }
 
@@ -170,9 +172,11 @@ export function L3_2(): LevelDef {
  * Снежный склон hill(1, 6, 11, 17, 3.5): подъём от рогатки 35° и скат 11 → 17 (≈ 30°) к домикам.
  * Наверху два каменных шара — малый ⌀1 (x = 7.15) и большой ⌀2 у кромки (x = 9.08) — в общей колыбели из ледяных
  * кубиков (x = 6.35 / 7.95 / 10.21). Толчок в шар (или выбитый стопор) — шар скатывается, разгоняется и таранит
- * колонну у подножия; малый шар — «второй заход». Внизу ледяные постройки span 3: двухэтажный домик (x = 19) и домик
- * с деревянной крышей (x = 23); их балки сходятся над узким проулком (x = 21) — там прячется small.
- * Свиньи: medium на 1-м и small на 2-м этаже домика, medium в дальнем домике, small в проулке.
+ * колонну у подножия; малый шар — «второй заход». Внизу ледяные постройки span 3: домик с деревянной крышей у
+ * подножия (x = 18.75) и двухэтажный домик (x = 23) на скальной ступени 1 м; их балки сходятся над узким проулком
+ * (x = 20.75) — там прячется small. Шар сносит ближний домик и проулок, а ступень его останавливает: дальний домик —
+ * для второй птицы (с обоими домиками на земле шар один сносил всё — уровень решался одной птицей).
+ * Свиньи: medium в ближнем домике, small в проулке, medium на 1-м и small на 2-м этаже дальнего домика.
  * Учит: косвенная атака — вызвать лавину.
  */
 export function L3_3(): LevelDef {
@@ -187,20 +191,22 @@ export function L3_3(): LevelDef {
       blockOn('ice', 'cube', 10.21, 3.5, { id: 'стопор-у-кромки' }),
     ],
   });
-  const lodge = tower({ x: 19, floors: 2, span: 3, mats: [{ col: 'ice', beam: 'wood' }, 'ice'], roof: 'ice' });
-  const cabin = hut({ x: 23, span: 3, col: 'ice', beam: 'ice', roofMat: 'wood' });
+  // двухэтажный домик — на скальной ступени 1 м: шар, разрушив ближний домик, упирается в ступень
+  const step = 1;
+  const cabin = hut({ x: 18.75, span: 3, col: 'ice', beam: 'ice', roofMat: 'wood' });
+  const lodge = tower({ x: 23, y: step, floors: 2, span: 3, mats: [{ col: 'ice', beam: 'wood' }, 'ice'], roof: 'ice' });
   return level({
     id: '3-3',
     name: 'Лавина',
     birds: ['chuck', 'red', 'bomb', 'matilda'],
-    terrain: [flatGround(), slope],
+    terrain: [flatGround(), slope, plateau(21.25, 26, step, { slope: [0, 1.5] })],
     bounds: { maxX: 37 },
-    parts: [balls, lodge, cabin],
-    pigs: [pigIn('medium', lodge.spots[0]), pigIn('small', lodge.spots[1]), pigIn('medium', cabin.spots[0]), pigOn('small', 21, 0)],
+    parts: [balls, cabin, lodge],
+    pigs: [pigIn('medium', cabin.spots[0]), pigOn('small', 20.75, 0), pigIn('medium', lodge.spots[0]), pigIn('small', lodge.spots[1])],
     hint: 'Столкните каменные шары со склона',
-    stars: { one: 0, two: 34_000, three: 47_000 },
-    meta: { nMin: 2, difficulty: 7, teach: 'лавина: шары со склона — косвенное убийство', starsSource: 'solver', calib: { expertBirds: 2, expertScore: 47902, solverSec: 2.6, evaluations: 382 } },
-    decor: [dec('snowman', -4.5, 0, 0.8), dec('pine', 3.4, 3.5 * (2.4 / 5), 0.7), dec('pine', 13, 3.5 * (4 / 6), 0.8), dec('rock', 15.6, 3.5 * (1.4 / 6), 0.6), dec('pine', 26.2, 0, 0.9), dec('rock', 28.4, 0, 1.1, true)],
+    stars: { one: 0, two: 34_000, three: 45_000 },
+    meta: { nMin: 2, difficulty: 7, teach: 'лавина: шары со склона — косвенное убийство', starsSource: 'solver', calib: { expertBirds: 2, expertScore: 48757, solverSec: 4.0, evaluations: 404 } },
+    decor: [dec('pine', 3.4, 3.5 * (2.4 / 5), 0.7), dec('pine', 13, 3.5 * (4 / 6), 0.8), dec('rock', 15.6, 3.5 * (1.4 / 6), 0.6), dec('pine', 26.9, 0, 0.9), dec('rock', 28.6, 0, 1.1, true)],
   });
 }
 
@@ -210,7 +216,7 @@ export function L3_3(): LevelDef {
  * Вход слева высотой 4 на x = 12.5 закрыт баррикадой: стопка 2 деревянных квадратов 1×1 (x = 13) + каменная колонна
  * 0.5×2 перед ней. Внутри деревянная рама span 3 (x = 15.75: medium внутри, small на балке между деревянными
  * кубиками), узкая рама span 2 (x = 19.8: small) и деревянные ящики в проходе и у задней стены.
- * На потолке ледяной домик span 3 (x = 14.25, small), ледяная вышка в 2 этажа (x = 17.75) и каменный тур (x = 20.25).
+ * На потолке ледяная вышка в 2 этажа над входом (x = 13.5), ледяной домик span 3 (x = 17, small) и каменный тур (x = 20.25).
  * Внутрь попадают только настильные выстрелы ≈ 10–20°: навес упирается в скалу; домик наверху — цель навеса.
  * Пещера ближе, чем в 06 §10 (вход 12.5 вместо 24): Terence с дальностью 21.6 м достаёт до задней стены.
  * Свиньи: medium + 2 small в пещере, small в домике наверху. Учит: настильный выстрел и мощь (Chuck, Terence).
@@ -233,8 +239,9 @@ export function L3_4(): LevelDef {
   const post = blockOn('stone', 'column', 12.25, 0, { id: 'каменная-стойка' });
   const shed = frame({ x: 15.75, span: 3, h: 2 });
   const nook = frame({ x: 19.8, span: 2, h: 2 });
-  const lodge = hut({ x: 14.25, y: 5, span: 3, col: 'ice', beam: 'ice', roofMat: 'ice' });
-  const watch = tower({ x: 17.75, y: 5, floors: 2, span: 2, mats: 'ice' });
+  // высокая вышка — слева (над входом), домик — правее: справа сверху HUD, высокое там не ставим
+  const lodge = hut({ x: 17, y: 5, span: 3, col: 'ice', beam: 'ice', roofMat: 'ice' });
+  const watch = tower({ x: 13.5, y: 5, floors: 2, span: 2, mats: 'ice' });
   const cairn = pyramid({ x: 20.25, y: 5, rows: 2, mat: 'stone' });
   // ящики в пещере (в проходе между рамами и у задней стены) и зубцы на балке рамы
   const crates = [
@@ -246,7 +253,7 @@ export function L3_4(): LevelDef {
     blockOn('wood', 'cube', 14.75, shed.top),
     blockOn('wood', 'cube', 16.75, shed.top),
   ];
-  const watchTop = [blockOn('ice', 'cube', 17, watch.top), blockOn('ice', 'cube', 18.5, watch.top), blockOn('ice', 'brick', 17.75, watch.top)];
+  const watchTop = [blockOn('ice', 'cube', 12.75, watch.top), blockOn('ice', 'cube', 14.25, watch.top), blockOn('ice', 'brick', 13.5, watch.top)];
   return level({
     id: '3-4',
     name: 'Пещера',
@@ -258,7 +265,7 @@ export function L3_4(): LevelDef {
     pigs: [pigIn('medium', shed.spots[0]), pigIn('small', shed.spots[1]), pigIn('small', nook.spots[0]), pigIn('small', lodge.spots[0])],
     hint: 'Стреляйте полого — навесом в пещеру не попасть',
     stars: { one: 0, two: 27_000, three: 40_000 },
-    meta: { nMin: 3, difficulty: 7, teach: 'пещера под скальным потолком: только настильные выстрелы и мощь', starsSource: 'solver', calib: { expertBirds: 3, expertScore: 48688, solverSec: 5.3, evaluations: 658 } },
+    meta: { nMin: 3, difficulty: 7, teach: 'пещера под скальным потолком: только настильные выстрелы и мощь', starsSource: 'solver', calib: { expertBirds: 3, expertScore: 48019, solverSec: 8.9, evaluations: 673 } },
     decor: [dec('pine', 2.5), dec('rock', 5, 0, 0.8), dec('snowman', 7.5), dec('pine', 9.8, 0, 0.9), dec('rock', 21.3, 5.15, 0.5), dec('pine', 25.5, 4.6, 0.7), dec('pine', 31, 0, 1.1, true)],
   });
 }
@@ -315,8 +322,8 @@ export function L3_5(): LevelDef {
       pigIn('medium', vault.spots[0]),
       pigIn('small', vault.spots[1]),
     ],
-    stars: { one: 0, two: 36_000, three: 49_000 },
-    meta: { nMin: 4, difficulty: 7, teach: 'три яруса целей: порядок ближняя → дальняя, досягаемость птиц', starsSource: 'solver', calib: { expertBirds: 4, expertScore: 56852, solverSec: 21.5, evaluations: 1269 } },
+    stars: { one: 0, two: 36_000, three: 48_000 },
+    meta: { nMin: 4, difficulty: 7, teach: 'три яруса целей: порядок ближняя → дальняя, досягаемость птиц', starsSource: 'solver', calib: { expertBirds: 4, expertScore: 56461, solverSec: 32.7, evaluations: 1456 } },
     decor: [dec('pine', 2.5), dec('snowman', 5.5), dec('pine', 9.7, 0.52, 0.7), dec('rock', 26.1, 1.68, 0.6), dec('pine', 29.5, 0, 1.1, true)],
   });
 }
@@ -327,7 +334,8 @@ export function L3_5(): LevelDef {
  * A на земле (x = 12.5, опоры 1×1), B и C — на ледяной полке (longBeam 5×0.5 на деревянных сваях 4 м, x = 18),
  * опоры у них — бруски 0.5×1; на доске C — medium. Пике Silver пробивает доску (×3.0 по камню) и давит small;
  * пике в щель между B и C (или Red в сваю) ломает полку — оба сэндвича и medium падают с 4.5 м.
- * Позади ледяная горка в 3 ряда, впереди веха (каменный квадрат с ледяным кубиком).
+ * Между A и полкой — валун 0.8 м: Silver после пике в A скользит по земле и без него выбивал сваю (уровень решался
+ * одной птицей). Позади ледяная горка в 3 ряда, впереди веха (каменный квадрат с ледяным кубиком).
  * Тап для пике — позже, чем кажется: петля длится 0.57 с, и при раннем тапе Silver ныряет до цели.
  * Свиньи: 3 small под досками, medium на доске C. Учит: петля и пике Silver ломают камень сверху.
  */
@@ -352,25 +360,29 @@ export function L3_6(): LevelDef {
     id: '3-6',
     name: 'Серебряная петля',
     birds: ['silver', 'silver', 'red'],
+    // валун между A и сваей полки: пике в A (Silver скользит дальше по земле) не выбивает сваю — иначе одна птица
+    terrain: [flatGround(), plateau(14.5, 14.9, 0.8, { slope: 0.3 })],
     bounds: { maxX: 37 },
     parts: [a, piles, b, c, drift],
     blocks: marks,
     pigs: [pigIn('small', a.spots[0]), pigIn('small', b.spots[0]), pigIn('small', c.spots[0]), pigOnBlock('medium', lidC, 0, { fragile: true })],
     hint: 'Коснитесь экрана над целью — Сильвер сделает петлю и ударит сверху',
-    stars: { one: 0, two: 25_000, three: 36_000 },
-    meta: { nMin: 2, difficulty: 7, teach: 'Silver: петля и пике пробивают каменную доску сверху', starsSource: 'solver', calib: { expertBirds: 2, expertScore: 36980, solverSec: 12.4, evaluations: 954 } },
-    decor: [dec('pine', 2.8), dec('snowman', 5.5), dec('rock', 7.2, 0, 0.7), dec('pine', 14.4, 0, 0.6), dec('pine', 26.5, 0, 1.1), dec('snowman', 29, 0, 0.8, true)],
+    stars: { one: 0, two: 25_000, three: 37_000 },
+    meta: { nMin: 2, difficulty: 7, teach: 'Silver: петля и пике пробивают каменную доску сверху', starsSource: 'solver', calib: { expertBirds: 2, expertScore: 38798, solverSec: 16.1, evaluations: 955 } },
+    decor: [dec('pine', 2.8), dec('snowman', 5.5), dec('rock', 7.2, 0, 0.7), dec('pine', 26.5, 0, 1.1), dec('snowman', 29, 0, 0.8, true)],
   });
 }
 
 /**
  * 3-7 «Крепость на утёсе» · d 8 · N 5 (nMin 4)
  * Рогатка на снежном холме: основание y = 3, ANCHOR (0, 5.7), площадка −10…+1.5, откос 34°. Огибающая поднята на 3 м.
- * Утёс plateau(16, 25.5, 3) с отвесной стеной к рогатке. На нём крепость: две башни span 3 в 2 этажа (x = 18 и 23;
+ * Утёс plateau(15, 25.5, 3) с отвесной стеной к рогатке. На нём крепость: две башни span 3 в 2 этажа (x = 18 и 23;
  * 1-й этаж — каменные колонны и деревянная балка, 2-й — деревянные колонны и деревянная балка, верх 8), между крышами
  * ледяной мост longBeam 5×0.5 (x = 20.5, опирание по 2 м) с medium, по краям каменные зубцы. Под утёсом на земле
- * деревянный домик (x = 13) с small, ледяной сарайчик с зубцами (x = 9.25) и штабель ящиков у подножия (x = 15.5).
- * Верх башен лёгкий (дерево): с каменными балками 2-го этажа один выстрел Реда обрушал всю крепость.
+ * деревянный домик (x = 11.75) с small, ледяной сарайчик с зубцами (x = 7.25) и штабель ящиков у подножия (x = 14.25).
+ * Кромка утёса в 1.75 м от левой башни: опрокинутая башня падает на утёс, а не на домик (с кромкой у самой башни
+ * один выстрел Реда валил её на домик — 4 свиньи из 5). Верх башен лёгкий (дерево): с каменными балками 2-го этажа
+ * один выстрел Реда обрушал всю крепость.
  * Слабые места: деревянные колонны 2-го этажа (Chuck) и ледяной мост; каски в каменных этажах — для пике, яйца, Бомба.
  * Свиньи: 2 helmet на 1-х этажах, small на 2-м этаже левой башни, medium на мосту, small в домике.
  * Учит: высота рогатки меняет углы — с холма птица летит дальше и выше.
@@ -382,21 +394,21 @@ export function L3_7(): LevelDef {
   const towerR = tower({ x: 23, y: cliffTop, floors: 2, span: 3, mats });
   const bridge = blockOn('ice', 'longBeam', 20.5, towerL.top, { id: 'ледяной-мост' });
   const merlons = [blockOn('stone', 'cube', 16.25, towerL.top), blockOn('stone', 'cube', 24.75, towerR.top)];
-  const house = hut({ x: 13 });
-  const shed = frame({ x: 9.25, span: 2, h: 2, col: 'ice', beam: 'ice' });
+  const house = hut({ x: 11.75 });
+  const shed = frame({ x: 7.25, span: 2, h: 2, col: 'ice', beam: 'ice' });
   const props = [
-    blockOn('ice', 'cube', 8.5, shed.top),
-    blockOn('ice', 'cube', 10, shed.top),
-    blockOn('wood', 'square', 15.5, 0),
-    blockOn('wood', 'square', 15.5, 1),
-    blockOn('ice', 'cube', 15.5, 2),
+    blockOn('ice', 'cube', 6.5, shed.top),
+    blockOn('ice', 'cube', 8, shed.top),
+    blockOn('wood', 'square', 14.25, 0),
+    blockOn('wood', 'square', 14.25, 1),
+    blockOn('ice', 'cube', 14.25, 2),
   ];
   return level({
     id: '3-7',
     name: 'Крепость на утёсе',
     birds: ['red', 'chuck', 'matilda', 'silver', 'bomb'],
     slingshot: slingshotOn(0, 3),
-    terrain: [flatGround(), slingHill(3, { slope: 4.5 }), plateau(16, 25.5, cliffTop, { slope: [0, 5] })],
+    terrain: [flatGround(), slingHill(3, { slope: 4.5 }), plateau(15, 25.5, cliffTop, { slope: [0, 5] })],
     bounds: { maxX: 37 },
     parts: [shed, house, towerL, towerR],
     blocks: [bridge, ...merlons, ...props],
@@ -409,8 +421,8 @@ export function L3_7(): LevelDef {
     ],
     hint: 'С холма птица летит дальше — целься ниже обычного',
     stars: { one: 0, two: 31_000, three: 44_000 },
-    meta: { nMin: 4, difficulty: 8, teach: 'рогатка на холме: другие углы, крепость на утёсе', starsSource: 'solver', calib: { expertBirds: 4, expertScore: 51879, solverSec: 31.6, evaluations: 1559 } },
-    decor: [dec('pine', -6, 3), dec('snowman', -9, 3, 0.8), dec('pine', 6.6, 0, 0.9), dec('rock', 11, 0, 0.6), dec('pine', 27.5, 3 * (1 - 2 / 5), 0.8), dec('pine', 31.5, 0, 1.2, true)],
+    meta: { nMin: 4, difficulty: 8, teach: 'рогатка на холме: другие углы, крепость на утёсе', starsSource: 'solver', calib: { expertBirds: 4, expertScore: 49216, solverSec: 44.3, evaluations: 1575 } },
+    decor: [dec('pine', -6, 3), dec('snowman', -9, 3, 0.8), dec('rock', 9.4, 0, 0.6), dec('rock', 15.45, cliffTop, 0.5), dec('pine', 27.5, 3 * (1 - 2 / 5), 0.8), dec('pine', 31.5, 0, 1.2, true)],
   });
 }
 
@@ -419,9 +431,10 @@ export function L3_7(): LevelDef {
  * Утёсы plateau(7.5, 13.5, 4) и plateau(21, 26, 4), пропасть 7.5 м (дно y = 0, падение 4 м убивает small и medium).
  * Мост — 2 ледяные балки 4×0.5 (13.25–21.25, на утёсы по 0.25), стык на ледяной свае 0.5×4 (две колонны) x = 17.25.
  * На мосту ледяной домик span 2 (x = 14.5) с small, 2 medium и каменный шар ⌀1 в колыбели между ними.
- * На левом утёсе — каменный бункер с кладкой стен из квадратов (как донжон 3-1, x = 11) под ледяным щипцом с large:
- * его берёт только Terence — Синим, Хэлу и Чаку камень не по силам; перед ним ледяной столбик с кубиками.
- * На правом утёсе ледяная сторожка в 2 этажа (x = 22.5) с small и кубики у обрыва.
+ * На левом утёсе — каменный бункер с кладкой стен из квадратов (как донжон 3-1, x = 11) под каменной балкой и ледяным
+ * щипцом с large: его берёт только Terence — Синим, Хэлу и Чаку камень не по силам (с ледяной балкой Хэл проламывал
+ * крышу сверху); перед ним ледяной столбик с кубиками. На правом утёсе ледяная сторожка в 2 этажа с зубцами (x = 22.5)
+ * с small и кубики у обрыва.
  * Слабые места: ледяная свая (Chuck, Hal снизу) и шар (толчок — катится по мосту).
  * Свиньи: 2 medium на мосту, small в домике, small в сторожке, large в бункере.
  * Учит: обрушить мост вместо пробивания каждой свиньи; Terence — на каменный бункер.
@@ -432,13 +445,15 @@ export function L3_8(): LevelDef {
   const deck = [15.25, 19.25].map((x, i) => blockOn('ice', 'beam', x, cliffTop, { id: `мост-${i + 1}` }));
   const booth = hut({ x: 14.5, y: cliffTop + 0.5, span: 2, col: 'ice', beam: 'ice', roofMat: 'ice' });
   const ball = cradleOn(18.4, cliffTop + 0.5);
-  const vault = keepFloor(11, cliffTop);
+  const vault = keepFloor(11, cliffTop, 'stone');
   const vaultRoof = roof({ x: 11, y: vault.top, w: 4, mat: 'ice' });
-  const lookout = tower({ x: 22.5, y: cliffTop, floors: 2, span: 2, mats: 'ice', roof: { mat: 'ice', w: 2 } });
+  const lookout = tower({ x: 22.5, y: cliffTop, floors: 2, span: 2, mats: 'ice' });
   const props = [
     blockOn('ice', 'square', 8, cliffTop),
     blockOn('ice', 'cube', 7.75, cliffTop + 1),
     blockOn('ice', 'cube', 8.25, cliffTop + 1),
+    blockOn('ice', 'cube', 21.75, lookout.top),
+    blockOn('ice', 'cube', 23.25, lookout.top),
     blockOn('ice', 'cube', 21, cliffTop + 0.5, { id: 'упор-у-края-моста' }),
     blockOn('ice', 'cube', 24.25, cliffTop),
     blockOn('ice', 'cube', 24.25, cliffTop + 0.5),
@@ -453,9 +468,9 @@ export function L3_8(): LevelDef {
     blocks: props,
     pigs: [pigIn('large', vault.spots[0]), pigIn('small', booth.spots[0]), pigOn('medium', 16.3, cliffTop + 0.5), pigOn('medium', 20.1, cliffTop + 0.5), pigIn('small', lookout.spots[0])],
     hint: 'Сломайте сваю — мост рухнет в пропасть',
-    stars: { one: 0, two: 32_000, three: 45_000 },
-    meta: { nMin: 4, difficulty: 8, teach: 'ледяной мост над пропастью: обрушение вместо точечных попаданий', starsSource: 'solver', calib: { expertBirds: 4, expertScore: 52006, solverSec: 22.7, evaluations: 1204 } },
-    decor: [dec('pine', 1.2), dec('snowman', 3.4, 4 * (0.9 / 5), 0.8), dec('pine', 5.6, 4 * (3.1 / 5), 0.7), dec('rock', 17.25 - 2, 0, 0.9), dec('pine', 25.4, cliffTop, 0.7), dec('pine', 30, 0, 1.1, true)],
+    stars: { one: 0, two: 31_000, three: 44_000 },
+    meta: { nMin: 4, difficulty: 8, teach: 'ледяной мост над пропастью: обрушение вместо точечных попаданий', starsSource: 'solver', calib: { expertBirds: 4, expertScore: 51513, solverSec: 26.4, evaluations: 1395 } },
+    decor: [dec('snowman', 3.4, cliffTop * (1.9 / 6), 0.8), dec('pine', 5.6, cliffTop * (4.1 / 6), 0.7), dec('rock', 17.25 - 2, 0, 0.9), dec('pine', 25.4, cliffTop, 0.7), dec('pine', 30, 0, 1.1, true)],
   });
 }
 
@@ -471,6 +486,7 @@ export function L3_8(): LevelDef {
  * - C: каменный бункер span 3.5 (x = 23) — TNT у правой стены и medium; на крыше деревянная рама под скатной крышей с
  *   каской (свой TNT её только задевает: нужен отдельный удар или Бомб рядом).
  * Отступление от 06 §10: вместо компактной крепости (там любой взрыв уносил почти всех) — разнесённые части; TNT 4.
+ * Эксперт решает тремя птицами (как и до сжатия): Бомб, взорвавшись между B и C, берёт обе части.
  * Свиньи: 2 helmet, 2 medium, 3 small. Учит: управляемая цепочка TNT — какой ящик и когда поджечь.
  */
 export function L3_9(): LevelDef {
@@ -523,8 +539,8 @@ export function L3_9(): LevelDef {
       pigIn('helmet', frameC.spots[0]),
     ],
     hint: 'У каждой части склада свой ящик: подожгите их по очереди',
-    stars: { one: 0, two: 43_000, three: 56_000 },
-    meta: { nMin: 4, difficulty: 9, teach: 'управляемая цепочка TNT: у каждой части склада свой ящик и своя птица', starsSource: 'solver', calib: { expertBirds: 3, expertScore: 76914, solverSec: 9.5, evaluations: 952 } },
+    stars: { one: 0, two: 42_000, three: 55_000 },
+    meta: { nMin: 4, difficulty: 9, teach: 'управляемая цепочка TNT: у каждой части склада свой ящик и своя птица', starsSource: 'solver', calib: { expertBirds: 3, expertScore: 77350, solverSec: 18.3, evaluations: 1215 } },
     decor: [dec('pine', 2.2), dec('snowman', 4.6), dec('sign', 6.2), dec('pine', 26.8, 0, 0.8), dec('pine', 29.5, 0, 1.1), dec('snowman', 32, 0, 0.9, true)],
   });
 }
@@ -543,6 +559,7 @@ export function L3_9(): LevelDef {
  * Отступления от 06 §10: без каменных плит-короны над залой (с ними короля не брал никто, кроме случайного падения),
  * камеры 1-го яруса с толстыми стенами (с тонкими колоннами взрыв ящика обрушал всю цитадель), без плато под
  * цитаделью (под V 21 зала ниже — над ней пролетает Матильда).
+ * Эксперт — 5 птиц из 8 (как и до сжатия; nMin 6 — для игрока).
  * Свиньи: king, mustache, 2 helmet, 2 medium, 2 small. Учит: финал — каждой птице своя цель; король — взрывом.
  */
 export function L3_10(): LevelDef {
@@ -595,7 +612,7 @@ export function L3_10(): LevelDef {
     ],
     hint: 'Короля берёт только взрыв: Бомб у залы или яйцо Матильды на крышу',
     stars: { one: 0, two: 62_000, three: 76_000 },
-    meta: { nMin: 6, difficulty: 10, teach: 'финал: все птицы, каждой своя цель; король под каменной крышей — цель взрыва', starsSource: 'solver', calib: { expertBirds: 5, expertScore: 94458, solverSec: 64.7, evaluations: 1628 } },
+    meta: { nMin: 6, difficulty: 10, teach: 'финал: все птицы, каждой своя цель; король под каменной крышей — цель взрыва', starsSource: 'solver', calib: { expertBirds: 5, expertScore: 97920, solverSec: 136.1, evaluations: 1560 } },
     decor: [dec('pine', 1.6), dec('snowman', 3.6), dec('sign', 5.2), dec('rock', 20.6, 0, 0.5), dec('pine', 26.5, 0, 1.2), dec('snowman', 29.5, 0, 1, true), dec('pine', 32, 0, 0.9)],
   });
 }

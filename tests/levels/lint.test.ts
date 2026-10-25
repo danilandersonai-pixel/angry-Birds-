@@ -44,24 +44,24 @@ const codes = (lv: LevelDef, sev: 'error' | 'warning' = 'error'): string[] =>
   lintLevel(lv)[sev === 'error' ? 'errors' : 'warnings'].map((i) => i.code);
 
 describe('prefabs', () => {
-  it('1-1 собирается ровно как в 06 §6.2', () => {
+  it('1-1 собирается как в 06 §6.2 (сдвиг x 26 → 19 под V_MAX 21)', () => {
     const lv = findLevel('1-1') as LevelDef;
     expect(lv.blocks).toEqual([
-      { material: 'wood', shape: 'rect', x: 24.25, y: 1, w: 0.5, h: 2 },
-      { material: 'wood', shape: 'rect', x: 27.75, y: 1, w: 0.5, h: 2 },
-      { material: 'wood', shape: 'rect', x: 26, y: 2.25, w: 4, h: 0.5 },
-      { material: 'wood', shape: 'rect', x: 24.25, y: 3.5, w: 0.5, h: 2 },
-      { material: 'wood', shape: 'rect', x: 27.75, y: 3.5, w: 0.5, h: 2 },
-      { material: 'wood', shape: 'rect', x: 26, y: 4.75, w: 4, h: 0.5 },
-      { material: 'wood', shape: 'isoTriangle', x: 26, y: 5.75, w: 4, h: 1.5 },
+      { material: 'wood', shape: 'rect', x: 17.25, y: 1, w: 0.5, h: 2 },
+      { material: 'wood', shape: 'rect', x: 20.75, y: 1, w: 0.5, h: 2 },
+      { material: 'wood', shape: 'rect', x: 19, y: 2.25, w: 4, h: 0.5 },
+      { material: 'wood', shape: 'rect', x: 17.25, y: 3.5, w: 0.5, h: 2 },
+      { material: 'wood', shape: 'rect', x: 20.75, y: 3.5, w: 0.5, h: 2 },
+      { material: 'wood', shape: 'rect', x: 19, y: 4.75, w: 4, h: 0.5 },
+      { material: 'wood', shape: 'isoTriangle', x: 19, y: 5.75, w: 4, h: 1.5 },
     ]);
     expect(lv.pigs).toEqual([
-      { type: 'small', x: 26, y: 0.405 },
-      { type: 'small', x: 26, y: 2.905 },
+      { type: 'small', x: 19, y: 0.405 },
+      { type: 'small', x: 19, y: 2.905 },
     ]);
     expect(lv.slingshot).toEqual({ x: 0, y: 2.7 });
-    expect(lv.bounds).toEqual({ minX: -12, maxX: 48, maxY: 25 });
-    expect(lv.stars).toEqual({ one: 0, two: 25000, three: 35000 });
+    expect(lv.bounds).toEqual({ minX: -12, maxX: 34, maxY: 25 });
+    expect(lv.stars).toEqual({ one: 0, two: 22000, three: 33000 });
   });
 
   it('макросы дают только детали каталога 00 §1.6', () => {
@@ -118,9 +118,10 @@ describe('prefabs', () => {
 
 describe('огибающая досягаемости (06 §2.2)', () => {
   const A = { x: 0, y: 2.7 };
+  // V_MAX 21 (было 24: red 18.3 / 14.2 / 11.1 / 7.4 / 2.9 на x 10 / 20 / 25 / 30 / 35) — таблица ядра envelope-v21
   it.each([
-    ['red', 10, 18.3], ['red', 20, 14.2], ['red', 25, 11.1], ['red', 30, 7.4], ['red', 35, 2.9],
-    ['bomb', 25, 8.3], ['matilda', 30, 5.4], ['terence', 20, 8.2], ['terence', 25, 4.2],
+    ['red', 10, 13.4], ['red', 15, 11.1], ['red', 20, 7.9], ['red', 25, 3.9], ['red', 28, 1.0],
+    ['bomb', 20, 5.7], ['matilda', 22, 5.0], ['terence', 15, 6.5], ['terence', 20, 2.4],
   ] as const)('%s на x = %d → %d м', (bird, x, h) => {
     expect(reachHeight(bird, A, x)).toBeCloseTo(h, 0);
     expect(Math.abs(reachHeight(bird, A, x) - h)).toBeLessThan(0.1);
@@ -138,7 +139,7 @@ describe('lint: синтетические примеры', () => {
   });
 
   it('перекрытие > 0.02 — ошибка; встык и ±0.02 — нет', () => {
-    const pig = [pigOn('small', 30, 0)];
+    const pig = [pigOn('small', 22, 0)]; // в досягаемости при V_MAX 21 (до V 24 стояла на 30)
     expect(codes(mk({ blocks: [B('wood', 'rect', 25, 1, 1, 2), B('wood', 'rect', 25.9, 1, 1, 2)], pigs: pig }))).toContain('overlap');
     expect(codes(mk({ blocks: [B('wood', 'rect', 25, 1, 1, 2), B('wood', 'rect', 26, 1, 1, 2)], pigs: pig }))).toEqual([]);
     expect(codes(mk({ blocks: [B('wood', 'rect', 25, 1, 1, 2), B('wood', 'rect', 25.99, 1, 1, 2)], pigs: pig }))).toEqual([]);
@@ -151,13 +152,13 @@ describe('lint: синтетические примеры', () => {
   });
 
   it('висящий блок (зазор 0.05) и висящая свинья — ошибки опоры', () => {
-    expect(codes(mk({ blocks: [B('wood', 'rect', 25, 1.05, 0.5, 2)], pigs: [pigOn('small', 30, 0)] }))).toEqual(['no-support']);
+    expect(codes(mk({ blocks: [B('wood', 'rect', 25, 1.05, 0.5, 2)], pigs: [pigOn('small', 22, 0)] }))).toEqual(['no-support']);
     expect(codes(mk({ pigs: [pigOn('small', 25, 0.1)] }))).toEqual(['pig-floating']);
   });
 
   it('консоль: центр масс вне опоры — ошибка, запас < 0.10 — предупреждение', () => {
     const col = B('wood', 'rect', 25, 1, 0.5, 2);
-    const pig = [pigOn('small', 31, 0)];
+    const pig = [pigOn('small', 22, 0)];
     expect(codes(mk({ blocks: [col, B('wood', 'rect', 26.6, 2.25, 4, 0.5)], pigs: pig }))).toContain('com-outside');
     const warn = mk({ blocks: [col, B('wood', 'rect', 25.2, 2.25, 4, 0.5)], pigs: pig });
     expect(codes(warn)).toEqual([]);
@@ -212,9 +213,9 @@ describe('lint: синтетические примеры', () => {
   });
 
   it('шар без стопоров — ошибка, в колыбели — чисто', () => {
-    expect(codes(mk({ blocks: [blockOn('stone', 'ball1', 25, 0)], pigs: [pigOn('small', 30, 0)] }))).toEqual(['ball-no-stoppers']);
-    expect(codes(mk({ parts: [cradle({ x: 25, y: 0 })], pigs: [pigOn('small', 30, 0)] }))).toEqual([]);
-    expect(codes(mk({ parts: [cradle({ x: 25, y: 0, d: 2 })], pigs: [pigOn('small', 30, 0)] }))).toEqual([]);
+    expect(codes(mk({ blocks: [blockOn('stone', 'ball1', 25, 0)], pigs: [pigOn('small', 22, 0)] }))).toEqual(['ball-no-stoppers']);
+    expect(codes(mk({ parts: [cradle({ x: 25, y: 0 })], pigs: [pigOn('small', 22, 0)] }))).toEqual([]);
+    expect(codes(mk({ parts: [cradle({ x: 25, y: 0, d: 2 })], pigs: [pigOn('small', 22, 0)] }))).toEqual([]);
   });
 
   it('лёд на склоне 30° соскальзывает', () => {
@@ -243,14 +244,14 @@ describe('lint: синтетические примеры', () => {
     expect(codes(mk({ slingshot: { x: 0, y: 3.5 }, pigs: [pigOn('small', 25, 0)] }))).toEqual(['slingshot-terrain']);
   });
 
-  it('досягаемость по птицам уровня: Terence не достаёт до x = 32, Red — достаёт', () => {
-    const pigs = [pigOn('small', 32, 0)];
+  it('досягаемость по птицам уровня: Terence не достаёт до x = 25, Red — достаёт (V_MAX 21)', () => {
+    const pigs = [pigOn('small', 25, 0)];
     expect(codes(mk({ birds: ['terence'], pigs }))).toEqual(['unreachable']);
     expect(codes(mk({ birds: ['terence', 'red'], pigs }))).toEqual([]);
   });
 
   it('рогатка на холме: основание на площадке — чисто', () => {
-    const lv = mk({ terrain: [flatGround(), slingHill(3)], slingshot: slingshotOn(0, 3), pigs: [pigOn('small', 30, 0)] });
+    const lv = mk({ terrain: [flatGround(), slingHill(3)], slingshot: slingshotOn(0, 3), pigs: [pigOn('small', 22, 0)] });
     expect(codes(lv)).toEqual([]);
     expect(codes(lv, 'warning')).toEqual([]);
   });

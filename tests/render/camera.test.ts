@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import { analyzeLevel, Camera, CAMERA_CFG, terrainGroundRef } from '../../src/render/Camera';
 import { ALL_LEVELS } from '../../src/levels/index';
-import { BIRDS, LAUNCH, PIGS } from '../../src/config/constants';
+import { BIRDS, CAMERA, LAUNCH, PIGS } from '../../src/config/constants';
 import { screenToWorldX, screenToWorldY, worldToScreenX, worldToScreenY } from '../../src/render/view';
 import type { BlockDef, LevelDef, PigDef, TerrainDef } from '../../src/core/types';
 
@@ -199,6 +199,18 @@ describe('Camera: земля уровня (groundRef)', () => {
     const c = cam(hutLevel({ terrain: [high], slingshot: { x: 0, y: 7.7 } }));
     expect(c.groundRef).toBeCloseTo(5, 9);
     expect(bottomOf(c)).toBeCloseTo(3.8, 9);
+  });
+
+  it('правило полосы земли базовой камеры: всегда GROUND_MARGIN; viewHForTop согласован с bottomFor', () => {
+    const c = cam(hutLevel());
+    for (const h of [9, 15, 24, 30]) {
+      expect(c.groundMarginFor(h)).toBe(CAMERA.GROUND_MARGIN);
+      expect(c.bottomFor(h)).toBeCloseTo(c.groundRef - CAMERA.GROUND_MARGIN, 9);
+    }
+    for (const top of [4, 12, 20]) expect(c.bottomFor(15) + c.viewHForTop(top)).toBeCloseTo(top, 9);
+    // пан вверх ограничен верхом groundRef − 1.2 + 30 при любой высоте кадра
+    c.jumpTo({ x: c.x, y: 1000, viewH: 20 });
+    expect(c.y + c.viewH / 2).toBeCloseTo(c.groundRef - CAMERA.GROUND_MARGIN + CAMERA.VIEW_H_MAX, 9);
   });
 });
 

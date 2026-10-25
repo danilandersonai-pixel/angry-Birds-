@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import { GAME_CAM, GameCamera, hudBox } from '../../src/app/GameCamera';
 import { hudLevel } from '../../src/app/GameScreen';
-import { BIRDS, CAMERA, PIGS, SLINGSHOT } from '../../src/config/constants';
+import { BIRDS, CAMERA, LAUNCH, PIGS, SLINGSHOT, WORLD } from '../../src/config/constants';
 import { ALL_LEVELS } from '../../src/levels';
 import { QUEUE_K_MIN, pocketLift, queueSpan } from '../../src/render/Renderer';
 
@@ -40,8 +40,10 @@ describe('GameCamera: вид рогатки на уровнях кампании
         const tag = `${level.id} ${w}×${h}`;
         expect(a.viewH, tag).toBeLessThanOrEqual(c.aimHardCap + 1e-6);
         expect(a.viewH, tag).toBeGreaterThanOrEqual(Math.min(GAME_CAM.AIM_H_MIN, c.aimHardCap) - 1e-6);
-        // низ кадра — на земле
-        expect(a.y - a.viewH / 2, tag).toBeCloseTo(c.bottomY, 6);
+        // низ кадра — на земле: полоса земли groundK·h (≤ 12 %), не меньше 1.2 м
+        expect(a.y - a.viewH / 2, tag).toBeCloseTo(c.bottomFor(a.viewH), 6);
+        expect(c.groundRef - (a.y - a.viewH / 2), tag).toBeGreaterThanOrEqual(CAMERA.GROUND_MARGIN - 1e-9);
+        expect(c.groundK, tag).toBeLessThanOrEqual(GAME_CAM.GROUND_FRAC + 1e-9);
         // контент: правый край + 1 м и верх + 0.8 м — в кадре, если на это хватает жёсткого потолка
         const atCap = a.viewH >= c.aimHardCap - 1e-6;
         if (!atCap) {
@@ -49,7 +51,7 @@ describe('GameCamera: вид рогатки на уровнях кампании
           expect(top, tag).toBeGreaterThanOrEqual(f.contentTop + GAME_CAM.TOP_PAD - 1e-3);
           for (const p of level.pigs) expect(p.x + PIGS[p.type].radius, `${tag} свинья x=${p.x}`).toBeLessThanOrEqual(right);
         }
-        // рогатка: место под полную оттяжку пальцем всегда; без сдвига — 20…30 % ширины
+        // рогатка: место под полную оттяжку пальцем всегда; без сдвига — 15…30 % ширины
         const room = level.slingshot.x - left;
         expect(room, tag).toBeGreaterThanOrEqual(c.aimLeftRoom(a.viewH) - 1e-6);
         if (!atCap) {
@@ -120,15 +122,15 @@ describe('GameCamera: вид рогатки на уровнях кампании
       const ang = (68 * Math.PI) / 180;
       let x = a0.slingX;
       let y = a0.slingY;
-      let vx = 24 * Math.cos(ang);
-      let vy = 24 * Math.sin(ang);
+      let vx = LAUNCH.V_MAX * Math.cos(ang);
+      let vy = LAUNCH.V_MAX * Math.sin(ang);
       let minGap = Infinity;
       for (let t = 0; t < 3 && y > 0; t += 1 / 60) {
         c.follow({ x, y, vx, vy }, 1 / 60);
         c.update(1 / 60);
         minGap = Math.min(minGap, c.y + c.viewH / 2 - y);
         x += vx / 60;
-        vy -= 15 / 60;
+        vy -= Math.abs(WORLD.GRAVITY) / 60;
         y += vy / 60;
       }
       expect(minGap, `${w}×${h}`).toBeGreaterThanOrEqual(2.5);
@@ -193,6 +195,93 @@ describe('GameCamera: вид рогатки на уровнях кампании
     c.zoomAt(1.2, 800, 300);
     const after = c.screenToWorld(800, 300);
     expect(after.y).toBeCloseTo(before.y, 6);
+  });
+
+  it('компактные уровни: кадр плотный — земля 12 % высоты, рогатка ровно с местом под очередь (не левее 15 %)', () => {
+    for (const [w, h] of SCREENS) {
+      let dense = 0;
+      for (const level of ALL_LEVELS) {
+        const c = cam(w, h, level.id);
+        const a = c.aimView();
+        const vw = a.viewH * (w / h);
+        const left = a.x - vw / 2;
+        const tag = `${level.id} ${w}×${h}`;
+        if (Math.abs(c.groundK - GAME_CAM.GROUND_FRAC) < 1e-9) dense++;
+        // очередь без сжатия влезает в 25 % — рогатка ровно на её ширине (+ запас), но не левее 15 %
+        const x0 = level.slingshot.x - SLINGSHOT.ANCHOR.x - SLINGSHOT.QUEUE_X0;
+        const { span, rLast } = queueSpan(level.birds);
+        const natural = level.slingshot.x - (x0 - span - rLast - GAME_CAM.QUEUE_PAD);
+        const room = level.slingshot.x - left;
+        if (natural <= GAME_CAM.SLING_X_NATURAL * vw && room > c.aimLeftRoom(a.viewH) + 1e-6) {
+          expect(room, tag).toBeCloseTo(Math.max(natural, GAME_CAM.SLING_X * vw), 4);
+        }
+      }
+      // полоса земли сужается только ради HUD — на единичных уровнях
+      expect(dense, `${w}×${h}`).toBeGreaterThanOrEqual(ALL_LEVELS.length - 3);
+    }
+  });
+
+  it('16:9 и телефон: Ред не мельче 40 / 22 CSS px на всех уровнях (цели компактизации)', () => {
+    for (const [w, h, min] of [
+      [1600, 900, 40],
+      [844, 390, 22],
+      [1280, 960, 32],
+    ] as const) {
+      for (const level of ALL_LEVELS) {
+        const c = cam(w, h, level.id);
+        c.pointerCoarse = w < 1000;
+        const red = (2 * BIRDS.red.radius * h) / c.aimView().viewH;
+        expect(red, `${level.id} ${w}×${h}`).toBeGreaterThanOrEqual(min);
+      }
+    }
+  });
+
+  it('верх сооружения у HUD: сначала уже полоса земли (масштаб тот же), отдаление — только если этого мало', () => {
+    const lv = ALL_LEVELS.find((l) => l.id === '1-1')!;
+    const base = cam(1600, 900, '1-1');
+    const h0 = base.aimView().viewH;
+    // столбик у правого края контента, верх которого задевает HUD только при полосе земли 12 %
+    const probe = (top: number): GameCamera => {
+      const xr = base.level.contentRight;
+      const block = { material: 'stone' as const, shape: 'rect' as const, x: xr - 0.5, y: top / 2, w: 1, h: top };
+      const c = new GameCamera();
+      c.setViewport(1600, 900, 1);
+      c.setLevel({ ...lv, blocks: [...lv.blocks, block] });
+      return c;
+    };
+    let found = false;
+    for (let top = 6; top <= 13 && !found; top += 0.25) {
+      const c = probe(top);
+      const a = c.aimView();
+      if (c.groundK < GAME_CAM.GROUND_FRAC - 1e-6 && c.groundK > 0) {
+        found = true;
+        expect(a.viewH, `top ${top}`).toBeCloseTo(h0, 3); // масштаб не изменился
+        // и теперь верх столбика не под HUD
+        const ppm = 900 / a.viewH;
+        const hudBottom = a.y + a.viewH / 2 - (c.hud.h + GAME_CAM.HUD_PAD_PX) / ppm;
+        expect(top, `top ${top}`).toBeLessThanOrEqual(hudBottom + 1e-3);
+      }
+    }
+    expect(found).toBe(true);
+  });
+
+  it('полоса земли: viewHForTop — наименьшая высота, верх которой не ниже заданного; следование не сдвигает низ на старте', () => {
+    const c = cam(1600, 900, '2-5');
+    for (const top of [5, 10, 15, 20, 25]) {
+      const h = c.viewHForTop(top);
+      expect(c.bottomFor(h) + h).toBeGreaterThanOrEqual(top - 1e-9);
+      expect(c.bottomFor(h - 0.01) + h - 0.01).toBeLessThan(top);
+    }
+    // выпуск: первый кадр следования — низ кадра там же, где в виде рогатки (без вертикального рывка)
+    c.jumpTo(c.aimView());
+    const b0 = c.y - c.viewH / 2;
+    const f = c.level;
+    c.follow({ x: f.slingX + 0.5, y: f.slingY + 0.3, vx: 15, vy: 4 }, 1 / 60);
+    expect(Math.abs(c.y - c.viewH / 2 - b0)).toBeLessThan(0.05);
+    // при отдалении в полёте полоса земли — та же доля высоты кадра
+    for (let i = 0; i < 120; i++) c.follow({ x: f.slingX + 8, y: 14, vx: 10, vy: 6 }, 1 / 60);
+    expect(c.viewH).toBeGreaterThan(c.aimView().viewH + 1);
+    expect(c.groundRef - (c.y - c.viewH / 2)).toBeCloseTo(c.groundMarginFor(c.viewH), 2);
   });
 
   it('смена размера окна пересчитывает авто-вид (кэш по размеру)', () => {
