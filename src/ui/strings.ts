@@ -1,0 +1,231 @@
+// Все строки интерфейса (07 §18). Регистр — обычный; КАПС делает CSS (text-transform).
+// Подстановки — {name}. Числа — fmt() (ru-RU, неразрывный пробел U+00A0 есть в шрифтах).
+
+export const S = {
+  appTitle: 'Сердитые Птицы',
+  appTitle1: 'Сердитые',
+  appTitle2: 'Птицы',
+  appBadge: 'фан-ремейк',
+  appVersion: 'v{v} · фанатский проект, не связан с Rovio',
+
+  bootLoading: 'Загрузка… {p}%',
+
+  titlePlay: 'Играть',
+  music: 'Музыка',
+  sound: 'Звуки',
+  musicOn: 'Музыка: вкл',
+  musicOff: 'Музыка: выкл',
+  soundOn: 'Звуки: вкл',
+  soundOff: 'Звуки: выкл',
+  fullscreen: 'Во весь экран',
+  exitFullscreen: 'Выйти из полноэкранного режима',
+  back: 'Назад',
+  close: 'Закрыть',
+
+  episodesTitle: 'Выберите эпизод',
+  episodeNum: 'Эпизод {n}',
+  starsOf: '{got}/{total}',
+  episodeLockedShort: 'Эпизод закрыт',
+  // причина блокировки эпизода (rules.ts): ★ в карточке и подвале заменяется значком звезды
+  gateCardStars: 'Ещё {n}\u00A0★ в\u00A0эпизоде\u00A0{prev}',
+  gateCardLevel: 'Пройдите уровень\u00A0{id}',
+  // на карточке — две короткие части (влезают в 2 строки и на 640×360); полная фраза — в тосте и озвучке
+  gateCardBoth: 'Пройдите {id} · ещё\u00A0{n}\u00A0★',
+  gateFullStars: 'Соберите ещё {n} {stars} в эпизоде «{prev}»',
+  gateFullLevel: 'Пройдите уровень {id}, чтобы открыть «{name}»',
+  gateFullBoth: 'Пройдите уровень {id} и соберите ещё {n} {stars} в эпизоде «{prev}»',
+  gateFootBoth: 'Пройдите уровень {id} и наберите ещё {n}\u00A0★',
+  episodeUnlocked: 'Открыт эпизод «{name}»!',
+  episodeAria: 'Эпизод {n} «{name}»: {got} из {total} звёзд',
+  episodeAriaLocked: 'Эпизод {n} «{name}», закрыт. {req}',
+
+  levelsBest: 'Рекорд: {score}',
+  levelsNotCleared: 'Ещё не пройден',
+  levelsLocked: 'Сначала пройдите уровень {prev}',
+  levelsToNextEp: 'До следующего эпизода: ещё {n}\u00A0★',
+  levelsEpDone: 'Эпизод пройден!',
+  levelsFinishLast: 'Пройдите уровень {id}, чтобы открыть следующий эпизод',
+  levelsEpPerfect: 'Все звёзды эпизода собраны!',
+  levelsNextOpen: 'Открыт эпизод «{name}»',
+  levelsAria: 'Уровень {id}: {s} из 3 звёзд, рекорд {score}',
+  levelsAriaNew: 'Уровень {id}, ещё не пройден',
+  levelsAriaLocked: 'Уровень {id}, закрыт',
+
+  hudPause: 'Пауза (Esc)',
+  hudRestart: 'Начать заново (R)',
+  hudBest: 'Рекорд',
+  hudScore: 'Счёт',
+  hudPigs: 'Свиней осталось: {n}',
+  hudToSling: 'К рогатке',
+  hudSkip: 'Коснитесь, чтобы пропустить',
+  hudBirds: 'Птиц осталось: {n}',
+
+  pauseTitle: 'Пауза',
+  pauseResume: 'Продолжить',
+  pauseRestart: 'Заново',
+  pauseMenu: 'Меню',
+  pauseBest: 'Рекорд: {score}',
+  pauseNoBest: 'Рекорда пока нет',
+  pauseBirds: 'Птиц осталось: {n}',
+
+  winBanner: 'Уровень пройден!',
+  winScore: 'Счёт',
+  winBest: 'Рекорд: {score}',
+  winNewBest: 'Новый рекорд!',
+  winNext: 'Дальше',
+  winRestart: 'Заново',
+  winMenu: 'Меню',
+  winLockedNext: 'Соберите ещё {n} {stars}, чтобы открыть «{name}»',
+  winAllDone: 'Вы прошли все уровни!',
+  winTapSkip: 'Коснитесь, чтобы пропустить',
+  winOneShot: 'Одним выстрелом!',
+  winClean: 'Чистая работа!',
+
+  loseBanner: 'Уровень не пройден',
+  loseRetry: 'Ещё раз',
+  loseMenu: 'Меню',
+  loseTipPrefix: 'Совет:',
+
+  settings: 'Настройки',
+  settingsTitle: 'Настройки',
+  setMusic: 'Музыка',
+  setLevelMusic: 'Музыка в уровнях',
+  setSfx: 'Звуки',
+  setQuality: 'Качество графики',
+  qAuto: 'Авто',
+  qHigh: 'Высокое',
+  qMed: 'Среднее',
+  qLow: 'Низкое',
+  setAim: 'Подсказка траектории',
+  aimOff: 'Выкл',
+  aimShort: 'Короткая',
+  setMotion: 'Анимации',
+  motionSystem: 'Как в системе',
+  motionReduce: 'Уменьшить',
+  motionFull: 'Полные',
+  setShake: 'Тряска экрана',
+  setHaptics: 'Вибрация',
+  setReset: 'Сбросить прогресс',
+  confirmResetTitle: 'Сбросить прогресс?',
+  confirmResetBody: 'Все звёзды и рекорды будут удалены. Это нельзя отменить.',
+  confirmCancel: 'Отмена',
+  confirmResetOk: 'Сбросить',
+  toastResetDone: 'Прогресс сброшен',
+  creditsTitle: 'Об игре',
+  creditsBody: 'Сердитые Птицы — фанатский ремейк. Не связан с Rovio Entertainment. Графика, музыка и звуки созданы кодом.',
+  controlsTitle: 'Управление',
+  controlsMouse: 'Мышь: тяните птицу — прицел, тяните фон — обзор, колесо — масштаб',
+  controlsTouch: 'Касание: тяните птицу — прицел, один палец — обзор, два пальца — масштаб',
+  controlsKeys: 'R — заново · Esc — пауза · Пробел — способность · F — во весь экран · M — музыка',
+  on: 'Вкл',
+  off: 'Выкл',
+
+  rotateTitle: 'Поверните устройство',
+  rotateBody: 'Игра рассчитана на горизонтальный экран',
+  rotateAnyway: 'Играть так',
+
+  toastStorageOff: 'Прогресс не сохранится: браузер запретил хранилище',
+  toastStorageReadOnly: 'Прогресс не сохранится: сохранение от более новой версии игры',
+  toastMusicOn: 'Музыка включена',
+  toastMusicOff: 'Музыка выключена',
+  toastSfxOn: 'Звуки включены',
+  toastSfxOff: 'Звуки выключены',
+
+  a11yWon: 'Уровень {id} пройден. {s} {stars} из 3. Счёт {score}.',
+  a11yLost: 'Уровень не пройден.',
+  a11yPaused: 'Игра на паузе.',
+} as const;
+
+export type StringKey = keyof typeof S;
+
+/** Подставить {name} → значение. */
+export function t(key: StringKey, vars?: Record<string, string | number>): string {
+  const s: string = S[key];
+  if (!vars) return s;
+  return s.replace(/\{(\w+)\}/g, (m, k: string) => (k in vars ? String(vars[k]) : m));
+}
+
+const NF = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 });
+/** Число по-русски: «12 340» (разделитель — неразрывный пробел). */
+export function fmt(n: number): string {
+  return NF.format(Math.floor(n));
+}
+
+const PR = new Intl.PluralRules('ru');
+/** Множественное число: plural(5, STARS) → «звёзд». */
+export function plural(n: number, forms: readonly [one: string, few: string, many: string]): string {
+  const c = PR.select(n);
+  return c === 'one' ? forms[0] : c === 'few' ? forms[1] : forms[2];
+}
+export const STARS = ['звезда', 'звезды', 'звёзд'] as const;
+/** Родительный падеж: «соберите 1 звезду / 2 звезды / 5 звёзд». */
+export const STARS_ACC = ['звезду', 'звезды', 'звёзд'] as const;
+export const BIRDS = ['птица', 'птицы', 'птиц'] as const;
+
+/** Советы для экрана загрузки (07 §18). */
+export const TIPS: readonly string[] = [
+  'Тяните птицу назад: чем дальше, тем сильнее выстрел.',
+  'Передумали? Отпустите птицу у самой рогатки — выстрел не потратится.',
+  'Каждая неиспользованная птица приносит 10 000 очков.',
+  'Чак пробивает дерево. Коснитесь в полёте — и он рванёт вперёд!',
+  'Синие делятся на троих и отлично бьют стекло.',
+  'Бомб взрывается по касанию или сам — через пару секунд после удара.',
+  'Матильда сбрасывает яйцо-бомбу прямо вниз.',
+  'Хэл летит бумерангом: коснитесь, и он развернётся.',
+  'Теренс тяжёлый — камню с ним не устоять.',
+  'Сильвер делает петлю и пикирует вниз.',
+  'Ящики TNT взрываются от сильного удара.',
+  'Свиньи в касках крепче обычных.',
+  'Колесо мыши или щипок двумя пальцами — приблизить и отдалить.',
+  'Нажмите R, чтобы мгновенно начать уровень заново.',
+  'Пробел включает способность птицы в полёте.',
+  'Три звезды — это меньше птиц и больше разрушений.',
+  'Лёд хрупкий, камень — самый прочный.',
+  'Падающие брёвна и камни тоже давят свиней.',
+];
+
+/** Подсказки способностей (07 §10.4, §18). У Реда и Теренса способности нет. */
+export const ABILITY_HINTS: Readonly<Partial<Record<string, string>>> = {
+  blues: 'Коснитесь — и Синие разделятся на троих!',
+  chuck: 'Коснитесь — и Чак рванёт вперёд!',
+  bomb: 'Коснитесь — и Бомб взорвётся!',
+  matilda: 'Коснитесь — и Матильда сбросит яйцо!',
+  hal: 'Коснитесь — и Хэл развернётся бумерангом!',
+  silver: 'Коснитесь — и Сильвер сделает петлю и ударит вниз!',
+};
+export const ABILITY_KEY = 'или нажмите Пробел';
+
+/** Советы после трёх поражений подряд (07 §18). */
+export const LOSE_TIPS: readonly string[] = [
+  'Бейте в опоры: без них башня рухнет сама.',
+  'Стекло — Синими, дерево — Чаком, камень — Бомбом.',
+  'Иногда выгоднее попасть в TNT, чем в свинью.',
+  'Попробуйте выстрел по высокой дуге — сверху конструкции слабее.',
+];
+
+/** Дразнилки экрана поражения (все вместе; какую показать — pickTaunt). */
+export const TAUNTS: readonly string[] = [
+  'Свиньи смеются… пока!',
+  'Хрю-хрю! Попробуй ещё!',
+  'Почти получилось!',
+  'Башня устояла. Пока что.',
+];
+/** Не хватило одной свиньи — «почти». */
+export const TAUNTS_CLOSE: readonly string[] = ['Почти получилось!', 'Осталась всего одна свинья!'];
+/** Две и больше живых свиньи (или неизвестно сколько) — без «почти». */
+export const TAUNTS_FAR: readonly string[] = ['Свиньи смеются… пока!', 'Хрю-хрю! Попробуй ещё!', 'Башня устояла. Пока что.'];
+/** Счёт 0 — ничего не задето. */
+export const TAUNTS_ZERO: readonly string[] = ['Свиньи даже не заметили!', 'Башня устояла. Пока что.', 'Хрю-хрю! Попробуй ещё!'];
+
+/**
+ * Дразнилка поражения по исходу (плейтест №2, Б7): «Почти получилось!» — только когда осталась одна свинья и счёт не 0;
+ * при счёте 0 — «даже не заметили»; при двух и больше свиньях или без данных — общие. rnd — для тестов.
+ */
+export function pickTaunt(r: { pigsLeft?: number; score?: number } = {}, rnd: () => number = Math.random): string {
+  const pigs = r.pigsLeft !== undefined && Number.isFinite(r.pigsLeft) ? Math.max(0, Math.floor(r.pigsLeft)) : null;
+  const score = r.score !== undefined && Number.isFinite(r.score) ? r.score : null;
+  const list = score !== null && score <= 0 ? TAUNTS_ZERO : pigs !== null && pigs <= 1 ? TAUNTS_CLOSE : TAUNTS_FAR;
+  const x = rnd();
+  const i = Math.floor((Number.isFinite(x) ? Math.min(0.999999, Math.max(0, x)) : 0) * list.length);
+  return list[i]!;
+}

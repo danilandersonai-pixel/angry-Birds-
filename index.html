@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b1a2b" />
+    <meta name="description" content="Сердитые Птицы — фан-ремейк в браузере: рогатка, птицы, свиньи и физика." />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <title>Сердитые Птицы</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        overscroll-behavior: none;
+        background: #0b1a2b;
+        -webkit-text-size-adjust: 100%;
+      }
+      #app,
+      #stage {
+        position: fixed;
+        inset: 0;
+        overflow: hidden;
+      }
+      #game {
+        position: absolute;
+        left: 0;
+        top: 0;
+        display: block;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-tap-highlight-color: transparent;
+        outline: none;
+        background: #5bc0f5;
+      }
+      /* статический сплэш: виден по первым байтам ответа, пока скачивается и разбирается скрипт (App.start его убирает) */
+      #boot {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 22px;
+        background: radial-gradient(ellipse at 50% 35%, #1d5b8c 0%, #12385a 45%, #0b1a2b 100%);
+        color: #fff;
+        font: 800 clamp(30px, 7vmin, 64px) / 1.05 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        text-align: center;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      #boot .boot-title {
+        letter-spacing: 0.02em;
+        text-shadow:
+          0 3px 0 #b8400f,
+          0 6px 14px rgba(0, 0, 0, 0.45);
+        padding: 0 16px;
+      }
+      #boot .boot-bar {
+        width: min(320px, 60vw);
+        height: 12px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.16);
+        box-shadow: inset 0 2px 3px rgba(0, 0, 0, 0.35);
+        overflow: hidden;
+      }
+      #boot .boot-bar i {
+        display: block;
+        width: 38%;
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(180deg, #ffd34d, #f39a1e);
+        animation: boot-run 1.15s ease-in-out infinite;
+      }
+      #boot .boot-label,
+      #boot .boot-nojs {
+        font-size: clamp(14px, 2.4vmin, 18px);
+        font-weight: 600;
+        opacity: 0.75;
+      }
+      @keyframes boot-run {
+        0% {
+          transform: translateX(-110%);
+        }
+        100% {
+          transform: translateX(290%);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #boot .boot-bar i {
+          animation: none;
+          width: 100%;
+          opacity: 0.6;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="boot" role="status" aria-label="Загрузка">
+        <div class="boot-title">Сердитые Птицы</div>
+        <div class="boot-bar"><i></i></div>
+        <div class="boot-label">Загрузка…</div>
+        <noscript>
+          <style>
+            #boot .boot-bar,
+            #boot .boot-label {
+              display: none;
+            }
+          </style>
+          <div class="boot-nojs">Для игры нужен JavaScript.</div>
+        </noscript>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

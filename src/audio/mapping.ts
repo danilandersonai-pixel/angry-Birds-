@@ -1,0 +1,476 @@
+// Карта «игровые события → звуки» (docs/research/05-audio.md §7) — чистая функция без Web Audio.
+// Движок складывает события кадра в пачку и вызывает planFrame(); результат — список «реплик» (Cue),
+// которые движок исполняет: проиграть ключ каталога, остановить фитиль, приглушить музыку, конец уровня.
+
+import { ABILITY } from '../config/constants';
+import type { GameEvent, ImpactSurface, SessionState } from '../core/events';
+import type { PigType } from '../core/types';
+import { type Cat, type ImpactReq, impactIntensity, impactVolume, selectImpacts, spatial, tierOf, TokenBucket } from './mix';
+
+/** Положение слушателя: центр камеры по X и ширина видимой области, м. */
+export interface Listener {
+  camX: number;
+  viewW: number;
+}
+
+export interface PlayCue {
+  op: 'play';
+  /** Ключ звука из каталога (catalog.ts). */
+  key: string;
+  cat: Cat;
+  /** Громкость события × пространство (CAT_MIX.gain движок умножает сам). */
+  gain: number;
+  pan: number;
+  /** Задержка от «сейчас», с. */
+  delay: number;
+  /** playbackRate буфера (размер блока, разброс смеха). */
+  rate: number;
+  /** Посыл в реверб. */
+  send: number;
+  /** Важность для кражи голоса (движок умножает на приоритет категории). */
+  score: number;
+  /** Параметр живого рецепта (натяжение, длительность, номер бонуса). */
+  param?: number;
+  /** Метка, по которой звук можно остановить позже (фитиль). */
+  tag?: string;
+}
+
+export type Cue =
+  | PlayCue
+  | { op: 'stop'; tag: string }
+  | { op: 'duck' }
+  | { op: 'levelEnd'; won: boolean }
+  | { op: 'state'; to: SessionState };
+
+/** Состояние, которое карта помнит между кадрами. */
+export interface PlanState {
+  lastPower: number;
+  bonusIdx: number;
+  /** id свиньи → время последнего «уф» (не чаще раза в 300 мс на свинью). */
+  pigVoxAt: Map<number, number>;
+  /** Птицы с горящим фитилём (сверяется с живыми голосами через PlanEnv.hasTag). */
+  fuses: Set<number>;
+  /** Ведро токенов ударов. */
+  bucket: TokenBucket;
+  /** Типы свиней, замеченные на уровне (для хрюканья «от скуки»): из pigsLaugh.pigs и pigDamaged. */
+  pigKinds: Set<PigType>;
+  /** id блока → время последней трещины (не чаще раза в CRACK_GAP_S на блок). */
+  crackAt: Map<number, number>;
+}
+
+/** Новое состояние карты (и сброс при новой сессии: рестарт, выход в меню, смена уровня). */
+export function createPlanState(): PlanState {
+  return {
+    lastPower: 0, bonusIdx: 0, pigVoxAt: new Map(), fuses: new Set(), bucket: new TokenBucket(6, 40), pigKinds: new Set(), crackAt: new Map(),
+  };
+}
+
+export interface PlanEnv {
+  /** Текущее время аудио, с. */
+  now: number;
+  rnd: () => number;
+  /** Сколько голосов категории звучит сейчас (для «громкой/тихой» гибели свиньи и плотности ударов/трещин). */
+  voices?: (cat: Cat) => number;
+  /**
+   * Звучит ли ещё голос с меткой (фитиль). Фитиль, который доиграл, был остановлен паузой
+   * или не пережил рестарт, забывается — новый удар той же птицы снова его зажжёт.
+   */
+  hasTag?: (tag: string) => boolean;
+}
+
+export interface FrameEvent {
+  e: GameEvent;
+  l?: Listener | undefined;
+}
+
+/** Длительность фитиля Bomb = автоподрыв ядра через ABILITY.BOMB.FUSE после первого удара, мс. */
+export const FUSE_MS = ABILITY.BOMB.FUSE * 1000;
+/** Длина дуги Хэла, мс. */
+export const HAL_ARC_MS = 1000;
+/** Не чаще раза в 300 мс «уф» одной и той же свиньи. */
+export const PIG_VOX_GAP_S = 0.3;
+
+// ── Массовые обрушения (без «каши»): записи 30 уровней, scripts/render-audio.mjs --collapse ──
+// Из 549 трещин 76 шли в одном кадре с разрушением того же блока, 144 — за ≤ 150 мс до него, 112 — вслед за другой
+// трещиной того же блока; три четверти трещин звучат вместе с ударом. Трещины занимали голоса категории break
+// (score 1.5 против 1.3 у разрушения доски) — на телефоне по лимиту терялась пятая часть звуков разрушения.
+/** Трещина одного блока — не чаще раза в 150 мс: стадии 1→2→3 подряд звучат одной трещиной. */
+export const CRACK_GAP_S = 0.15;
+/** Трещин в кадр — не больше двух (старшие стадии, ближние к камере); блок, разрушенный в том же кадре, не трещит. */
+export const CRACKS_PER_FRAME = 2;
+/**
+ * Плотность: пока звучит больше DENSE_VOICES ударов и трещин/разрушений, новые удары и трещины тише в √(N/n) раз
+ * (12 голосов — −3 дБ, 24 — −6 дБ). Разрушения, взрывы, голоса птиц и свиней не приглушаются — они остаются над фоном.
+ */
+export const DENSE_VOICES = 6;
+export function densityGain(sounding: number): number {
+  return sounding <= DENSE_VOICES ? 1 : Math.sqrt(DENSE_VOICES / sounding);
+}
+
+const MATERIALS: ReadonlySet<ImpactSurface> = new Set<ImpactSurface>(['wood', 'ice', 'stone']);
+
+/** Ключ звука удара для поверхности (или null — птица/яйцо не звучат как поверхность). */
+export function impactKey(surf: ImpactSurface, I: number): { key: string; k: number } | null {
+  if (MATERIALS.has(surf)) return { key: `${surf}Hit:${tierOf(I)}`, k: 1 };
+  if (surf === 'ground') return { key: `ground:${I < 0.6 ? 0 : 1}`, k: 1 };
+  if (surf === 'pig') return { key: 'pigBump', k: 0.8 };
+  if (surf === 'tnt') return { key: `woodHit:${tierOf(I)}`, k: 0.8 };
+  return null;
+}
+
+export const fuseTag = (id: number): string => `fuse:${id}`;
+
+interface CrackItem {
+  id: number;
+  key: string;
+  stage: number;
+  gain: number;
+  pan: number;
+}
+
+interface ImpactItem extends ImpactReq {
+  l: Listener | undefined;
+  /** playbackRate по размеру блока (крупный — ниже). */
+  rate: number;
+}
+
+/** Высота удара по размеру блока √(w·h): крупный блок звучит ниже, мелкий — выше (05-audio §8.4). */
+export function sizeRate(size: number | undefined): number {
+  if (!(size !== undefined && size > 0 && Number.isFinite(size))) return 1;
+  return Math.min(1.25, Math.max(0.8, size ** -0.4));
+}
+
+/** Голоса смеха: типы живых свиней (без повторов, король — первым), иначе «стандартный хор». */
+export function laughVoices(pigs: ReadonlyArray<PigType> | undefined, rnd: () => number): PigType[] {
+  const n = 1 + Math.floor(rnd() * 3);
+  const uniq = [...new Set(pigs ?? [])];
+  if (uniq.length === 0) return (['medium', 'small', 'large'] as PigType[]).slice(0, n);
+  uniq.sort((a, b) => (a === 'king' ? -1 : b === 'king' ? 1 : 0));
+  return uniq.slice(0, Math.min(n, uniq.length));
+}
+
+/** Разобрать пачку событий одного кадра в реплики. */
+export function planFrame(batch: ReadonlyArray<FrameEvent>, st: PlanState, env: PlanEnv): Cue[] {
+  const out: Cue[] = [];
+  const impacts: ImpactItem[] = [];
+  const cracks: CrackItem[] = [];
+  /** Блоки, разрушенные в этом кадре: их трещины не звучат (разрушение их перекрывает). */
+  const gone = new Set<number>();
+  let destroyed = 0;
+  let loudPops = 0;
+  /** Сколько ударов и трещин/разрушений звучит (плюс запланированные в этом кадре) — для densityGain. */
+  let sounding = (env.voices?.('impact') ?? 0) + (env.voices?.('break') ?? 0);
+
+  const play = (key: string, cat: Cat, gain: number, pan = 0, extra: Partial<PlayCue> = {}): void => {
+    if (!(gain > 0)) return;
+    out.push({ op: 'play', key, cat, gain, pan, delay: 0, rate: 1, send: 0, score: gain, ...extra });
+  };
+  const stopFuse = (id: number): void => {
+    if (st.fuses.delete(id)) out.push({ op: 'stop', tag: fuseTag(id) });
+  };
+  if (env.hasTag) for (const id of [...st.fuses]) if (!env.hasTag(fuseTag(id))) st.fuses.delete(id);
+
+  for (const { e, l } of batch) {
+    const sp = (x: number, reach = 1): { gain: number; pan: number } => (l ? spatial(x, l.camX, l.viewW, reach) : { gain: 1, pan: 0 });
+    switch (e.type) {
+      case 'stateChanged':
+        if (e.to === 'bonus') st.bonusIdx = 0;
+        out.push({ op: 'state', to: e.to });
+        break;
+      case 'birdLoaded':
+        play('hop', 'sling', 1);
+        play(`select:${e.bird}`, 'birdVox', 1, 0, { delay: 0.2 });
+        break;
+      case 'aimStart':
+        st.lastPower = 0;
+        play('slingGrab', 'sling', 1);
+        break;
+      case 'aimStretch': {
+        const p = Math.max(0, Math.min(1, e.power));
+        // ослабление натяжения — тот же скрип, но вдвое тише
+        const g = p >= st.lastPower - 0.02 ? 1 : 0.5;
+        st.lastPower = p;
+        play('slingStretch', 'sling', g, 0, { param: p });
+        break;
+      }
+      case 'aimCancel':
+        play('slingCancel', 'sling', 1);
+        break;
+      case 'birdLaunched': {
+        const p = Math.max(0, Math.min(1, e.power));
+        const s = sp(e.x);
+        const g = Math.max(0.6, s.gain); // собственное действие игрока слышно всегда
+        play(p > 0.6 ? 'slingRelease:hi' : 'slingRelease:lo', 'sling', (0.6 + 0.4 * p) * g, s.pan);
+        play(`launch:${e.bird}`, 'birdVox', g, s.pan + 0.1, { delay: 0.04 });
+        break;
+      }
+      case 'ability': {
+        const s = sp(e.x);
+        const g = Math.max(0.5, s.gain);
+        switch (e.bird) {
+          case 'chuck':
+          case 'blues':
+          case 'matilda':
+          case 'silver':
+            play(`ab:${e.bird}`, 'ability', g, s.pan);
+            break;
+          case 'hal':
+            play('ab:hal', 'ability', g, s.pan, { param: HAL_ARC_MS });
+            break;
+          case 'bomb':
+            play('ab:bombSwell', 'ability', g, s.pan);
+            stopFuse(e.id);
+            break;
+          default:
+            break; // red, terence — способности нет
+        }
+        break;
+      }
+      case 'impact': {
+        const I = impactIntensity(e.impulse);
+        const seen = new Set<string>();
+        let first = true;
+        for (const surf of [e.a, e.b]) {
+          const ik = impactKey(surf, I);
+          if (!ik || seen.has(ik.key)) continue;
+          seen.add(ik.key);
+          // размер блока задаёт высоту только «материальной» поверхности
+          const rate = MATERIALS.has(surf) || surf === 'tnt' ? sizeRate(e.size) : 1;
+          impacts.push({ key: ik.key, intensity: I * ik.k * (first ? 1 : 0.6), x: e.x, l, rate });
+          first = false;
+        }
+        break;
+      }
+      case 'birdImpact': {
+        const s = sp(e.x);
+        play(`hurt:${e.bird}`, 'birdVox', s.gain, s.pan);
+        play('feather', 'impact', s.gain * 0.8, s.pan);
+        if (e.bird === 'bomb' && !st.fuses.has(e.id)) {
+          st.fuses.add(e.id);
+          play('fuse', 'loop', Math.max(0.4, s.gain), s.pan, { param: FUSE_MS, tag: fuseTag(e.id), score: 1 });
+        }
+        break;
+      }
+      case 'birdRemoved': {
+        const s = sp(e.x);
+        play('puff', 'impact', s.gain, s.pan);
+        stopFuse(e.id);
+        break;
+      }
+      case 'blockDamaged': {
+        const s = sp(e.x);
+        const stage = Math.max(1, Math.min(3, Math.round(e.stage)));
+        cracks.push({ id: e.id, key: `${e.material}Crack:${stage}`, stage, gain: s.gain, pan: s.pan });
+        break;
+      }
+      case 'blockDestroyed': {
+        destroyed++;
+        gone.add(e.id);
+        st.crackAt.delete(e.id);
+        const s = sp(e.x);
+        const size = Math.sqrt(Math.max(0.01, e.w * e.h));
+        const key = e.material === 'wood' ? 'woodBreak' : e.material === 'ice' ? 'iceShatter' : 'stoneBreak';
+        // крупный блок — ниже и громче
+        const rate = Math.min(1.2, Math.max(0.8, size ** -0.25));
+        play(key, 'break', s.gain * Math.min(1.2, 0.6 + 0.4 * size), s.pan, { rate, send: 0.12 });
+        sounding++;
+        break;
+      }
+      case 'pigDamaged': {
+        const s = sp(e.x);
+        const last = st.pigVoxAt.get(e.id);
+        st.pigKinds.add(e.pig);
+        if (last === undefined || env.now - last >= PIG_VOX_GAP_S) {
+          st.pigVoxAt.set(e.id, env.now);
+          play(`pigHurt:${e.pig}`, 'pigVox', s.gain, s.pan);
+        }
+        if (e.helmetLost) play('helmet', 'impact', s.gain, s.pan);
+        break;
+      }
+      case 'pigDestroyed': {
+        const s = sp(e.x);
+        st.pigVoxAt.delete(e.id);
+        // цепная гибель не превращается в хор: визг — только если свободны голоса свиней
+        const loud = (env.voices?.('pigVox') ?? 0) + loudPops < 2;
+        if (loud) {
+          loudPops++;
+          play(`pigPop:${e.pig}`, 'pigVox', s.gain, s.pan);
+        } else play('pigPopQuiet', 'impact', s.gain, s.pan);
+        break;
+      }
+      case 'tntDestroyed': {
+        const s = sp(e.x);
+        play('woodBreak', 'break', s.gain * 0.6, s.pan, { rate: 0.85 });
+        break;
+      }
+      case 'explosion': {
+        const s = sp(e.x, 2);
+        play(`boom:${e.source}`, 'explosion', Math.max(0.3, s.gain), s.pan * 0.6, { send: 0.25 });
+        out.push({ op: 'duck' });
+        if (e.source === 'bomb') for (const id of [...st.fuses]) stopFuse(id);
+        break;
+      }
+      case 'birdBonus': {
+        play('bonus', 'reward', 1, 0, { param: st.bonusIdx++ });
+        play('hop', 'sling', 0.7);
+        break;
+      }
+      case 'pigsLaugh': {
+        // 1–3 голоса со сдвигом 90–180 мс; свиньи справа от рогатки — панорама +0.15/+0.3/+0.45
+        if (e.pigs && e.pigs.length > 0) st.pigKinds = new Set(e.pigs); // живые свиньи — точный список
+        const kinds = laughVoices(e.pigs, env.rnd);
+        let delay = 0;
+        kinds.forEach((k, i) => {
+          play(`pigLaugh:${k}`, 'pigVox', 0.9 - 0.2 * i, 0.15 + 0.15 * i, { delay, rate: 0.96 + env.rnd() * 0.08 });
+          delay += 0.09 + env.rnd() * 0.09;
+        });
+        break;
+      }
+      case 'levelEnd':
+        for (const id of [...st.fuses]) stopFuse(id);
+        out.push({ op: 'levelEnd', won: e.won });
+        break;
+      case 'score':
+        break; // только визуал
+      default:
+        break;
+    }
+  }
+
+  // ── трещины кадра: без разрушенных в этом кадре блоков, не чаще CRACK_GAP_S на блок, ≤ CRACKS_PER_FRAME ──
+  const fresh = cracks.filter((c) => {
+    if (gone.has(c.id)) return false;
+    const last = st.crackAt.get(c.id);
+    return last === undefined || env.now - last >= CRACK_GAP_S - 1e-6;
+  });
+  fresh.sort((a, b) => b.stage * b.gain - a.stage * a.gain);
+  const heard = new Set<number>();
+  for (const c of fresh) {
+    if (heard.size >= CRACKS_PER_FRAME) break;
+    if (heard.has(c.id)) continue; // две стадии одного блока в одном кадре — одна (старшая) трещина
+    heard.add(c.id);
+    st.crackAt.set(c.id, env.now);
+    play(c.key, 'break', c.gain * densityGain(++sounding), c.pan);
+  }
+
+  // ── удары кадра: ≤ 4 самых сильных (≤ 2 на ключ) через «ведро», остальное — в обломки ──
+  const { play: chosen, overflow } = selectImpacts(impacts);
+  for (const r of chosen) {
+    if (!st.bucket.take(env.now)) break;
+    const s = r.l ? spatial(r.x, r.l.camX, r.l.viewW) : { gain: 1, pan: 0 };
+    play(r.key, 'impact', impactVolume(r.intensity) * s.gain * densityGain(++sounding), s.pan, { score: r.intensity, rate: r.rate });
+  }
+  if (overflow > 1.5 || destroyed >= 3) {
+    play('rubble', 'break', Math.min(1, Math.max(overflow, destroyed) / 6), 0, { delay: 0.02 });
+  }
+  return out;
+}
+
+/**
+ * Имена UI-звуков: контракт спецификации ('click'…'newRecord') + расширения из 05-audio/07-ui-ux
+ * ('hover', 'toggleOn', 'toggleOff', 'locked', 'popIn', 'whoosh', 'starEmpty', 'scoreDone')
+ * + 'cleared' — «уровень зачищен» на баннере победы (то же, что play('cleared')).
+ */
+export type UiSoundName =
+  | 'click' | 'back' | 'pop' | 'swoosh' | 'star1' | 'star2' | 'star3' | 'tick' | 'win' | 'lose' | 'newRecord'
+  | 'hover' | 'toggleOn' | 'toggleOff' | 'locked' | 'popIn' | 'whoosh' | 'starEmpty' | 'scoreDone' | 'cleared';
+
+/** Награды экрана победы (07-ui-ux §12.5): звёзды по индексу, пустая звезда, конец счёта, рекорд. */
+export type RewardKind = 'star0' | 'star1' | 'star2' | 'starEmpty' | 'scoreDone' | 'newBest';
+
+/** UI-имя → ключ каталога. */
+export const UI_KEYS: Readonly<Record<UiSoundName, string>> = {
+  click: 'ui:click',
+  back: 'ui:back',
+  pop: 'ui:popIn',
+  swoosh: 'ui:whoosh',
+  star1: 'star:0',
+  star2: 'star:1',
+  star3: 'star:2',
+  tick: 'tick',
+  win: 'jingle:win',
+  lose: 'jingle:lose',
+  newRecord: 'newBest',
+  hover: 'ui:hover',
+  toggleOn: 'ui:toggleOn',
+  toggleOff: 'ui:toggleOff',
+  locked: 'ui:locked',
+  popIn: 'ui:popIn',
+  whoosh: 'ui:whoosh',
+  starEmpty: 'starEmpty',
+  scoreDone: 'scoreDone',
+  cleared: 'cleared',
+};
+
+export const REWARD_KEYS: Readonly<Record<RewardKind, string>> = {
+  star0: 'star:0',
+  star1: 'star:1',
+  star2: 'star:2',
+  starEmpty: 'starEmpty',
+  scoreDone: 'scoreDone',
+  newBest: 'newBest',
+};
+
+/** Ожидаемая длина прокрутки счёта на экране победы, с (07-ui-ux §12.5: 1.2 с; последний тик — раньше конца). */
+export const TICK_ROLL_S = 1.1;
+
+/**
+ * Прогресс тика без явного аргумента — по времени от первого тика серии (пауза > 0.3 с начинает новую),
+ * с той же кривой, что и сам счёт (ease-out cubic): тон следует за цифрами и к концу прокрутки 1.2 с
+ * доходит до 3000 Гц; при укороченной анимации (0.5 с) — до ≈ 2750 Гц.
+ */
+export class TickProgress {
+  private last = -Infinity;
+  private t0 = 0;
+  next(now: number): number {
+    if (now - this.last > 0.3) this.t0 = now;
+    this.last = now;
+    const k = Math.min(1, Math.max(0, (now - this.t0) / TICK_ROLL_S));
+    return 1 - (1 - k) ** 3;
+  }
+}
+
+/** Хрюканье свиней «от скуки», пока игрок целится: раз в 7–14 с в состояниях ready/aiming. */
+export class IdleGrunts {
+  private next = Infinity;
+  onState(to: SessionState, now: number, rnd: () => number): void {
+    if (to === 'ready' || to === 'aiming') {
+      if (this.next === Infinity) this.next = now + 4 + rnd() * 6;
+    } else this.next = Infinity;
+  }
+  /** Пора хрюкнуть? Если да — назначает следующий раз. */
+  due(now: number, rnd: () => number): boolean {
+    if (now < this.next) return false;
+    this.next = now + 7 + rnd() * 7;
+    return true;
+  }
+  reset(): void {
+    this.next = Infinity;
+  }
+}
+
+/** Обычный «хор», пока типы свиней уровня неизвестны. */
+export const DEFAULT_GRUNT_PIGS: readonly PigType[] = ['small', 'medium', 'large', 'medium'];
+
+/** Кто хрюкает «от скуки»: случайная из замеченных на уровне свиней, иначе — из обычного хора. */
+export function gruntPig(st: PlanState, rnd: () => number): PigType {
+  const pool = st.pigKinds.size > 0 ? [...st.pigKinds] : DEFAULT_GRUNT_PIGS;
+  return pool[Math.min(pool.length - 1, Math.floor(rnd() * pool.length))]!;
+}
+
+/** Все ключи, которые карта может запросить (для проверки каталога в тестах). */
+export function allPlannedKeys(): string[] {
+  const birds = ['red', 'blues', 'chuck', 'bomb', 'matilda', 'hal', 'terence', 'silver'];
+  const pigs = ['small', 'medium', 'large', 'helmet', 'mustache', 'king'];
+  const keys = [
+    'hop', 'slingGrab', 'slingStretch', 'slingCancel', 'slingRelease:hi', 'slingRelease:lo',
+    'ab:chuck', 'ab:blues', 'ab:matilda', 'ab:silver', 'ab:hal', 'ab:bombSwell', 'fuse', 'feather', 'puff',
+    'woodBreak', 'iceShatter', 'stoneBreak', 'rubble', 'helmet', 'pigPopQuiet', 'pigBump', 'ground:0', 'ground:1',
+    'boom:tnt', 'boom:bomb', 'boom:egg', 'bonus',
+  ];
+  for (const b of birds) keys.push(`select:${b}`, `launch:${b}`, `hurt:${b}`);
+  for (const p of pigs) keys.push(`pigHurt:${p}`, `pigPop:${p}`, `pigLaugh:${p}`, `pigGrunt:${p}`);
+  for (const m of ['wood', 'ice', 'stone']) for (const k of [0, 1, 2]) keys.push(`${m}Hit:${k}`);
+  for (const m of ['wood', 'ice', 'stone']) for (const k of [1, 2, 3]) keys.push(`${m}Crack:${k}`);
+  return keys;
+}
